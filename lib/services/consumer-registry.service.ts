@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
-import { Consumer, EachMessagePayload } from 'kafkajs';
+import { Consumer, EachBatchPayload, EachMessagePayload } from 'kafkajs';
 import { KafkaCoreService } from './kafka-core.service';
 import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
@@ -10,20 +10,29 @@ import { PressureManagerService } from './pressure-manager.service';
 import { DlqService } from './dlq.service';
 import {
   ConsumerMetadata,
+  ConsumerOptions,
   ConsumerRetryOptions,
   deserializeMessage,
 } from '../interfaces';
 
-interface RegisteredConsumer {
+interface TopicHandler {
   metadata: ConsumerMetadata;
+  handler: (...args: any[]) => Promise<void>;
+}
+
+interface ConsumerGroup {
+  groupId: string;
   consumer: Consumer;
+  topics: Map<string, TopicHandler>;
+  options: ConsumerOptions; // Use first consumer's options for shared settings
   isRunning: boolean;
+  hasBatchConsumer: boolean;
 }
 
 @Injectable()
 export class ConsumerRegistryService implements OnApplicationShutdown {
   private readonly logger = new Logger(ConsumerRegistryService.name);
-  private registeredConsumers = new Map<string, RegisteredConsumer>();
+  private consumerGroups = new Map<string, ConsumerGroup>();
   private isShuttingDown = false;
 
   constructor(
@@ -35,105 +44,130 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   ) {}
 
   registerConsumers(consumers: ConsumerMetadata[]): void {
+    // Group consumers by groupId
     for (const metadata of consumers) {
       this.registerConsumer(metadata);
     }
   }
 
   private registerConsumer(metadata: ConsumerMetadata): void {
-    const { topic, options } = metadata;
-    const consumerId = `${topic}-${options.groupId || 'default'}`;
+    const { topic, options, target, methodName } = metadata;
+    const groupId = options.groupId || `${topic}-group`;
 
-    const consumer = this.kafkaCore.getKafka().consumer({
-      groupId: options.groupId || `${topic}-group`,
-      sessionTimeout: options.sessionTimeout,
-      heartbeatInterval: options.heartbeatInterval,
-      rebalanceTimeout: options.rebalanceTimeout,
-      maxBytesPerPartition: 1048576,
-      retry: options.retry
-        ? {
-            retries: options.retry.retries,
-            maxRetryTime: options.retry.maxRetryTime,
-            initialRetryTime: options.retry.initialRetryTime,
-            factor: options.retry.factor,
-            multiplier: options.retry.multiplier,
-          }
-        : undefined,
-    });
+    // Get or create consumer group
+    let group = this.consumerGroups.get(groupId);
 
-    this.pressureManager.register(consumerId, consumer, {
-      backPressureThreshold: options.backPressureThreshold || 80,
-      resumeThreshold: 60,
-      maxQueueSize: options.maxQueueSize || 1000,
-      checkIntervalMs: 1000,
-    });
+    if (!group) {
+      const consumer = this.kafkaCore.getKafka().consumer({
+        groupId,
+        sessionTimeout: options.sessionTimeout,
+        heartbeatInterval: options.heartbeatInterval,
+        rebalanceTimeout: options.rebalanceTimeout,
+        maxBytesPerPartition: 1048576,
+        retry: options.retry
+          ? {
+              retries: options.retry.retries,
+              maxRetryTime: options.retry.maxRetryTime,
+              initialRetryTime: options.retry.initialRetryTime,
+              factor: options.retry.factor,
+              multiplier: options.retry.multiplier,
+            }
+          : undefined,
+      });
 
-    this.registeredConsumers.set(consumerId, {
-      metadata,
-      consumer,
-      isRunning: false,
-    });
+      group = {
+        groupId,
+        consumer,
+        topics: new Map(),
+        options,
+        isRunning: false,
+        hasBatchConsumer: false,
+      };
 
-    this.logger.log(`Registered consumer: ${consumerId}`);
+      this.consumerGroups.set(groupId, group);
+
+      this.pressureManager.register(groupId, consumer, {
+        backPressureThreshold: options.backPressureThreshold || 80,
+        resumeThreshold: 60,
+        maxQueueSize: options.maxQueueSize || 1000,
+        checkIntervalMs: 1000,
+      });
+
+      this.logger.log(`Created consumer group: ${groupId}`);
+    }
+
+    // Check if mixing batch and non-batch consumers in same group
+    if (options.batch) {
+      group.hasBatchConsumer = true;
+    }
+
+    // Add topic handler to the group
+    const handler = target[methodName].bind(target);
+    group.topics.set(topic, { metadata, handler });
+
+    this.logger.log(`Registered topic "${topic}" in group "${groupId}"`);
   }
 
   private buildRestartOnFailure(
     retry?: ConsumerRetryOptions,
   ): ((error: Error) => Promise<boolean>) | undefined {
     if (!retry?.restartOnFailure) {
-      return undefined; // Use KafkaJS default (always restart)
+      return undefined;
     }
 
     if (typeof retry.restartOnFailure === 'function') {
       return retry.restartOnFailure;
     }
 
-    // Boolean value
     return () => Promise.resolve(retry.restartOnFailure as boolean);
   }
 
   async startAll(): Promise<void> {
-    const startPromises = Array.from(this.registeredConsumers.values()).map(
-      (registered) => this.startConsumer(registered),
+    const startPromises = Array.from(this.consumerGroups.values()).map(
+      (group) => this.startConsumerGroup(group),
     );
 
     await Promise.all(startPromises);
   }
 
-  private async startConsumer(registered: RegisteredConsumer): Promise<void> {
-    const { metadata, consumer } = registered;
-    const { topic, options } = metadata;
+  private async startConsumerGroup(group: ConsumerGroup): Promise<void> {
+    const { groupId, consumer, topics } = group;
 
     try {
       await consumer.connect();
 
-      await consumer.subscribe({
-        topic,
-        fromBeginning: options.fromBeginning,
-      });
-
-      if (options.batch) {
-        await this.startBatchConsumer(registered);
-      } else {
-        await this.startMessageConsumer(registered);
+      // Subscribe to all topics in this group
+      const topicList = Array.from(topics.keys());
+      for (const topic of topicList) {
+        const topicHandler = topics.get(topic)!;
+        await consumer.subscribe({
+          topic,
+          fromBeginning: topicHandler.metadata.options.fromBeginning,
+        });
       }
 
-      registered.isRunning = true;
-      this.logger.log(`Started consumer for topic: ${topic}`);
+      this.logger.log(
+        `Consumer group "${groupId}" subscribed to topics: ${topicList.join(', ')}`,
+      );
+
+      // Determine if we should use batch or message processing
+      // If any consumer in the group uses batch, we need special handling
+      if (group.hasBatchConsumer) {
+        await this.startBatchGroupConsumer(group);
+      } else {
+        await this.startMessageGroupConsumer(group);
+      }
+
+      group.isRunning = true;
+      this.logger.log(`Started consumer group: ${groupId}`);
     } catch (error) {
-      this.logger.error(`Failed to start consumer for topic: ${topic}`, error);
+      this.logger.error(`Failed to start consumer group: ${groupId}`, error);
       throw error;
     }
   }
 
-  private async startMessageConsumer(
-    registered: RegisteredConsumer,
-  ): Promise<void> {
-    const { metadata, consumer } = registered;
-
-    const { topic, options, target, methodName } = metadata;
-
-    const handler = target[methodName].bind(target);
+  private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
+    const { consumer, topics, options } = group;
     const restartOnFailure = this.buildRestartOnFailure(options.retry);
 
     await consumer.run({
@@ -145,30 +179,42 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       eachMessage: async (payload: EachMessagePayload) => {
         if (this.isShuttingDown) return;
 
-        const { message, partition } = payload;
+        const { topic, message, partition } = payload;
 
-        if (options.idempotencyKey) {
+        // Find the handler for this topic
+        const topicHandler = topics.get(topic);
+        if (!topicHandler) {
+          this.logger.warn(`No handler found for topic: ${topic}`);
+          return;
+        }
+
+        const { metadata, handler } = topicHandler;
+        const topicOptions = metadata.options;
+
+        if (topicOptions.idempotencyKey) {
           if (
-            this.idempotencyService.isProcessed(message, options.idempotencyKey)
+            this.idempotencyService.isProcessed(
+              message,
+              topicOptions.idempotencyKey,
+            )
           ) {
-            this.logger.debug('Skipping duplicate message');
+            this.logger.debug(`Skipping duplicate message from ${topic}`);
             return;
           }
         }
 
         try {
-          // Auto-deserialize message if enabled (default: true)
           const processedMessage =
-            options.deserialize !== false
+            topicOptions.deserialize !== false
               ? deserializeMessage(message, topic, partition)
               : message;
 
           await handler(processedMessage);
 
-          if (options.idempotencyKey) {
+          if (topicOptions.idempotencyKey) {
             this.idempotencyService.markProcessed(
               message,
-              options.idempotencyKey,
+              topicOptions.idempotencyKey,
             );
           }
 
@@ -180,60 +226,142 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     });
   }
 
-  private async startBatchConsumer(
-    registered: RegisteredConsumer,
-  ): Promise<void> {
-    const { metadata, consumer } = registered;
-
-    const { options, target, methodName } = metadata;
-
-    const handler = target[methodName].bind(target);
+  private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
+    const { consumer, topics, options } = group;
     const restartOnFailure = this.buildRestartOnFailure(options.retry);
-
-    const eachBatchHandler = this.batchProcessor.createEachBatchHandler(
-      options,
-      async (messages, topic, partition) => {
-        if (this.isShuttingDown) return;
-
-        let processableMessages = messages;
-        if (options.idempotencyKey) {
-          processableMessages = this.idempotencyService.filterDuplicates(
-            messages,
-            options.idempotencyKey,
-          );
-        }
-
-        // Auto-deserialize messages if enabled (default: true)
-        const deserializedMessages =
-          options.deserialize !== false
-            ? processableMessages.map((msg) =>
-                deserializeMessage(msg, topic, partition),
-              )
-            : processableMessages;
-
-        if (options.groupByKey) {
-          const grouped =
-            this.batchProcessor.groupMessagesByKey(deserializedMessages);
-
-          await handler(grouped);
-        } else {
-          await handler(deserializedMessages);
-        }
-
-        if (options.idempotencyKey) {
-          for (const msg of processableMessages) {
-            this.idempotencyService.markProcessed(msg, options.idempotencyKey);
-          }
-        }
-      },
-    );
 
     await consumer.run({
       autoCommit: false,
       partitionsConsumedConcurrently: options.partitionsConsumedConcurrently,
       ...(restartOnFailure && { restartOnFailure }),
-      eachBatch: eachBatchHandler,
+      eachBatch: async (payload: EachBatchPayload) => {
+        if (this.isShuttingDown) return;
+
+        const { batch } = payload;
+        const { topic, partition, messages } = batch;
+
+        // Find the handler for this topic
+        const topicHandler = topics.get(topic);
+        if (!topicHandler) {
+          this.logger.warn(`No handler found for topic: ${topic}`);
+          return;
+        }
+
+        const { metadata, handler } = topicHandler;
+        const topicOptions = metadata.options;
+
+        // Check if this topic uses batch processing
+        if (topicOptions.batch) {
+          // Use batch accumulator
+          const accumulator =
+            this.batchProcessor.createBatchAccumulator(topicOptions);
+
+          accumulator.onFlush(async (batchMessages) => {
+            await this.processBatchMessages(
+              batchMessages,
+              topic,
+              partition,
+              topicOptions,
+              handler,
+            );
+          });
+
+          for (const message of messages) {
+            if (!payload.isRunning() || payload.isStale()) break;
+
+            await accumulator.add(message);
+            payload.resolveOffset(message.offset);
+            await payload.heartbeat();
+          }
+
+          await accumulator.flush();
+        } else {
+          // Process messages one by one (non-batch consumer in a batch group)
+          for (const message of messages) {
+            if (!payload.isRunning() || payload.isStale()) break;
+
+            if (topicOptions.idempotencyKey) {
+              if (
+                this.idempotencyService.isProcessed(
+                  message,
+                  topicOptions.idempotencyKey,
+                )
+              ) {
+                payload.resolveOffset(message.offset);
+                await payload.heartbeat();
+                continue;
+              }
+            }
+
+            try {
+              const processedMessage =
+                topicOptions.deserialize !== false
+                  ? deserializeMessage(message, topic, partition)
+                  : message;
+
+              await handler(processedMessage);
+
+              if (topicOptions.idempotencyKey) {
+                this.idempotencyService.markProcessed(
+                  message,
+                  topicOptions.idempotencyKey,
+                );
+              }
+
+              this.dlqService.clearRetryState(message, topic, partition);
+            } catch (error) {
+              await this.handleError(
+                message,
+                error as Error,
+                metadata,
+                partition,
+              );
+            }
+
+            payload.resolveOffset(message.offset);
+            await payload.heartbeat();
+          }
+        }
+      },
     });
+  }
+
+  private async processBatchMessages(
+    messages: any[],
+    topic: string,
+    partition: number,
+    options: ConsumerOptions,
+    handler: (...args: any[]) => Promise<void>,
+  ): Promise<void> {
+    let processableMessages = messages;
+
+    if (options.idempotencyKey) {
+      processableMessages = this.idempotencyService.filterDuplicates(
+        messages,
+        options.idempotencyKey,
+      );
+    }
+
+    const deserializedMessages =
+      options.deserialize !== false
+        ? processableMessages.map((msg) =>
+            deserializeMessage(msg, topic, partition),
+          )
+        : processableMessages;
+
+    if (options.groupByKey) {
+      const grouped =
+        this.batchProcessor.groupMessagesByKey(deserializedMessages);
+      await handler(grouped);
+    } else {
+      await handler(deserializedMessages);
+    }
+
+    if (options.idempotencyKey) {
+      for (const msg of processableMessages) {
+        this.idempotencyService.markProcessed(msg, options.idempotencyKey);
+      }
+    }
   }
 
   private async handleError(
@@ -267,22 +395,25 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     this.isShuttingDown = true;
     this.logger.log('Starting graceful shutdown of consumers...');
 
-    const shutdownPromises = Array.from(this.registeredConsumers.values()).map(
-      async (registered) => {
+    const shutdownPromises = Array.from(this.consumerGroups.values()).map(
+      async (group) => {
         try {
-          if (registered.isRunning) {
-            await registered.consumer.stop();
-            await registered.consumer.disconnect();
+          if (group.isRunning) {
+            await group.consumer.stop();
+            await group.consumer.disconnect();
           }
         } catch (error) {
-          this.logger.error('Error during consumer shutdown', error);
+          this.logger.error(
+            `Error during consumer group shutdown: ${group.groupId}`,
+            error,
+          );
         }
       },
     );
 
     await Promise.all(shutdownPromises);
     this.idempotencyService.stopCleanup();
-    this.logger.log('All consumers shut down gracefully');
+    this.logger.log('All consumer groups shut down gracefully');
   }
 
   async onApplicationShutdown(): Promise<void> {
