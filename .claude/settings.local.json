@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.nestjs.com)",
+      "WebFetch(domain:kafka.js.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:nestjs.github.io)"
+    ]
+  }
+}
