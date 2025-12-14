@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
@@ -9,7 +8,11 @@ import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
 import { PressureManagerService } from './pressure-manager.service';
 import { DlqService } from './dlq.service';
-import { ConsumerMetadata, deserializeMessage } from '../interfaces';
+import {
+  ConsumerMetadata,
+  ConsumerRetryOptions,
+  deserializeMessage,
+} from '../interfaces';
 
 interface RegisteredConsumer {
   metadata: ConsumerMetadata;
@@ -47,6 +50,15 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       heartbeatInterval: options.heartbeatInterval,
       rebalanceTimeout: options.rebalanceTimeout,
       maxBytesPerPartition: 1048576,
+      retry: options.retry
+        ? {
+            retries: options.retry.retries,
+            maxRetryTime: options.retry.maxRetryTime,
+            initialRetryTime: options.retry.initialRetryTime,
+            factor: options.retry.factor,
+            multiplier: options.retry.multiplier,
+          }
+        : undefined,
     });
 
     this.pressureManager.register(consumerId, consumer, {
@@ -63,6 +75,21 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     });
 
     this.logger.log(`Registered consumer: ${consumerId}`);
+  }
+
+  private buildRestartOnFailure(
+    retry?: ConsumerRetryOptions,
+  ): ((error: Error) => Promise<boolean>) | undefined {
+    if (!retry?.restartOnFailure) {
+      return undefined; // Use KafkaJS default (always restart)
+    }
+
+    if (typeof retry.restartOnFailure === 'function') {
+      return retry.restartOnFailure;
+    }
+
+    // Boolean value
+    return () => Promise.resolve(retry.restartOnFailure as boolean);
   }
 
   async startAll(): Promise<void> {
@@ -107,11 +134,14 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const { topic, options, target, methodName } = metadata;
 
     const handler = target[methodName].bind(target);
+    const restartOnFailure = this.buildRestartOnFailure(options.retry);
 
     await consumer.run({
       autoCommit: options.autoCommit !== false,
       autoCommitInterval: options.autoCommitInterval,
       autoCommitThreshold: options.autoCommitThreshold,
+      partitionsConsumedConcurrently: options.partitionsConsumedConcurrently,
+      ...(restartOnFailure && { restartOnFailure }),
       eachMessage: async (payload: EachMessagePayload) => {
         if (this.isShuttingDown) return;
 
@@ -158,6 +188,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const { options, target, methodName } = metadata;
 
     const handler = target[methodName].bind(target);
+    const restartOnFailure = this.buildRestartOnFailure(options.retry);
 
     const eachBatchHandler = this.batchProcessor.createEachBatchHandler(
       options,
@@ -199,6 +230,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     await consumer.run({
       autoCommit: false,
+      partitionsConsumedConcurrently: options.partitionsConsumedConcurrently,
+      ...(restartOnFailure && { restartOnFailure }),
       eachBatch: eachBatchHandler,
     });
   }

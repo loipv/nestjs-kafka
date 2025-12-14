@@ -253,6 +253,40 @@ async handleBinary(message: KafkaMessage) {
 }
 ```
 
+### Retry & Restart on Failure
+
+Control consumer restart behavior when errors occur:
+
+```typescript
+// Disable restart on failure
+@Consumer('critical-topic', {
+  retry: {
+    restartOnFailure: false,
+  },
+})
+async handleCritical(message: KafkaMessagePayload) {
+  // Consumer will NOT restart if this throws
+}
+
+// Custom restart logic
+@Consumer('orders', {
+  retry: {
+    retries: 10,
+    maxRetryTime: 60000,
+    restartOnFailure: async (error) => {
+      // Don't restart on authentication errors
+      if (error.message.includes('authentication')) {
+        return false;
+      }
+      return true; // Restart for other errors
+    },
+  },
+})
+async handleOrders(message: KafkaMessagePayload) {
+  // Process order
+}
+```
+
 ### All Consumer Options
 
 ```typescript
@@ -295,6 +329,16 @@ interface ConsumerOptions {
   autoCommit?: boolean;           // Default: true
   autoCommitInterval?: number;
   fromBeginning?: boolean;        // Default: false
+
+  // Retry & restart on failure
+  retry?: {
+    retries?: number;             // Default: 5
+    maxRetryTime?: number;        // Default: 30000
+    initialRetryTime?: number;    // Default: 300
+    factor?: number;              // Default: 0.2
+    multiplier?: number;          // Default: 2
+    restartOnFailure?: boolean | ((error: Error) => Promise<boolean>);
+  };
 }
 ```
 

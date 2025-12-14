@@ -9,6 +9,26 @@ export interface DlqOptions {
   includeErrorInfo?: boolean;
 }
 
+export interface ConsumerRetryOptions {
+  /** Maximum number of retries per call. Default: 5 */
+  retries?: number;
+  /** Max wait time for a retry in ms. Default: 30000 */
+  maxRetryTime?: number;
+  /** Initial value used to calculate retry in ms. Default: 300 */
+  initialRetryTime?: number;
+  /** Randomization factor. Default: 0.2 */
+  factor?: number;
+  /** Exponential factor. Default: 2 */
+  multiplier?: number;
+  /**
+   * Control whether to restart consumer on failure.
+   * - true: always restart (default)
+   * - false: never restart
+   * - function: custom logic to decide
+   */
+  restartOnFailure?: boolean | ((error: Error) => Promise<boolean>);
+}
+
 export interface ConsumerOptions {
   topic?: string;
 
@@ -45,6 +65,9 @@ export interface ConsumerOptions {
   autoCommitThreshold?: number;
 
   fromBeginning?: boolean;
+
+  /** Retry options for consumer restart on failure */
+  retry?: ConsumerRetryOptions;
 }
 
 export interface ConsumerMetadata {
