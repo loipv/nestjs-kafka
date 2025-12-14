@@ -70,8 +70,13 @@ export class BatchProcessorService {
     };
   }
 
-  groupMessagesByKey<T>(messages: KafkaMessage[]): GroupedBatch<T>[] {
-    const grouped = new Map<string, KafkaMessage[]>();
+  groupMessagesByKey<T>(
+    messages: Array<KafkaMessage | KafkaMessagePayload<T>>,
+  ): GroupedBatch<T>[] {
+    const grouped = new Map<
+      string,
+      Array<KafkaMessage | KafkaMessagePayload<T>>
+    >();
 
     for (const message of messages) {
       const key = message.key?.toString() || '__null_key__';
@@ -84,7 +89,7 @@ export class BatchProcessorService {
 
     return Array.from(grouped.entries()).map(([key, msgs]) => ({
       key,
-      messages: msgs as unknown as KafkaMessagePayload<T>[],
+      messages: msgs as KafkaMessagePayload<T>[],
     }));
   }
 
@@ -103,15 +108,20 @@ export class BatchProcessorService {
 
   createEachBatchHandler(
     options: ConsumerOptions,
-    handler: (messages: KafkaMessage[]) => Promise<void>,
+    handler: (
+      messages: KafkaMessage[],
+      topic: string,
+      partition: number,
+    ) => Promise<void>,
   ) {
-    const accumulator = this.createBatchAccumulator(options);
-
-    accumulator.onFlush(async (messages) => {
-      await this.processBatch(messages, options, handler);
-    });
-
     const batchHandler = async (payload: EachBatchPayload): Promise<void> => {
+      const { topic, partition } = payload.batch;
+      const accumulator = this.createBatchAccumulator(options);
+
+      accumulator.onFlush(async (messages) => {
+        await handler(messages, topic, partition);
+      });
+
       for (const message of payload.batch.messages) {
         if (!payload.isRunning() || payload.isStale()) break;
 

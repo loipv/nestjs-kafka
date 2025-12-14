@@ -15,6 +15,9 @@ export interface ConsumerOptions {
   /** Skip this consumer when true (default: false) */
   disabled?: boolean;
 
+  /** Auto-deserialize message value (JSON parse or string). Default: true */
+  deserialize?: boolean;
+
   groupId?: string;
   sessionTimeout?: number;
   heartbeatInterval?: number;

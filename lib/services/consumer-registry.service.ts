@@ -1,3 +1,7 @@
+/* eslint-disable @typescript-eslint/no-unsafe-return */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { Consumer, EachMessagePayload } from 'kafkajs';
 import { KafkaCoreService } from './kafka-core.service';
@@ -5,7 +9,7 @@ import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
 import { PressureManagerService } from './pressure-manager.service';
 import { DlqService } from './dlq.service';
-import { ConsumerMetadata } from '../interfaces';
+import { ConsumerMetadata, deserializeMessage } from '../interfaces';
 
 interface RegisteredConsumer {
   metadata: ConsumerMetadata;
@@ -99,9 +103,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     registered: RegisteredConsumer,
   ): Promise<void> {
     const { metadata, consumer } = registered;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+
     const { topic, options, target, methodName } = metadata;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
+
     const handler = target[methodName].bind(target);
 
     await consumer.run({
@@ -123,8 +127,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         }
 
         try {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-          await handler(message);
+          // Auto-deserialize message if enabled (default: true)
+          const processedMessage =
+            options.deserialize !== false
+              ? deserializeMessage(message, topic, partition)
+              : message;
+
+          await handler(processedMessage);
 
           if (options.idempotencyKey) {
             this.idempotencyService.markProcessed(
@@ -145,14 +154,14 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     registered: RegisteredConsumer,
   ): Promise<void> {
     const { metadata, consumer } = registered;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+
     const { options, target, methodName } = metadata;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
+
     const handler = target[methodName].bind(target);
 
     const eachBatchHandler = this.batchProcessor.createEachBatchHandler(
       options,
-      async (messages) => {
+      async (messages, topic, partition) => {
         if (this.isShuttingDown) return;
 
         let processableMessages = messages;
@@ -163,14 +172,21 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           );
         }
 
+        // Auto-deserialize messages if enabled (default: true)
+        const deserializedMessages =
+          options.deserialize !== false
+            ? processableMessages.map((msg) =>
+                deserializeMessage(msg, topic, partition),
+              )
+            : processableMessages;
+
         if (options.groupByKey) {
           const grouped =
-            this.batchProcessor.groupMessagesByKey(processableMessages);
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+            this.batchProcessor.groupMessagesByKey(deserializedMessages);
+
           await handler(grouped);
         } else {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-          await handler(processableMessages);
+          await handler(deserializedMessages);
         }
 
         if (options.idempotencyKey) {

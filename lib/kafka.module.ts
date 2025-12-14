@@ -15,6 +15,7 @@ import { IdempotencyService } from './services/idempotency.service';
 import { PressureManagerService } from './services/pressure-manager.service';
 import { DlqService } from './services/dlq.service';
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
+import { TerminusModule } from '@nestjs/terminus';
 
 @Global()
 @Module({})
@@ -27,7 +28,7 @@ export class KafkaModule {
 
     return {
       module: KafkaModule,
-      imports: [DiscoveryModule],
+      imports: [DiscoveryModule, TerminusModule],
       providers: [
         optionsProvider,
         KafkaCoreService,
@@ -40,7 +41,13 @@ export class KafkaModule {
         DlqService,
         KafkaHealthIndicator,
       ],
-      exports: [KafkaClient, KafkaHealthIndicator, KAFKA_MODULE_OPTIONS],
+      exports: [
+        KafkaClient,
+        KafkaHealthIndicator,
+        ConsumerDiscoveryService,
+        ConsumerRegistryService,
+        KAFKA_MODULE_OPTIONS,
+      ],
     };
   }
 
@@ -62,7 +69,13 @@ export class KafkaModule {
         DlqService,
         KafkaHealthIndicator,
       ],
-      exports: [KafkaClient, KafkaHealthIndicator, KAFKA_MODULE_OPTIONS],
+      exports: [
+        KafkaClient,
+        KafkaHealthIndicator,
+        ConsumerDiscoveryService,
+        ConsumerRegistryService,
+        KAFKA_MODULE_OPTIONS,
+      ],
       global: options.global ?? true,
     };
   }

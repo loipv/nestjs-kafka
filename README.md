@@ -228,12 +228,40 @@ async handleOrder(message: KafkaMessage) {
 
 Use this to temporarily disable a consumer without removing the code.
 
+### Auto-Deserialization
+
+Messages are automatically deserialized by default:
+
+- **JSON**: Parsed automatically if valid JSON
+- **String**: Falls back to UTF-8 string
+- **Key**: Buffer converted to string
+
+```typescript
+// With auto-deserialization (default)
+@Consumer('orders')
+async handleOrder(message: KafkaMessagePayload<Order>) {
+  // message.value is already parsed as Order object
+  // message.key is string (not Buffer)
+  console.log(message.value.orderId);
+}
+
+// Disable auto-deserialization for raw Buffer access
+@Consumer('binary-data', { deserialize: false })
+async handleBinary(message: KafkaMessage) {
+  // message.value is Buffer
+  const raw = message.value.toString('hex');
+}
+```
+
 ### All Consumer Options
 
 ```typescript
 interface ConsumerOptions {
   // Enable/disable consumer
   disabled?: boolean;            // Default: false (skip registration when true)
+
+  // Message deserialization
+  deserialize?: boolean;         // Default: true (auto JSON parse/string)
 
   // Consumer group settings
   groupId?: string;
