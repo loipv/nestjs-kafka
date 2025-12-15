@@ -133,6 +133,108 @@ KafkaModule.forRootAsync({
 });
 ```
 
+### Multi-Connection (Multiple Kafka Clusters)
+
+Connect to multiple Kafka clusters simultaneously:
+
+```typescript
+// Option 1: Multiple forRoot() calls
+@Module({
+  imports: [
+    // Primary cluster (default connection)
+    KafkaModule.forRoot({
+      name: 'default',  // Optional, 'default' is the default
+      clientId: 'my-app',
+      brokers: ['primary-kafka:9092'],
+    }),
+    // Secondary cluster
+    KafkaModule.forRoot({
+      name: 'analytics',
+      clientId: 'my-app-analytics',
+      brokers: ['analytics-kafka:9092'],
+    }),
+    ConsumerModule,
+  ],
+})
+export class AppModule {}
+
+// Option 2: forRootMultiple() for cleaner setup
+@Module({
+  imports: [
+    KafkaModule.forRootMultiple([
+      {
+        name: 'default',
+        clientId: 'my-app',
+        brokers: ['primary-kafka:9092'],
+      },
+      {
+        name: 'analytics',
+        clientId: 'my-app-analytics',
+        brokers: ['analytics-kafka:9092'],
+      },
+    ]),
+    ConsumerModule,
+  ],
+})
+export class AppModule {}
+```
+
+**Using named connections in Consumer:**
+
+```typescript
+@Injectable()
+export class EventConsumer {
+  // Default connection
+  @Consumer('orders')
+  async handleOrders(message: KafkaMessagePayload) {
+    // Uses 'default' connection
+  }
+
+  // Specific connection
+  @Consumer('analytics-events', { connection: 'analytics' })
+  async handleAnalytics(message: KafkaMessagePayload) {
+    // Uses 'analytics' connection
+  }
+}
+```
+
+**Using named connections in Producer:**
+
+```typescript
+@Injectable()
+export class EventService {
+  constructor(
+    // Method 1: Use @InjectKafkaClient decorator
+    @InjectKafkaClient() private readonly kafka: KafkaClient,
+    @InjectKafkaClient('analytics') private readonly analyticsKafka: ConnectionBoundClient,
+  ) {}
+
+  async sendToDefault() {
+    await this.kafka.send('orders', { value: data });
+  }
+
+  async sendToAnalytics() {
+    await this.analyticsKafka.send('events', { value: data });
+  }
+}
+
+// Method 2: Use forConnection() fluent API
+@Injectable()
+export class AnotherService {
+  constructor(private readonly kafka: KafkaClient) {}
+
+  async sendToAnalytics() {
+    const analyticsClient = this.kafka.forConnection('analytics');
+    await analyticsClient.send('events', { value: data });
+  }
+
+  async sendWithOptions() {
+    // Or specify connection in options
+    await this.kafka.send('orders', { value: data }, { connection: 'analytics' });
+  }
+}
+```
+
 ## Consumer Options
 
 ### Basic Consumer
@@ -291,6 +393,9 @@ async handleOrders(message: KafkaMessagePayload) {
 
 ```typescript
 interface ConsumerOptions {
+  // Multi-connection
+  connection?: string;           // Default: 'default'
+
   // Enable/disable consumer
   disabled?: boolean;            // Default: false (skip registration when true)
 

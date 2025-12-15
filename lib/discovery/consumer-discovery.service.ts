@@ -2,7 +2,7 @@ import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { DiscoveryService, MetadataScanner, Reflector } from '@nestjs/core';
 import { KAFKA_CONSUMER_METADATA } from '../decorators/constants';
 import { ConsumerMethodMetadata } from '../decorators/consumer.decorator';
-import { ConsumerMetadata } from '../interfaces';
+import { ConsumerMetadata, DEFAULT_KAFKA_CONNECTION } from '../interfaces';
 
 @Injectable()
 export class ConsumerDiscoveryService implements OnModuleInit {
@@ -61,11 +61,16 @@ export class ConsumerDiscoveryService implements OnModuleInit {
           continue;
         }
 
+        const connection =
+          metadata.options.connection || DEFAULT_KAFKA_CONNECTION;
+
         const consumerMetadata: ConsumerMetadata = {
           topic: metadata.topic,
+          connection,
           options: {
             ...metadata.options,
             topic: metadata.topic,
+            connection,
           },
           // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           target: instance,
@@ -74,7 +79,7 @@ export class ConsumerDiscoveryService implements OnModuleInit {
 
         this.discoveredConsumers.push(consumerMetadata);
         this.logger.log(
-          `Discovered consumer: ${metatype.name}.${methodName} for topic: ${metadata.topic}`,
+          `Discovered consumer: ${metatype.name}.${methodName} for topic: ${metadata.topic} (connection: ${connection})`,
         );
       }
     }

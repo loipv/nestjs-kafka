@@ -12,6 +12,7 @@ import {
   ConsumerMetadata,
   ConsumerOptions,
   ConsumerRetryOptions,
+  DEFAULT_KAFKA_CONNECTION,
   deserializeMessage,
 } from '../interfaces';
 
@@ -22,6 +23,7 @@ interface TopicHandler {
 
 interface ConsumerGroup {
   groupId: string;
+  connection: string;
   consumer: Consumer;
   topics: Map<string, TopicHandler>;
   options: ConsumerOptions; // Use first consumer's options for shared settings
@@ -51,14 +53,18 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private registerConsumer(metadata: ConsumerMetadata): void {
-    const { topic, options, target, methodName } = metadata;
+    const { topic, connection, options, target, methodName } = metadata;
     const groupId = options.groupId || `${topic}-group`;
+    const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
+
+    // Key includes both connection and groupId to support same groupId on different connections
+    const groupKey = `${connectionName}:${groupId}`;
 
     // Get or create consumer group
-    let group = this.consumerGroups.get(groupId);
+    let group = this.consumerGroups.get(groupKey);
 
     if (!group) {
-      const consumer = this.kafkaCore.getKafka().consumer({
+      const consumer = this.kafkaCore.getKafka(connectionName).consumer({
         groupId,
         sessionTimeout: options.sessionTimeout,
         heartbeatInterval: options.heartbeatInterval,
@@ -77,6 +83,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
       group = {
         groupId,
+        connection: connectionName,
         consumer,
         topics: new Map(),
         options,
@@ -84,16 +91,18 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         hasBatchConsumer: false,
       };
 
-      this.consumerGroups.set(groupId, group);
+      this.consumerGroups.set(groupKey, group);
 
-      this.pressureManager.register(groupId, consumer, {
+      this.pressureManager.register(groupKey, consumer, {
         backPressureThreshold: options.backPressureThreshold || 80,
         resumeThreshold: 60,
         maxQueueSize: options.maxQueueSize || 1000,
         checkIntervalMs: 1000,
       });
 
-      this.logger.log(`Created consumer group: ${groupId}`);
+      this.logger.log(
+        `Created consumer group: ${groupId} (connection: ${connectionName})`,
+      );
     }
 
     // Check if mixing batch and non-batch consumers in same group
@@ -105,7 +114,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const handler = target[methodName].bind(target);
     group.topics.set(topic, { metadata, handler });
 
-    this.logger.log(`Registered topic "${topic}" in group "${groupId}"`);
+    this.logger.log(
+      `Registered topic "${topic}" in group "${groupId}" (connection: ${connectionName})`,
+    );
   }
 
   private buildRestartOnFailure(

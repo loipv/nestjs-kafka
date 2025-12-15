@@ -20,7 +20,11 @@ export interface ProducerConfig {
   maxInFlightRequests?: number;
 }
 
+export const DEFAULT_KAFKA_CONNECTION: string = 'default';
+
 export interface KafkaModuleOptions {
+  /** Connection name for multi-connection support. Default: 'default' */
+  name?: string;
   clientId: string;
   brokers: string[] | (() => string[] | Promise<string[]>);
 
@@ -44,6 +48,8 @@ export interface KafkaModuleAsyncOptions extends Pick<
   ModuleMetadata,
   'imports'
 > {
+  /** Connection name for multi-connection support. Default: 'default' */
+  name?: string;
   useFactory?: (
     ...args: any[]
   ) => Promise<KafkaModuleOptions> | KafkaModuleOptions;
@@ -58,3 +64,18 @@ export interface KafkaOptionsFactory {
 }
 
 export const KAFKA_MODULE_OPTIONS = Symbol('KAFKA_MODULE_OPTIONS');
+
+/** Get the injection token for a specific Kafka connection */
+export function getKafkaOptionsToken(name?: string): string {
+  return `KAFKA_OPTIONS_${name || DEFAULT_KAFKA_CONNECTION}`;
+}
+
+/** Get the injection token for a specific Kafka core service */
+export function getKafkaCoreToken(name?: string): string {
+  return `KAFKA_CORE_${name || DEFAULT_KAFKA_CONNECTION}`;
+}
+
+/** Get the injection token for a specific Kafka client */
+export function getKafkaClientToken(name?: string): string {
+  return `KAFKA_CLIENT_${name || DEFAULT_KAFKA_CONNECTION}`;
+}

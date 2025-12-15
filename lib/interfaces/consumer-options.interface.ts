@@ -32,6 +32,9 @@ export interface ConsumerRetryOptions {
 export interface ConsumerOptions {
   topic?: string;
 
+  /** Connection name for multi-connection support. Default: 'default' */
+  connection?: string;
+
   /** Skip this consumer when true (default: false) */
   disabled?: boolean;
 
@@ -72,6 +75,7 @@ export interface ConsumerOptions {
 
 export interface ConsumerMetadata {
   topic: string;
+  connection: string;
   options: ConsumerOptions;
   target: any;
   methodName: string;

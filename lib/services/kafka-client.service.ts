@@ -1,72 +1,44 @@
+import { Injectable, OnApplicationShutdown, Logger } from '@nestjs/common';
+import { ProducerRecord, Message } from 'kafkajs';
 import {
-  Injectable,
-  OnModuleInit,
-  OnApplicationShutdown,
-  Inject,
-  Logger,
-} from '@nestjs/common';
-import { Producer, ProducerRecord, Message } from 'kafkajs';
-import {
-  KafkaModuleOptions,
-  KAFKA_MODULE_OPTIONS,
   ProducerMessage,
   SendOptions,
+  DEFAULT_KAFKA_CONNECTION,
 } from '../interfaces';
 import { KafkaCoreService } from './kafka-core.service';
 
-@Injectable()
-export class KafkaClient implements OnModuleInit, OnApplicationShutdown {
-  private readonly logger = new Logger(KafkaClient.name);
-  private producer: Producer;
-  private isConnected = false;
+export interface SendOptionsWithConnection extends SendOptions {
+  /** Connection name to use. Default: 'default' */
+  connection?: string;
+}
 
-  private batchBuffer: Map<string, Message[]> = new Map();
-  private batchTimer: NodeJS.Timeout | null = null;
+@Injectable()
+export class KafkaClient implements OnApplicationShutdown {
+  private readonly logger = new Logger(KafkaClient.name);
+
+  private batchBuffers = new Map<string, Map<string, Message[]>>();
+  private batchTimers = new Map<string, NodeJS.Timeout>();
   private readonly defaultBatchSize = 100;
   private readonly defaultBatchTimeout = 100;
 
-  constructor(
-    @Inject(KAFKA_MODULE_OPTIONS) private readonly options: KafkaModuleOptions,
-    private readonly kafkaCore: KafkaCoreService,
-  ) {}
-
-  async onModuleInit(): Promise<void> {
-    this.producer = this.kafkaCore.getKafka().producer(this.options.producer);
-    await this.connect();
-  }
+  constructor(private readonly kafkaCore: KafkaCoreService) {}
 
   async onApplicationShutdown(): Promise<void> {
-    await this.disconnect();
-  }
-
-  async connect(): Promise<void> {
-    if (this.isConnected) return;
-
-    try {
-      await this.producer.connect();
-      this.isConnected = true;
-      this.logger.log('Kafka producer connected');
-    } catch (error) {
-      this.logger.error('Failed to connect Kafka producer', error);
-      throw error;
-    }
-  }
-
-  async disconnect(): Promise<void> {
     await this.flushAllBatches();
-
-    if (this.producer && this.isConnected) {
-      await this.producer.disconnect();
-      this.isConnected = false;
-      this.logger.log('Kafka producer disconnected');
-    }
+    await this.kafkaCore.disconnectAll();
   }
 
+  /**
+   * Send a single message to a topic
+   */
   async send(
     topic: string,
     message: ProducerMessage,
-    options?: SendOptions,
+    options?: SendOptionsWithConnection,
   ): Promise<void> {
+    const connectionName = options?.connection || DEFAULT_KAFKA_CONNECTION;
+    await this.kafkaCore.connectProducer(connectionName);
+
     const kafkaMessage = this.serializeMessage(message);
 
     const record: ProducerRecord = {
@@ -78,19 +50,29 @@ export class KafkaClient implements OnModuleInit, OnApplicationShutdown {
     };
 
     try {
-      await this.producer.send(record);
-      this.logger.debug(`Message sent to topic: ${topic}`);
+      const producer = this.kafkaCore.getProducer(connectionName);
+      await producer.send(record);
+      this.logger.debug(`[${connectionName}] Message sent to topic: ${topic}`);
     } catch (error) {
-      this.logger.error(`Failed to send message to topic: ${topic}`, error);
+      this.logger.error(
+        `[${connectionName}] Failed to send message to topic: ${topic}`,
+        error,
+      );
       throw error;
     }
   }
 
+  /**
+   * Send a batch of messages to a single topic
+   */
   async sendBatch(
     topic: string,
     messages: ProducerMessage[],
-    options?: SendOptions,
+    options?: SendOptionsWithConnection,
   ): Promise<void> {
+    const connectionName = options?.connection || DEFAULT_KAFKA_CONNECTION;
+    await this.kafkaCore.connectProducer(connectionName);
+
     const kafkaMessages = messages.map((msg) => this.serializeMessage(msg));
 
     const record: ProducerRecord = {
@@ -102,20 +84,30 @@ export class KafkaClient implements OnModuleInit, OnApplicationShutdown {
     };
 
     try {
-      await this.producer.send(record);
+      const producer = this.kafkaCore.getProducer(connectionName);
+      await producer.send(record);
       this.logger.debug(
-        `Batch of ${messages.length} messages sent to topic: ${topic}`,
+        `[${connectionName}] Batch of ${messages.length} messages sent to topic: ${topic}`,
       );
     } catch (error) {
-      this.logger.error(`Failed to send batch to topic: ${topic}`, error);
+      this.logger.error(
+        `[${connectionName}] Failed to send batch to topic: ${topic}`,
+        error,
+      );
       throw error;
     }
   }
 
+  /**
+   * Send messages to multiple topics in a single batch
+   */
   async sendMultiTopicBatch(
     topicMessages: Array<{ topic: string; messages: ProducerMessage[] }>,
-    options?: SendOptions,
+    options?: SendOptionsWithConnection,
   ): Promise<void> {
+    const connectionName = options?.connection || DEFAULT_KAFKA_CONNECTION;
+    await this.kafkaCore.connectProducer(connectionName);
+
     const batch = {
       topicMessages: topicMessages.map(({ topic, messages }) => ({
         topic,
@@ -127,31 +119,65 @@ export class KafkaClient implements OnModuleInit, OnApplicationShutdown {
     };
 
     try {
-      await this.producer.sendBatch(batch);
+      const producer = this.kafkaCore.getProducer(connectionName);
+      await producer.sendBatch(batch);
       this.logger.debug(
-        `Multi-topic batch sent to ${topicMessages.length} topics`,
+        `[${connectionName}] Multi-topic batch sent to ${topicMessages.length} topics`,
       );
     } catch (error) {
-      this.logger.error('Failed to send multi-topic batch', error);
+      this.logger.error(
+        `[${connectionName}] Failed to send multi-topic batch`,
+        error,
+      );
       throw error;
     }
   }
 
-  async sendQueued(topic: string, message: ProducerMessage): Promise<void> {
+  /**
+   * Queue a message for batched sending
+   */
+  async sendQueued(
+    topic: string,
+    message: ProducerMessage,
+    connection?: string,
+  ): Promise<void> {
+    const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
+    await this.kafkaCore.connectProducer(connectionName);
+
     const kafkaMessage = this.serializeMessage(message);
 
-    if (!this.batchBuffer.has(topic)) {
-      this.batchBuffer.set(topic, []);
+    // Get or create buffer for this connection
+    if (!this.batchBuffers.has(connectionName)) {
+      this.batchBuffers.set(connectionName, new Map());
     }
 
-    this.batchBuffer.get(topic)!.push(kafkaMessage);
+    const connectionBuffer = this.batchBuffers.get(connectionName)!;
+    if (!connectionBuffer.has(topic)) {
+      connectionBuffer.set(topic, []);
+    }
 
-    const buffer = this.batchBuffer.get(topic)!;
+    connectionBuffer.get(topic)!.push(kafkaMessage);
+
+    const buffer = connectionBuffer.get(topic)!;
     if (buffer.length >= this.defaultBatchSize) {
-      await this.flushBatch(topic);
+      await this.flushBatch(connectionName, topic);
     } else {
-      this.scheduleBatchFlush();
+      this.scheduleBatchFlush(connectionName);
     }
+  }
+
+  /**
+   * Get a client for a specific connection (for fluent API)
+   */
+  forConnection(name: string): ConnectionBoundClient {
+    return new ConnectionBoundClient(this, name);
+  }
+
+  /**
+   * Check if a specific connection is healthy
+   */
+  isHealthy(connection?: string): boolean {
+    return this.kafkaCore.hasConnection(connection);
   }
 
   private serializeMessage(message: ProducerMessage): Message {
@@ -174,34 +200,104 @@ export class KafkaClient implements OnModuleInit, OnApplicationShutdown {
     };
   }
 
-  private scheduleBatchFlush(): void {
-    if (this.batchTimer) return;
+  private scheduleBatchFlush(connectionName: string): void {
+    const timerKey = connectionName;
+    if (this.batchTimers.has(timerKey)) return;
 
-    this.batchTimer = setTimeout(() => {
-      void this.flushAllBatches().then(() => {
-        this.batchTimer = null;
+    const timer = setTimeout(() => {
+      void this.flushConnectionBatches(connectionName).then(() => {
+        this.batchTimers.delete(timerKey);
       });
     }, this.defaultBatchTimeout);
+
+    this.batchTimers.set(timerKey, timer);
   }
 
-  private async flushBatch(topic: string): Promise<void> {
-    const messages = this.batchBuffer.get(topic);
+  private async flushBatch(
+    connectionName: string,
+    topic: string,
+  ): Promise<void> {
+    const connectionBuffer = this.batchBuffers.get(connectionName);
+    if (!connectionBuffer) return;
+
+    const messages = connectionBuffer.get(topic);
     if (!messages || messages.length === 0) return;
 
-    this.batchBuffer.set(topic, []);
+    connectionBuffer.set(topic, []);
 
-    await this.producer.send({
+    const producer = this.kafkaCore.getProducer(connectionName);
+    await producer.send({
       topic,
       messages,
     });
   }
 
-  private async flushAllBatches(): Promise<void> {
-    const topics = Array.from(this.batchBuffer.keys());
-    await Promise.all(topics.map((topic) => this.flushBatch(topic)));
+  private async flushConnectionBatches(connectionName: string): Promise<void> {
+    const connectionBuffer = this.batchBuffers.get(connectionName);
+    if (!connectionBuffer) return;
+
+    const topics = Array.from(connectionBuffer.keys());
+    await Promise.all(
+      topics.map((topic) => this.flushBatch(connectionName, topic)),
+    );
   }
 
-  isHealthy(): boolean {
-    return this.isConnected;
+  private async flushAllBatches(): Promise<void> {
+    const connections = Array.from(this.batchBuffers.keys());
+    await Promise.all(
+      connections.map((conn) => this.flushConnectionBatches(conn)),
+    );
+
+    // Clear all timers
+    for (const timer of this.batchTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.batchTimers.clear();
+  }
+}
+
+/**
+ * A client bound to a specific connection for fluent API usage
+ */
+export class ConnectionBoundClient {
+  constructor(
+    private readonly client: KafkaClient,
+    private readonly connection: string,
+  ) {}
+
+  async send(
+    topic: string,
+    message: ProducerMessage,
+    options?: SendOptions,
+  ): Promise<void> {
+    return this.client.send(topic, message, {
+      ...options,
+      connection: this.connection,
+    });
+  }
+
+  async sendBatch(
+    topic: string,
+    messages: ProducerMessage[],
+    options?: SendOptions,
+  ): Promise<void> {
+    return this.client.sendBatch(topic, messages, {
+      ...options,
+      connection: this.connection,
+    });
+  }
+
+  async sendMultiTopicBatch(
+    topicMessages: Array<{ topic: string; messages: ProducerMessage[] }>,
+    options?: SendOptions,
+  ): Promise<void> {
+    return this.client.sendMultiTopicBatch(topicMessages, {
+      ...options,
+      connection: this.connection,
+    });
+  }
+
+  async sendQueued(topic: string, message: ProducerMessage): Promise<void> {
+    return this.client.sendQueued(topic, message, this.connection);
   }
 }
