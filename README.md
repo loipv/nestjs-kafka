@@ -292,6 +292,54 @@ async handlePayment(message: KafkaMessage) {
 }
 ```
 
+### DLQ with Auto-Retry
+
+Automatically consume messages from DLQ and re-publish them to the original topic after a delay:
+
+```typescript
+@Consumer('payments', {
+  dlq: {
+    topic: 'payments-dlq',
+    maxRetries: 3,
+    retry: {
+      enabled: true,           // Enable auto DLQ consumption
+      maxRetries: 5,           // Max retries from DLQ
+      delay: 60000,            // Wait 1 minute before re-publishing
+      backoffMultiplier: 2,    // Exponential backoff
+      finalDlqTopic: 'payments-dlq-final', // Optional: final dead letter
+      fromBeginning: false,    // Start from latest (default)
+      groupId: 'custom-dlq-group', // Optional: custom consumer group
+    },
+  },
+})
+async handlePayment(message: KafkaMessagePayload) {
+  // Process payment...
+}
+```
+
+**DLQ Retry Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable auto DLQ consumption |
+| `maxRetries` | number | `3` | Max retries from DLQ before final dead letter |
+| `delay` | number | `60000` | Delay before re-publishing (ms) |
+| `backoffMultiplier` | number | `2` | Exponential backoff multiplier |
+| `finalDlqTopic` | string | - | Topic for messages that exceed max retries |
+| `fromBeginning` | boolean | `false` | Start consuming from beginning of DLQ |
+| `groupId` | string | `${dlqTopic}-retry-consumer` | Consumer group ID |
+
+**DLQ Retry Flow:**
+1. Message fails in handler → sent to DLQ topic
+2. DLQ retry consumer picks up message
+3. Waits with exponential backoff delay
+4. Re-publishes to original topic
+5. If still fails after max DLQ retries → sent to `finalDlqTopic` or dropped
+
+**Headers added during DLQ retry:**
+- `x-dlq-retry-from-dlq`: Current retry count from DLQ
+- `x-dlq-retry-timestamp`: Timestamp of retry attempt
+
 ### Consumer with Idempotency
 
 ```typescript

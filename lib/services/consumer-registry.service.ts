@@ -8,6 +8,7 @@ import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
 import { PressureManagerService } from './pressure-manager.service';
 import { DlqService } from './dlq.service';
+import { DlqRetryService } from './dlq-retry.service';
 import {
   ConsumerMetadata,
   ConsumerOptions,
@@ -43,7 +44,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     private readonly idempotencyService: IdempotencyService,
     private readonly pressureManager: PressureManagerService,
     private readonly dlqService: DlqService,
-  ) {}
+    private readonly dlqRetryService: DlqRetryService,
+  ) { }
 
   registerConsumers(consumers: ConsumerMetadata[]): void {
     // Group consumers by groupId
@@ -72,12 +74,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         maxBytesPerPartition: 1048576,
         retry: options.retry
           ? {
-              retries: options.retry.retries,
-              maxRetryTime: options.retry.maxRetryTime,
-              initialRetryTime: options.retry.initialRetryTime,
-              factor: options.retry.factor,
-              multiplier: options.retry.multiplier,
-            }
+            retries: options.retry.retries,
+            maxRetryTime: options.retry.maxRetryTime,
+            initialRetryTime: options.retry.initialRetryTime,
+            factor: options.retry.factor,
+            multiplier: options.retry.multiplier,
+          }
           : undefined,
       });
 
@@ -92,6 +94,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       };
 
       this.consumerGroups.set(groupKey, group);
+
+      // Register this groupId with DLQ retry service to prevent collision
+      this.dlqRetryService.registerOriginalGroupId(connectionName, groupId);
 
       this.pressureManager.register(groupKey, consumer, {
         backPressureThreshold: options.backPressureThreshold || 80,
@@ -117,6 +122,18 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     this.logger.log(
       `Registered topic "${topic}" in group "${groupId}" (connection: ${connectionName})`,
     );
+
+    // Register DLQ retry consumer if enabled
+    if (options.dlq?.retry?.enabled) {
+      try {
+        this.dlqRetryService.registerDlqRetryConsumer(metadata);
+      } catch (err) {
+        this.logger.error(
+          `Failed to register DLQ retry consumer for ${topic}`,
+          err,
+        );
+      }
+    }
   }
 
   private buildRestartOnFailure(
@@ -139,6 +156,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     );
 
     await Promise.all(startPromises);
+
+    // Start DLQ retry consumers
+    await this.dlqRetryService.startAll();
   }
 
   private async startConsumerGroup(group: ConsumerGroup): Promise<void> {
@@ -356,8 +376,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const deserializedMessages =
       options.deserialize !== false
         ? processableMessages.map((msg) =>
-            deserializeMessage(msg, topic, partition),
-          )
+          deserializeMessage(msg, topic, partition),
+        )
         : processableMessages;
 
     if (options.groupByKey) {
@@ -381,7 +401,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     metadata: ConsumerMetadata,
     partition?: number,
   ): Promise<void> {
-    const { topic, options } = metadata;
+    const { topic, options, connection } = metadata;
 
     this.logger.error(`Error processing message from ${topic}`, error);
 
@@ -392,6 +412,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         options.dlq,
         topic,
         partition,
+        connection,
       );
 
       if (shouldRetry) {
@@ -424,6 +445,10 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     await Promise.all(shutdownPromises);
     this.idempotencyService.stopCleanup();
+
+    // Shutdown DLQ retry consumers
+    await this.dlqRetryService.gracefulShutdown();
+
     this.logger.log('All consumer groups shut down gracefully');
   }
 

@@ -16,7 +16,7 @@ export class DlqService {
   constructor(
     @Inject(forwardRef(() => KafkaClient))
     private readonly kafkaClient: KafkaClient,
-  ) {}
+  ) { }
 
   async handleFailure(
     message: KafkaMessage,
@@ -24,6 +24,7 @@ export class DlqService {
     options: DlqOptions,
     originalTopic: string,
     partition?: number,
+    connection?: string,
   ): Promise<boolean> {
     const messageKey = this.getMessageKey(message, originalTopic, partition);
     let state = this.retryStates.get(messageKey);
@@ -57,6 +58,7 @@ export class DlqService {
       options,
       originalTopic,
       state.retryCount,
+      connection,
     );
     this.retryStates.delete(messageKey);
 
@@ -69,6 +71,7 @@ export class DlqService {
     options: DlqOptions,
     originalTopic: string,
     retryCount: number,
+    connection?: string,
   ): Promise<void> {
     const headers: IHeaders = {};
 
@@ -86,11 +89,15 @@ export class DlqService {
     }
 
     try {
-      await this.kafkaClient.send(options.topic, {
-        key: message.key,
-        value: message.value,
-        headers,
-      });
+      await this.kafkaClient.send(
+        options.topic,
+        {
+          key: message.key,
+          value: message.value,
+          headers,
+        },
+        connection ? { connection } : undefined,
+      );
 
       this.logger.warn(
         `Message sent to DLQ: ${options.topic} after ${retryCount} retries`,

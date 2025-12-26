@@ -5,3 +5,4 @@ export * from './batch-processor.service';
 export * from './idempotency.service';
 export * from './pressure-manager.service';
 export * from './dlq.service';
+export * from './dlq-retry.service';

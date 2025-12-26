@@ -1,5 +1,26 @@
 import { KafkaMessage } from 'kafkajs';
 
+/**
+ * Options for DLQ retry consumer that automatically consumes from DLQ
+ * and re-publishes messages to the original topic
+ */
+export interface DlqRetryOptions {
+  /** Enable DLQ retry consumer. Default: false */
+  enabled?: boolean;
+  /** Max retries from DLQ before sending to final dead letter. Default: 3 */
+  maxRetries?: number;
+  /** Delay before re-publishing from DLQ in ms. Default: 60000 (1 minute) */
+  delay?: number;
+  /** Backoff multiplier for DLQ retry delay. Default: 2 */
+  backoffMultiplier?: number;
+  /** Final dead letter topic. If not set, messages are dropped after max retries */
+  finalDlqTopic?: string;
+  /** GroupId for DLQ consumer. Default: ${dlqTopic}-retry-consumer */
+  groupId?: string;
+  /** Start consuming from beginning of DLQ topic. Default: false */
+  fromBeginning?: boolean;
+}
+
 export interface DlqOptions {
   topic: string;
   maxRetries?: number;
@@ -7,6 +28,8 @@ export interface DlqOptions {
   retryBackoffMultiplier?: number;
   includeOriginalHeaders?: boolean;
   includeErrorInfo?: boolean;
+  /** Enable auto-consume from DLQ and re-publish to original topic */
+  retry?: DlqRetryOptions;
 }
 
 export interface ConsumerRetryOptions {

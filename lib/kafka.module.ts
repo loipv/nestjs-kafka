@@ -28,6 +28,7 @@ import { BatchProcessorService } from './services/batch-processor.service';
 import { IdempotencyService } from './services/idempotency.service';
 import { PressureManagerService } from './services/pressure-manager.service';
 import { DlqService } from './services/dlq.service';
+import { DlqRetryService } from './services/dlq-retry.service';
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
 import { TerminusModule } from '@nestjs/terminus';
 
@@ -44,7 +45,7 @@ export class KafkaModule implements OnModuleInit {
     @Optional()
     @Inject(KAFKA_CONNECTION_NAMES)
     private readonly connectionNames?: string[],
-  ) {}
+  ) { }
 
   onModuleInit(): void {
     // Connection registration is handled by the factory providers
@@ -102,6 +103,7 @@ export class KafkaModule implements OnModuleInit {
         IdempotencyService,
         PressureManagerService,
         DlqService,
+        DlqRetryService,
         KafkaHealthIndicator,
       );
     }
@@ -192,6 +194,7 @@ export class KafkaModule implements OnModuleInit {
       IdempotencyService,
       PressureManagerService,
       DlqService,
+      DlqRetryService,
       KafkaHealthIndicator,
     );
 
@@ -259,6 +262,7 @@ export class KafkaModule implements OnModuleInit {
         IdempotencyService,
         PressureManagerService,
         DlqService,
+        DlqRetryService,
         KafkaHealthIndicator,
       );
     }
