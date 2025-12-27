@@ -89,11 +89,19 @@ export class DlqService {
     }
 
     try {
+      // Convert Buffer value to string to maintain same format as original topic
+      const messageValue = message.value
+        ? message.value.toString('utf-8')
+        : null;
+      const messageKey = message.key
+        ? (Buffer.isBuffer(message.key) ? message.key.toString('utf-8') : message.key)
+        : null;
+
       await this.kafkaClient.send(
         options.topic,
         {
-          key: message.key,
-          value: message.value,
+          key: messageKey,
+          value: messageValue,
           headers,
         },
         connection ? { connection } : undefined,

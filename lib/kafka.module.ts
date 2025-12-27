@@ -7,7 +7,6 @@ import {
   Inject,
   Optional,
 } from '@nestjs/common';
-import { DiscoveryModule } from '@nestjs/core';
 import {
   KafkaModuleOptions,
   KafkaModuleAsyncOptions,
@@ -22,7 +21,6 @@ import {
   KafkaClient,
   ConnectionBoundClient,
 } from './services/kafka-client.service';
-import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service';
 import { ConsumerRegistryService } from './services/consumer-registry.service';
 import { BatchProcessorService } from './services/batch-processor.service';
 import { IdempotencyService } from './services/idempotency.service';
@@ -30,16 +28,27 @@ import { PressureManagerService } from './services/pressure-manager.service';
 import { DlqService } from './services/dlq.service';
 import { DlqRetryService } from './services/dlq-retry.service';
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
-import { TerminusModule } from '@nestjs/terminus';
 
 // Store registered connection names for tracking
 const KAFKA_CONNECTION_NAMES = Symbol('KAFKA_CONNECTION_NAMES');
 
+// Core providers that should be singleton across the app
+// KafkaHealthIndicator is included but requires TerminusModule to be imported by the user
+const CORE_PROVIDERS: Provider[] = [
+  KafkaCoreService,
+  KafkaClient,
+  ConsumerRegistryService,
+  BatchProcessorService,
+  IdempotencyService,
+  PressureManagerService,
+  DlqService,
+  DlqRetryService,
+  KafkaHealthIndicator,
+];
+
 @Global()
 @Module({})
 export class KafkaModule implements OnModuleInit {
-  private static isFirstModule = true;
-
   constructor(
     private readonly kafkaCore: KafkaCoreService,
     @Optional()
@@ -60,6 +69,10 @@ export class KafkaModule implements OnModuleInit {
     const clientToken = getKafkaClientToken(connectionName);
 
     const providers: Provider[] = [
+      {
+        provide: KAFKA_MODULE_OPTIONS,
+        useValue: options,
+      },
       {
         provide: optionsToken,
         useValue: options,
@@ -85,32 +98,11 @@ export class KafkaModule implements OnModuleInit {
         },
         inject: [KafkaClient],
       },
+      ...CORE_PROVIDERS,
     ];
-
-    // Add core providers only on first module
-    if (this.isFirstModule) {
-      this.isFirstModule = false;
-      providers.push(
-        {
-          provide: KAFKA_MODULE_OPTIONS,
-          useValue: options,
-        },
-        KafkaCoreService,
-        KafkaClient,
-        ConsumerDiscoveryService,
-        ConsumerRegistryService,
-        BatchProcessorService,
-        IdempotencyService,
-        PressureManagerService,
-        DlqService,
-        DlqRetryService,
-        KafkaHealthIndicator,
-      );
-    }
 
     return {
       module: KafkaModule,
-      imports: [DiscoveryModule, TerminusModule],
       providers,
       exports: [
         optionsToken,
@@ -118,7 +110,6 @@ export class KafkaModule implements OnModuleInit {
         KafkaCoreService,
         KafkaClient,
         KafkaHealthIndicator,
-        ConsumerDiscoveryService,
         ConsumerRegistryService,
       ],
     };
@@ -133,7 +124,6 @@ export class KafkaModule implements OnModuleInit {
       KafkaCoreService,
       KafkaClient,
       KafkaHealthIndicator,
-      ConsumerDiscoveryService,
       ConsumerRegistryService,
     ];
 
@@ -186,23 +176,11 @@ export class KafkaModule implements OnModuleInit {
         provide: KAFKA_CONNECTION_NAMES,
         useValue: optionsArray.map((o) => o.name || DEFAULT_KAFKA_CONNECTION),
       },
-      KafkaCoreService,
-      KafkaClient,
-      ConsumerDiscoveryService,
-      ConsumerRegistryService,
-      BatchProcessorService,
-      IdempotencyService,
-      PressureManagerService,
-      DlqService,
-      DlqRetryService,
-      KafkaHealthIndicator,
+      ...CORE_PROVIDERS,
     );
-
-    this.isFirstModule = false;
 
     return {
       module: KafkaModule,
-      imports: [DiscoveryModule, TerminusModule],
       providers,
       exports,
       global: true,
@@ -248,28 +226,12 @@ export class KafkaModule implements OnModuleInit {
         },
         inject: [KafkaClient],
       },
+      ...CORE_PROVIDERS,
     ];
-
-    // Add core providers only on first module
-    if (this.isFirstModule) {
-      this.isFirstModule = false;
-      providers.push(
-        KafkaCoreService,
-        KafkaClient,
-        ConsumerDiscoveryService,
-        ConsumerRegistryService,
-        BatchProcessorService,
-        IdempotencyService,
-        PressureManagerService,
-        DlqService,
-        DlqRetryService,
-        KafkaHealthIndicator,
-      );
-    }
 
     return {
       module: KafkaModule,
-      imports: [...(options.imports || []), DiscoveryModule, TerminusModule],
+      imports: [...(options.imports || [])],
       providers,
       exports: [
         optionsToken,
@@ -277,7 +239,6 @@ export class KafkaModule implements OnModuleInit {
         KafkaCoreService,
         KafkaClient,
         KafkaHealthIndicator,
-        ConsumerDiscoveryService,
         ConsumerRegistryService,
       ],
       global: options.global ?? true,

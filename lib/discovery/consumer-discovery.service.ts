@@ -1,68 +1,76 @@
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
-import { DiscoveryService, MetadataScanner, Reflector } from '@nestjs/core';
+import { Injectable, Logger } from '@nestjs/common';
 import { KAFKA_CONSUMER_METADATA } from '../decorators/constants';
 import { ConsumerMethodMetadata } from '../decorators/consumer.decorator';
 import { ConsumerMetadata, DEFAULT_KAFKA_CONNECTION } from '../interfaces';
 
 @Injectable()
-export class ConsumerDiscoveryService implements OnModuleInit {
+export class ConsumerDiscoveryService {
   private readonly logger = new Logger(ConsumerDiscoveryService.name);
   private discoveredConsumers: ConsumerMetadata[] = [];
 
-  constructor(
-    private readonly discoveryService: DiscoveryService,
-    private readonly reflector: Reflector,
-    private readonly metadataScanner: MetadataScanner,
-  ) {}
+  /**
+   * Manually register a consumer handler.
+   * Use this when auto-discovery doesn't work.
+   */
+  registerHandler(
+    target: any,
+    methodName: string,
+    topic: string,
+    options: Partial<ConsumerMetadata['options']> = {},
+  ): void {
+    const connection = options.connection || DEFAULT_KAFKA_CONNECTION;
 
-  onModuleInit(): void {
-    this.discoverConsumers();
+    const consumerMetadata: ConsumerMetadata = {
+      topic,
+      connection,
+      options: {
+        ...options,
+        topic,
+        connection,
+      } as ConsumerMetadata['options'],
+      target,
+      methodName,
+    };
+
+    this.discoveredConsumers.push(consumerMetadata);
+    this.logger.log(
+      `Registered consumer handler: ${target.constructor?.name || 'Unknown'}.${methodName} for topic: ${topic}`,
+    );
   }
 
-  discoverConsumers(): ConsumerMetadata[] {
-    if (this.discoveredConsumers.length > 0) {
-      return this.discoveredConsumers;
-    }
+  /**
+   * Discover consumers from an array of provider instances.
+   * Call this with your consumer service instances.
+   */
+  discoverFromProviders(providers: any[]): ConsumerMetadata[] {
+    for (const instance of providers) {
+      if (!instance) continue;
 
-    const providers = this.discoveryService.getProviders();
-
-    for (const wrapper of providers) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const { instance, metatype } = wrapper;
-
-      if (!instance || !metatype) {
-        continue;
-      }
-
-      const prototype = Object.getPrototypeOf(instance) as object;
-      const methodNames = this.metadataScanner.getAllMethodNames(prototype);
+      const prototype = Object.getPrototypeOf(instance);
+      const methodNames = Object.getOwnPropertyNames(prototype).filter(
+        (name) => name !== 'constructor' && typeof prototype[name] === 'function',
+      );
 
       for (const methodName of methodNames) {
-        const methodRef = prototype[methodName as keyof typeof prototype];
+        const methodRef = prototype[methodName];
 
-        if (typeof methodRef !== 'function') {
-          continue;
-        }
-
-        const metadata = this.reflector.get<ConsumerMethodMetadata>(
+        // Check for @Consumer decorator metadata
+        const metadata: ConsumerMethodMetadata | undefined = Reflect.getMetadata(
           KAFKA_CONSUMER_METADATA,
           methodRef,
         );
 
-        if (!metadata) {
-          continue;
-        }
+        if (!metadata) continue;
 
         // Skip disabled consumers
         if (metadata.options.disabled) {
           this.logger.log(
-            `Skipping disabled consumer: ${metatype.name}.${methodName} for topic: ${metadata.topic}`,
+            `Skipping disabled consumer: ${instance.constructor?.name}.${methodName} for topic: ${metadata.topic}`,
           );
           continue;
         }
 
-        const connection =
-          metadata.options.connection || DEFAULT_KAFKA_CONNECTION;
+        const connection = metadata.options.connection || DEFAULT_KAFKA_CONNECTION;
 
         const consumerMetadata: ConsumerMetadata = {
           topic: metadata.topic,
@@ -72,14 +80,13 @@ export class ConsumerDiscoveryService implements OnModuleInit {
             topic: metadata.topic,
             connection,
           },
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           target: instance,
           methodName,
         };
 
         this.discoveredConsumers.push(consumerMetadata);
         this.logger.log(
-          `Discovered consumer: ${metatype.name}.${methodName} for topic: ${metadata.topic} (connection: ${connection})`,
+          `Discovered consumer: ${instance.constructor?.name}.${methodName} for topic: ${metadata.topic} (connection: ${connection})`,
         );
       }
     }
@@ -89,5 +96,9 @@ export class ConsumerDiscoveryService implements OnModuleInit {
 
   getConsumers(): ConsumerMetadata[] {
     return this.discoveredConsumers;
+  }
+
+  clearConsumers(): void {
+    this.discoveredConsumers = [];
   }
 }

@@ -126,7 +126,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     // Register DLQ retry consumer if enabled
     if (options.dlq?.retry?.enabled) {
       try {
-        this.dlqRetryService.registerDlqRetryConsumer(metadata);
+        this.dlqRetryService.registerDlqRetryConsumer(metadata, handler);
       } catch (err) {
         this.logger.error(
           `Failed to register DLQ retry consumer for ${topic}`,
@@ -169,11 +169,59 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
       // Subscribe to all topics in this group
       const topicList = Array.from(topics.keys());
+
+      // Check if any topic needs auto-creation (including DLQ topics)
+      const topicsToCreate: Set<string> = new Set();
       for (const topic of topicList) {
         const topicHandler = topics.get(topic)!;
+        const opts = topicHandler.metadata.options;
+
+        if (opts.allowAutoTopicCreation) {
+          topicsToCreate.add(topic);
+
+          // Also auto-create DLQ topic if configured
+          if (opts.dlq?.topic) {
+            topicsToCreate.add(opts.dlq.topic);
+          }
+
+          // Also auto-create final DLQ topic if configured
+          if (opts.dlq?.retry?.finalDlqTopic) {
+            topicsToCreate.add(opts.dlq.retry.finalDlqTopic);
+          }
+        }
+      }
+
+      // Auto-create topics if needed
+      if (topicsToCreate.size > 0) {
+        const admin = this.kafkaCore.getKafka(group.connection).admin();
+        try {
+          await admin.connect();
+          const existingTopics = await admin.listTopics();
+          const newTopics = Array.from(topicsToCreate).filter((t) => !existingTopics.includes(t));
+
+          if (newTopics.length > 0) {
+            await admin.createTopics({
+              topics: newTopics.map((topic) => ({
+                topic,
+                numPartitions: 1,
+                replicationFactor: 1,
+              })),
+            });
+            this.logger.log(`Auto-created topics: ${newTopics.join(', ')}`);
+          }
+        } catch (error) {
+          this.logger.warn(`Failed to auto-create topics: ${error}`);
+        } finally {
+          await admin.disconnect();
+        }
+      }
+
+      for (const topic of topicList) {
+        const topicHandler = topics.get(topic)!;
+        const opts = topicHandler.metadata.options;
         await consumer.subscribe({
           topic,
-          fromBeginning: topicHandler.metadata.options.fromBeginning,
+          fromBeginning: opts.fromBeginning,
         });
       }
 

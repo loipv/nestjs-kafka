@@ -33,9 +33,10 @@ npm install @nestjs/common @nestjs/core @nestjs/terminus reflect-metadata rxjs
 ### 1. Import KafkaModule
 
 ```typescript
+// app.module.ts (Root Module)
 import { Module } from '@nestjs/common';
 import { KafkaModule, ConsumerModule } from '@loipv/nestjs-kafka';
-import { OrderConsumer } from './order.consumer';
+import { OrderModule } from './order/order.module';
 
 @Module({
   imports: [
@@ -43,11 +44,26 @@ import { OrderConsumer } from './order.consumer';
       clientId: 'my-app',
       brokers: ['localhost:9092'],
     }),
-    ConsumerModule,
+    ConsumerModule.forRoot(),  // Initialize in root module
+    OrderModule,
   ],
-  providers: [OrderConsumer],
 })
 export class AppModule {}
+```
+
+```typescript
+// order/order.module.ts (Feature Module)
+import { Module } from '@nestjs/common';
+import { ConsumerModule } from '@loipv/nestjs-kafka';
+import { OrderConsumer } from './order.consumer';
+
+@Module({
+  imports: [
+    ConsumerModule.forFeature([OrderConsumer]),  // Register consumers
+  ],
+  providers: [OrderConsumer],  // Must also be in providers
+})
+export class OrderModule {}
 ```
 
 ### 2. Create a Consumer

@@ -1,36 +1,57 @@
-import { Injectable } from '@nestjs/common';
-import {
-  HealthIndicatorService,
-  HealthIndicatorResult,
-} from '@nestjs/terminus';
+import { Injectable, Optional } from '@nestjs/common';
 import { KafkaClient } from '../services/kafka-client.service';
 import { KafkaCoreService } from '../services/kafka-core.service';
+
+// Try to import from terminus, but make it optional
+let HealthIndicatorService: any;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const terminus = require('@nestjs/terminus');
+  HealthIndicatorService = terminus.HealthIndicatorService;
+} catch {
+  HealthIndicatorService = null;
+}
+
+export interface HealthIndicatorResult {
+  [key: string]: {
+    status: string;
+    [key: string]: any;
+  };
+}
 
 @Injectable()
 export class KafkaHealthIndicator {
   constructor(
-    private readonly healthIndicatorService: HealthIndicatorService,
     private readonly kafkaClient: KafkaClient,
     private readonly kafkaCore: KafkaCoreService,
-  ) {}
+    @Optional() private readonly healthIndicatorService?: any,
+  ) { }
 
   isHealthy(key: string): HealthIndicatorResult {
-    const indicator = this.healthIndicatorService.check(key);
     const isHealthy = this.kafkaClient.isHealthy();
 
-    if (isHealthy) {
-      return indicator.up({ connected: true });
+    if (this.healthIndicatorService) {
+      const indicator = this.healthIndicatorService.check(key);
+      if (isHealthy) {
+        return indicator.up({ connected: true });
+      }
+      return indicator.down({
+        connected: false,
+        message: 'Kafka producer is not connected',
+      });
     }
 
-    return indicator.down({
-      connected: false,
-      message: 'Kafka producer is not connected',
-    });
+    // Fallback without terminus
+    return {
+      [key]: {
+        status: isHealthy ? 'up' : 'down',
+        connected: isHealthy,
+        ...(isHealthy ? {} : { message: 'Kafka producer is not connected' }),
+      },
+    };
   }
 
   async checkBrokers(key: string): Promise<HealthIndicatorResult> {
-    const indicator = this.healthIndicatorService.check(key);
-
     try {
       const admin = this.kafkaCore.getKafka().admin();
       await admin.connect();
@@ -38,15 +59,35 @@ export class KafkaHealthIndicator {
       const clusterInfo = await admin.describeCluster();
       await admin.disconnect();
 
-      return indicator.up({
+      const result = {
         brokers: clusterInfo.brokers.length,
         controller: clusterInfo.controller,
         clusterId: clusterInfo.clusterId,
-      });
+      };
+
+      if (this.healthIndicatorService) {
+        return this.healthIndicatorService.check(key).up(result);
+      }
+
+      return {
+        [key]: {
+          status: 'up',
+          ...result,
+        },
+      };
     } catch (error) {
-      return indicator.down({
-        error: (error as Error).message,
-      });
+      const errorResult = { error: (error as Error).message };
+
+      if (this.healthIndicatorService) {
+        return this.healthIndicatorService.check(key).down(errorResult);
+      }
+
+      return {
+        [key]: {
+          status: 'down',
+          ...errorResult,
+        },
+      };
     }
   }
 
@@ -55,8 +96,6 @@ export class KafkaHealthIndicator {
     groupId: string,
     maxLag: number = 1000,
   ): Promise<HealthIndicatorResult> {
-    const indicator = this.healthIndicatorService.check(key);
-
     try {
       const admin = this.kafkaCore.getKafka().admin();
       await admin.connect();
@@ -73,24 +112,32 @@ export class KafkaHealthIndicator {
       }
 
       const isHealthy = totalLag < maxLag;
+      const result = { groupId, lag: totalLag, maxLag };
 
-      if (isHealthy) {
-        return indicator.up({
-          groupId,
-          lag: totalLag,
-          maxLag,
-        });
+      if (this.healthIndicatorService) {
+        const indicator = this.healthIndicatorService.check(key);
+        return isHealthy ? indicator.up(result) : indicator.down(result);
       }
 
-      return indicator.down({
-        groupId,
-        lag: totalLag,
-        maxLag,
-      });
+      return {
+        [key]: {
+          status: isHealthy ? 'up' : 'down',
+          ...result,
+        },
+      };
     } catch (error) {
-      return indicator.down({
-        error: (error as Error).message,
-      });
+      const errorResult = { error: (error as Error).message };
+
+      if (this.healthIndicatorService) {
+        return this.healthIndicatorService.check(key).down(errorResult);
+      }
+
+      return {
+        [key]: {
+          status: 'down',
+          ...errorResult,
+        },
+      };
     }
   }
 }

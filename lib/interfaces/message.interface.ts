@@ -3,7 +3,7 @@ import { IHeaders, KafkaMessage } from 'kafkajs';
 export interface KafkaMessagePayload<T = any> {
   key?: string | null;
   value: T;
-  headers?: IHeaders;
+  headers?: Record<string, string>;
   partition?: number;
   timestamp?: string;
   offset?: string;
@@ -48,6 +48,34 @@ export function deserializeMessageKey(
 }
 
 /**
+ * Deserialize Kafka message headers
+ * - Converts Buffer values to strings
+ */
+export function deserializeHeaders(
+  headers: IHeaders | undefined,
+): Record<string, string> | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (Buffer.isBuffer(value)) {
+      result[key] = value.toString('utf-8');
+    } else if (Array.isArray(value)) {
+      // Handle array of buffers (take first one)
+      result[key] = value[0]?.toString('utf-8') ?? '';
+    } else {
+      result[key] = String(value);
+    }
+  }
+  return result;
+}
+
+/**
  * Transform a raw Kafka message into a deserialized payload
  */
 export function deserializeMessage<T = any>(
@@ -59,7 +87,7 @@ export function deserializeMessage<T = any>(
     key: deserializeMessageKey(message.key),
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     value: deserializeMessageValue(message.value),
-    headers: message.headers,
+    headers: deserializeHeaders(message.headers),
     timestamp: message.timestamp,
     offset: message.offset,
     topic,

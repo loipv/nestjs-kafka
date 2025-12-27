@@ -1,17 +1,16 @@
 import { KafkaMessage } from 'kafkajs';
 
 /**
- * Options for DLQ retry consumer that automatically consumes from DLQ
- * and re-publishes messages to the original topic
+ * Options for DLQ retry - auto consume from DLQ and retry handler
  */
 export interface DlqRetryOptions {
   /** Enable DLQ retry consumer. Default: false */
   enabled?: boolean;
   /** Max retries from DLQ before sending to final dead letter. Default: 3 */
   maxRetries?: number;
-  /** Delay before re-publishing from DLQ in ms. Default: 60000 (1 minute) */
+  /** Delay before retrying in ms. Default: 60000 (1 minute) */
   delay?: number;
-  /** Backoff multiplier for DLQ retry delay. Default: 2 */
+  /** Backoff multiplier for retry delay. Default: 2 */
   backoffMultiplier?: number;
   /** Final dead letter topic. If not set, messages are dropped after max retries */
   finalDlqTopic?: string;
@@ -22,13 +21,19 @@ export interface DlqRetryOptions {
 }
 
 export interface DlqOptions {
+  /** DLQ topic to send failed messages */
   topic: string;
+  /** Max retries before sending to DLQ. Default: 3 */
   maxRetries?: number;
+  /** Delay between retries in ms. Default: 1000 */
   retryDelay?: number;
+  /** Backoff multiplier for retry delay. Default: 2 */
   retryBackoffMultiplier?: number;
+  /** Include original message headers. Default: true */
   includeOriginalHeaders?: boolean;
+  /** Include error info in headers. Default: true */
   includeErrorInfo?: boolean;
-  /** Enable auto-consume from DLQ and re-publish to original topic */
+  /** Enable auto-consume from DLQ and retry handler */
   retry?: DlqRetryOptions;
 }
 
@@ -92,6 +97,9 @@ export interface ConsumerOptions {
 
   fromBeginning?: boolean;
 
+  /** Allow auto creation of topic if it doesn't exist. Default: false */
+  allowAutoTopicCreation?: boolean;
+
   /** Retry options for consumer restart on failure */
   retry?: ConsumerRetryOptions;
 }
@@ -117,5 +125,5 @@ export interface PressureManagerOptions {
   backPressureThreshold: number;
   resumeThreshold: number;
   maxQueueSize: number;
-  checkIntervalMs: number;
+  checkIntervalMs?: number;
 }

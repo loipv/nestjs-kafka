@@ -5,34 +5,37 @@ import {
     Inject,
     OnApplicationShutdown,
 } from '@nestjs/common';
-import { Consumer, EachMessagePayload } from 'kafkajs';
+import { Consumer, EachMessagePayload, KafkaMessage } from 'kafkajs';
 import { KafkaClient } from './kafka-client.service';
 import { KafkaCoreService } from './kafka-core.service';
 import {
     DlqRetryOptions,
     ConsumerMetadata,
+    ConsumerOptions,
     DEFAULT_KAFKA_CONNECTION,
 } from '../interfaces';
+import { deserializeMessage } from '../interfaces/message.interface';
 
 interface DlqTopicHandler {
     dlqTopic: string;
     retryOptions: DlqRetryOptions;
-    originalTopic: string; // Fallback only, header takes precedence
+    originalTopic: string;
+    originalHandler: (message: any) => Promise<void>;
+    originalOptions: ConsumerOptions;
 }
 
 interface DlqConsumerGroup {
     groupId: string;
     connection: string;
     consumer: Consumer;
-    topics: Map<string, DlqTopicHandler>; // dlqTopic -> handler
+    topics: Map<string, DlqTopicHandler>;
     isRunning: boolean;
 }
 
 /**
  * Service that manages DLQ retry consumers.
- * Groups consumers by groupId similar to ConsumerRegistryService.
- * Automatically consumes messages from DLQ topics and re-publishes them
- * to the original topic after a delay.
+ * Automatically consumes messages from DLQ topics, calls the original handler,
+ * and on failure sends back to DLQ (with retry count).
  */
 @Injectable()
 export class DlqRetryService implements OnApplicationShutdown {
@@ -57,9 +60,12 @@ export class DlqRetryService implements OnApplicationShutdown {
     }
 
     /**
-     * Register a DLQ retry consumer for a consumer metadata that has DLQ retry enabled
+     * Register a DLQ retry consumer
      */
-    registerDlqRetryConsumer(metadata: ConsumerMetadata): void {
+    registerDlqRetryConsumer(
+        metadata: ConsumerMetadata,
+        handler: (message: any) => Promise<void>,
+    ): void {
         const { options, topic } = metadata;
         const dlqOptions = options.dlq;
 
@@ -71,26 +77,22 @@ export class DlqRetryService implements OnApplicationShutdown {
         const retryOptions = dlqOptions.retry;
         const connection = options.connection || DEFAULT_KAFKA_CONNECTION;
 
-        // Generate base groupId - use custom or default based on DLQ topic
+        // Generate groupId
         let groupId = retryOptions.groupId || `${dlqTopic}-retry-consumer`;
 
         // Check for collision with original consumer groupIds
-        // If collision detected, append '-dlq' suffix to ensure uniqueness
         const groupKey = `${connection}:${groupId}`;
         if (this.originalConsumerGroupIds.has(groupKey)) {
-            const newGroupId = `${groupId}-dlq`;
             this.logger.warn(
-                `DLQ groupId "${groupId}" collides with original consumer groupId. Using "${newGroupId}" instead.`,
+                `DLQ retry groupId "${groupId}" collides with an original consumer groupId. Appending "-dlq" suffix.`,
             );
-            groupId = newGroupId;
+            groupId = `${groupId}-dlq`;
         }
 
-        // Final key by connection + groupId
-        const finalGroupKey = `${connection}:${groupId}`;
+        const consumerGroupKey = `${connection}:${groupId}`;
 
         // Get or create consumer group
-        let group = this.dlqConsumerGroups.get(finalGroupKey);
-
+        let group = this.dlqConsumerGroups.get(consumerGroupKey);
         if (!group) {
             const kafka = this.kafkaCore.getKafka(connection);
             const consumer = kafka.consumer({ groupId });
@@ -102,30 +104,20 @@ export class DlqRetryService implements OnApplicationShutdown {
                 topics: new Map(),
                 isRunning: false,
             };
-
-            this.dlqConsumerGroups.set(finalGroupKey, group);
-            this.logger.log(
-                `Created DLQ consumer group: ${groupId} (connection: ${connection})`,
-            );
+            this.dlqConsumerGroups.set(consumerGroupKey, group);
         }
 
-        // Check if this DLQ topic is already registered in this group
-        if (group.topics.has(dlqTopic)) {
-            this.logger.warn(
-                `DLQ topic ${dlqTopic} already registered in group ${groupId}, skipping`,
-            );
-            return;
-        }
-
-        // Add topic handler to the group
+        // Register the DLQ topic handler
         group.topics.set(dlqTopic, {
             dlqTopic,
             retryOptions,
-            originalTopic: topic, // Fallback
+            originalTopic: topic,
+            originalHandler: handler,
+            originalOptions: options,
         });
 
         this.logger.log(
-            `Registered DLQ topic "${dlqTopic}" in group "${groupId}" (connection: ${connection})`,
+            `Registered DLQ retry for topic "${dlqTopic}" -> handler (group: ${groupId})`,
         );
     }
 
@@ -136,7 +128,6 @@ export class DlqRetryService implements OnApplicationShutdown {
         const startPromises = Array.from(this.dlqConsumerGroups.values()).map(
             (group) => this.startConsumerGroup(group),
         );
-
         await Promise.all(startPromises);
     }
 
@@ -169,26 +160,18 @@ export class DlqRetryService implements OnApplicationShutdown {
                 eachMessage: async (payload: EachMessagePayload) => {
                     if (this.isShuttingDown) return;
 
-                    const { topic: dlqTopic } = payload;
+                    const { topic: dlqTopic, message, partition } = payload;
 
-                    // Find the handler for this DLQ topic
                     const handler = topics.get(dlqTopic);
                     if (!handler) {
                         this.logger.warn(`No handler found for DLQ topic: ${dlqTopic}`);
                         return;
                     }
 
-                    // Read original topic from message header (set by DlqService)
-                    const headers = payload.message.headers || {};
-                    const originalTopicHeader = headers['x-dlq-original-topic'];
-                    const originalTopic = originalTopicHeader
-                        ? originalTopicHeader.toString()
-                        : handler.originalTopic; // Fallback to registered topic
-
                     await this.handleDlqMessage(
-                        payload,
-                        originalTopic,
-                        handler.retryOptions,
+                        message,
+                        partition,
+                        handler,
                         connection,
                         dlqTopic,
                     );
@@ -207,21 +190,22 @@ export class DlqRetryService implements OnApplicationShutdown {
     }
 
     /**
-     * Handle a message from DLQ - re-publish to original topic after delay
+     * Handle a message from DLQ - call original handler, on failure send back to DLQ
      */
     private async handleDlqMessage(
-        payload: EachMessagePayload,
-        originalTopic: string,
-        retryOptions: DlqRetryOptions,
+        message: KafkaMessage,
+        partition: number,
+        handler: DlqTopicHandler,
         connection: string,
         dlqTopic: string,
     ): Promise<void> {
-        const { message } = payload;
+        const { retryOptions, originalHandler, originalOptions, originalTopic } =
+            handler;
         const headers = message.headers || {};
 
-        // Get current DLQ retry count
-        const dlqRetryCountHeader = headers['x-dlq-retry-from-dlq'];
-        const currentDlqRetryCount = dlqRetryCountHeader
+        // Get current DLQ consumer retry count (separate from original consumer retry count)
+        const dlqRetryCountHeader = headers['x-dlq-consumer-retry-count'];
+        const currentRetryCount = dlqRetryCountHeader
             ? parseInt(dlqRetryCountHeader.toString(), 10)
             : 0;
 
@@ -230,54 +214,76 @@ export class DlqRetryService implements OnApplicationShutdown {
         const backoffMultiplier = retryOptions.backoffMultiplier ?? 2;
 
         // Check if we've exceeded max DLQ retries
-        if (currentDlqRetryCount >= maxRetries) {
+        if (currentRetryCount >= maxRetries) {
             await this.handleMaxRetriesExceeded(
                 message,
                 retryOptions,
                 connection,
                 dlqTopic,
-                currentDlqRetryCount,
+                currentRetryCount,
             );
             return;
         }
 
         // Calculate delay with exponential backoff
-        const delay =
-            baseDelay * Math.pow(backoffMultiplier, currentDlqRetryCount);
+        const delay = baseDelay * Math.pow(backoffMultiplier, currentRetryCount);
 
         this.logger.log(
-            `DLQ retry ${currentDlqRetryCount + 1}/${maxRetries} for message from ${dlqTopic}, waiting ${delay}ms before re-publishing to ${originalTopic}`,
+            `DLQ retry ${currentRetryCount + 1}/${maxRetries} for message from ${dlqTopic}, waiting ${delay}ms`,
         );
 
-        // Wait before re-publishing
+        // Wait before retrying
         await this.sleep(delay);
 
-        // Update headers for tracking
-        const newHeaders = { ...headers };
-        newHeaders['x-dlq-retry-from-dlq'] = String(currentDlqRetryCount + 1);
-        newHeaders['x-dlq-retry-timestamp'] = new Date().toISOString();
-
         try {
-            // Re-publish to original topic
+            // Deserialize message if needed (based on original consumer options)
+            const processedMessage =
+                originalOptions.deserialize !== false
+                    ? deserializeMessage(message, originalTopic, partition)
+                    : message;
+
+            // Call original handler
+            await originalHandler(processedMessage);
+
+            this.logger.log(
+                `DLQ message processed successfully from ${dlqTopic} (retry ${currentRetryCount + 1}/${maxRetries})`,
+            );
+        } catch (error) {
+            this.logger.warn(
+                `DLQ handler failed for ${dlqTopic}, sending back to DLQ (retry ${currentRetryCount + 1}/${maxRetries})`,
+            );
+
+            // Send back to DLQ with incremented retry count
+            const newHeaders: Record<string, string> = {};
+
+            // Copy existing headers
+            for (const [key, value] of Object.entries(headers)) {
+                if (value) {
+                    newHeaders[key] = value.toString();
+                }
+            }
+
+            newHeaders['x-dlq-consumer-retry-count'] = String(currentRetryCount + 1);
+            newHeaders['x-dlq-retry-timestamp'] = new Date().toISOString();
+            newHeaders['x-dlq-retry-error'] = (error as Error).message;
+
+            // Convert Buffer to string to maintain same format
+            const messageValue = message.value
+                ? message.value.toString('utf-8')
+                : null;
+            const messageKey = message.key
+                ? (Buffer.isBuffer(message.key) ? message.key.toString('utf-8') : message.key)
+                : null;
+
             await this.kafkaClient.send(
-                originalTopic,
+                dlqTopic,
                 {
-                    key: message.key,
-                    value: message.value,
+                    key: messageKey,
+                    value: messageValue,
                     headers: newHeaders,
                 },
                 { connection },
             );
-
-            this.logger.log(
-                `Message re-published from ${dlqTopic} to ${originalTopic} (retry ${currentDlqRetryCount + 1}/${maxRetries})`,
-            );
-        } catch (error) {
-            this.logger.error(
-                `Failed to re-publish message from ${dlqTopic} to ${originalTopic}`,
-                error,
-            );
-            throw error;
         }
     }
 
@@ -285,7 +291,7 @@ export class DlqRetryService implements OnApplicationShutdown {
      * Handle message that has exceeded max DLQ retries
      */
     private async handleMaxRetriesExceeded(
-        message: any,
+        message: KafkaMessage,
         retryOptions: DlqRetryOptions,
         connection: string,
         dlqTopic: string,
@@ -294,78 +300,88 @@ export class DlqRetryService implements OnApplicationShutdown {
         const finalDlqTopic = retryOptions.finalDlqTopic;
 
         if (finalDlqTopic) {
-            // Send to final DLQ topic
-            const headers = { ...(message.headers || {}) };
+            const headers: Record<string, string> = {};
+
+            // Copy existing headers
+            const existingHeaders = message.headers || {};
+            for (const [key, value] of Object.entries(existingHeaders)) {
+                if (value) {
+                    headers[key] = value.toString();
+                }
+            }
+
             headers['x-final-dlq-reason'] = 'max-dlq-retries-exceeded';
             headers['x-final-dlq-retry-count'] = String(retryCount);
             headers['x-final-dlq-timestamp'] = new Date().toISOString();
             headers['x-final-dlq-source'] = dlqTopic;
 
             try {
+                // Convert Buffer to string to maintain same format
+                const messageValue = message.value
+                    ? message.value.toString('utf-8')
+                    : null;
+                const messageKey = message.key
+                    ? (Buffer.isBuffer(message.key) ? message.key.toString('utf-8') : message.key)
+                    : null;
+
                 await this.kafkaClient.send(
                     finalDlqTopic,
                     {
-                        key: message.key,
-                        value: message.value,
+                        key: messageKey,
+                        value: messageValue,
                         headers,
                     },
                     { connection },
                 );
 
                 this.logger.warn(
-                    `Message sent to final DLQ ${finalDlqTopic} after ${retryCount} DLQ retries from ${dlqTopic}`,
+                    `Message sent to final DLQ ${finalDlqTopic} after ${retryCount} retries from ${dlqTopic}`,
                 );
             } catch (error) {
                 this.logger.error(
                     `Failed to send message to final DLQ ${finalDlqTopic}`,
                     error,
                 );
-                throw error;
             }
         } else {
-            // No final DLQ configured - drop the message
+            // No finalDlqTopic configured - drop message after max retries
             this.logger.warn(
                 `Message dropped after ${retryCount} DLQ retries from ${dlqTopic} (no finalDlqTopic configured)`,
             );
         }
     }
 
-    /**
-     * Graceful shutdown - stop all DLQ consumer groups
-     */
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     async gracefulShutdown(): Promise<void> {
         this.isShuttingDown = true;
-        this.logger.log('Starting graceful shutdown of DLQ consumers...');
+        this.logger.log('Gracefully shutting down DLQ retry consumers...');
 
         const shutdownPromises = Array.from(this.dlqConsumerGroups.values()).map(
             async (group) => {
-                try {
-                    if (group.isRunning) {
-                        await group.consumer.stop();
+                if (group.isRunning) {
+                    try {
                         await group.consumer.disconnect();
                         group.isRunning = false;
                         this.logger.log(
-                            `DLQ consumer group "${group.groupId}" stopped`,
+                            `DLQ consumer group "${group.groupId}" disconnected`,
+                        );
+                    } catch (error) {
+                        this.logger.error(
+                            `Error disconnecting DLQ consumer group "${group.groupId}"`,
+                            error,
                         );
                     }
-                } catch (error) {
-                    this.logger.error(
-                        `Error stopping DLQ consumer group: ${group.groupId}`,
-                        error,
-                    );
                 }
             },
         );
 
         await Promise.all(shutdownPromises);
-        this.logger.log('All DLQ consumer groups shut down gracefully');
     }
 
     async onApplicationShutdown(): Promise<void> {
         await this.gracefulShutdown();
-    }
-
-    private sleep(ms: number): Promise<void> {
-        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 }
