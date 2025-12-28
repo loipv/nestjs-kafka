@@ -2,31 +2,57 @@ import { Injectable, Optional } from '@nestjs/common';
 import { KafkaClient } from '../services/kafka-client.service';
 import { KafkaCoreService } from '../services/kafka-core.service';
 
-// Try to import from terminus, but make it optional
-let HealthIndicatorService: any;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const terminus = require('@nestjs/terminus');
-  HealthIndicatorService = terminus.HealthIndicatorService;
-} catch {
-  HealthIndicatorService = null;
-}
+// Import types only, service is optional
+import type { HealthIndicatorService, HealthIndicatorResult } from '@nestjs/terminus';
 
-export interface HealthIndicatorResult {
-  [key: string]: {
-    status: string;
-    [key: string]: any;
-  };
-}
-
+/**
+ * Kafka Health Indicator for @nestjs/terminus
+ * 
+ * Note: To use this health indicator, you must import TerminusModule in your application.
+ * If TerminusModule is not imported, the health indicator will use a fallback implementation.
+ *
+ * @example
+ * ```typescript
+ * // app.module.ts
+ * import { TerminusModule } from '@nestjs/terminus';
+ * 
+ * @Module({
+ *   imports: [
+ *     TerminusModule,
+ *     KafkaModule.forRoot({ ... }),
+ *   ],
+ * })
+ * export class AppModule {}
+ * 
+ * // health.controller.ts
+ * @Controller('health')
+ * export class HealthController {
+ *   constructor(
+ *     private health: HealthCheckService,
+ *     private kafkaHealth: KafkaHealthIndicator,
+ *   ) {}
+ *
+ *   @Get()
+ *   @HealthCheck()
+ *   check() {
+ *     return this.health.check([
+ *       () => this.kafkaHealth.isHealthy('kafka'),
+ *     ]);
+ *   }
+ * }
+ * ```
+ */
 @Injectable()
 export class KafkaHealthIndicator {
   constructor(
     private readonly kafkaClient: KafkaClient,
     private readonly kafkaCore: KafkaCoreService,
-    @Optional() private readonly healthIndicatorService?: any,
+    @Optional() private readonly healthIndicatorService?: HealthIndicatorService,
   ) { }
 
+  /**
+   * Check if Kafka producer is healthy (connected)
+   */
   isHealthy(key: string): HealthIndicatorResult {
     const isHealthy = this.kafkaClient.isHealthy();
 
@@ -35,13 +61,10 @@ export class KafkaHealthIndicator {
       if (isHealthy) {
         return indicator.up({ connected: true });
       }
-      return indicator.down({
-        connected: false,
-        message: 'Kafka producer is not connected',
-      });
+      return indicator.down({ connected: false, message: 'Kafka producer is not connected' });
     }
 
-    // Fallback without terminus
+    // Fallback without TerminusModule
     return {
       [key]: {
         status: isHealthy ? 'up' : 'down',
@@ -51,6 +74,9 @@ export class KafkaHealthIndicator {
     };
   }
 
+  /**
+   * Check Kafka brokers connectivity and cluster info
+   */
   async checkBrokers(key: string): Promise<HealthIndicatorResult> {
     try {
       const admin = this.kafkaCore.getKafka().admin();
@@ -59,38 +85,31 @@ export class KafkaHealthIndicator {
       const clusterInfo = await admin.describeCluster();
       await admin.disconnect();
 
-      const result = {
+      const details = {
         brokers: clusterInfo.brokers.length,
         controller: clusterInfo.controller,
         clusterId: clusterInfo.clusterId,
       };
 
       if (this.healthIndicatorService) {
-        return this.healthIndicatorService.check(key).up(result);
+        return this.healthIndicatorService.check(key).up(details);
       }
 
-      return {
-        [key]: {
-          status: 'up',
-          ...result,
-        },
-      };
+      return { [key]: { status: 'up', ...details } };
     } catch (error) {
-      const errorResult = { error: (error as Error).message };
+      const errorDetails = { error: (error as Error).message };
 
       if (this.healthIndicatorService) {
-        return this.healthIndicatorService.check(key).down(errorResult);
+        return this.healthIndicatorService.check(key).down(errorDetails);
       }
 
-      return {
-        [key]: {
-          status: 'down',
-          ...errorResult,
-        },
-      };
+      return { [key]: { status: 'down', ...errorDetails } };
     }
   }
 
+  /**
+   * Check consumer lag for a specific consumer group
+   */
   async checkConsumerLag(
     key: string,
     groupId: string,
@@ -112,32 +131,22 @@ export class KafkaHealthIndicator {
       }
 
       const isHealthy = totalLag < maxLag;
-      const result = { groupId, lag: totalLag, maxLag };
+      const details = { groupId, lag: totalLag, maxLag };
 
       if (this.healthIndicatorService) {
         const indicator = this.healthIndicatorService.check(key);
-        return isHealthy ? indicator.up(result) : indicator.down(result);
+        return isHealthy ? indicator.up(details) : indicator.down(details);
       }
 
-      return {
-        [key]: {
-          status: isHealthy ? 'up' : 'down',
-          ...result,
-        },
-      };
+      return { [key]: { status: isHealthy ? 'up' : 'down', ...details } };
     } catch (error) {
-      const errorResult = { error: (error as Error).message };
+      const errorDetails = { error: (error as Error).message };
 
       if (this.healthIndicatorService) {
-        return this.healthIndicatorService.check(key).down(errorResult);
+        return this.healthIndicatorService.check(key).down(errorDetails);
       }
 
-      return {
-        [key]: {
-          status: 'down',
-          ...errorResult,
-        },
-      };
+      return { [key]: { status: 'down', ...errorDetails } };
     }
   }
 }

@@ -33,8 +33,8 @@ npm publish --access public
 ```
 lib/
 ├── index.ts                         # Main barrel export
-├── kafka.module.ts                  # KafkaModule with forRoot/forRootAsync
-├── consumer.module.ts               # ConsumerModule lifecycle
+├── kafka.module.ts                  # KafkaModule - Infrastructure only
+├── consumer.module.ts               # ConsumerModule - Consumer logic
 ├── interfaces/
 │   ├── kafka-module-options.interface.ts
 │   ├── consumer-options.interface.ts
@@ -43,18 +43,24 @@ lib/
 │   ├── consumer.decorator.ts        # @Consumer() method decorator
 │   └── constants.ts
 ├── services/
-│   ├── kafka-core.service.ts        # Kafka connection management
-│   ├── kafka-client.service.ts      # Producer (send/sendBatch)
-│   ├── consumer-registry.service.ts # Consumer lifecycle
-│   ├── batch-processor.service.ts   # Batch accumulation
-│   ├── idempotency.service.ts       # Duplicate prevention
-│   ├── pressure-manager.service.ts  # Back pressure
-│   └── dlq.service.ts               # Dead Letter Queue
+│   ├── kafka-core.service.ts        # [KafkaModule] Connection management
+│   ├── kafka-client.service.ts      # [KafkaModule] Producer (send/sendBatch)
+│   ├── consumer-registry.service.ts # [ConsumerModule] Consumer lifecycle
+│   ├── batch-processor.service.ts   # [ConsumerModule] Batch accumulation
+│   ├── idempotency.service.ts       # [ConsumerModule] Duplicate prevention
+│   ├── pressure-manager.service.ts  # [ConsumerModule] Back pressure
+│   ├── dlq.service.ts               # [ConsumerModule] Dead Letter Queue
+│   └── dlq-retry.service.ts         # [ConsumerModule] DLQ Retry
 ├── discovery/
-│   └── consumer-discovery.service.ts # Auto-discover @Consumer methods
+│   └── consumer-discovery.service.ts # [ConsumerModule] Auto-discover @Consumer
 └── health/
-    └── kafka-health-indicator.ts    # Health checks
+    └── kafka-health-indicator.ts    # [KafkaModule] Health checks
 ```
+
+### Module Separation
+
+- **KafkaModule**: Infrastructure (connections, producer, health check)
+- **ConsumerModule**: Consumer logic (discovery, registry, batch, DLQ, etc.)
 
 ### Key Components
 
@@ -87,11 +93,13 @@ lib/
 // app.module.ts
 @Module({
   imports: [
+    // Infrastructure module (producer, connections)
     KafkaModule.forRoot({
       clientId: 'my-app',
       brokers: ['localhost:9092'],
     }),
-    ConsumerModule,
+    // Consumer module (required if using @Consumer decorator)
+    ConsumerModule.forRoot(),
   ],
   providers: [OrderConsumer],
 })

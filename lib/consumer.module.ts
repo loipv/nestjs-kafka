@@ -10,9 +10,25 @@ import {
 } from '@nestjs/common';
 import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service';
 import { ConsumerRegistryService } from './services/consumer-registry.service';
+import { BatchProcessorService } from './services/batch-processor.service';
+import { IdempotencyService } from './services/idempotency.service';
+import { PressureManagerService } from './services/pressure-manager.service';
+import { DlqService } from './services/dlq.service';
+import { DlqRetryService } from './services/dlq-retry.service';
 
 // Token for consumers from forFeature
 const KAFKA_FEATURE_CONSUMERS = 'KAFKA_FEATURE_CONSUMERS';
+
+// All consumer-related providers (moved from KafkaModule)
+const CONSUMER_PROVIDERS: Provider[] = [
+  ConsumerDiscoveryService,
+  ConsumerRegistryService,
+  BatchProcessorService,
+  IdempotencyService,
+  PressureManagerService,
+  DlqService,
+  DlqRetryService,
+];
 
 /**
  * ConsumerModule handles discovery and registration of Kafka consumers.
@@ -48,13 +64,19 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
 
   /**
    * Register the core ConsumerModule. Call once in root module.
+   * This module depends on KafkaModule being imported first.
    */
   static forRoot(): DynamicModule {
     return {
       module: ConsumerModule,
       global: true,
-      providers: [ConsumerDiscoveryService],
-      exports: [ConsumerDiscoveryService],
+      providers: CONSUMER_PROVIDERS,
+      exports: [
+        ConsumerDiscoveryService,
+        ConsumerRegistryService,
+        DlqService,
+        DlqRetryService,
+      ],
     };
   }
 

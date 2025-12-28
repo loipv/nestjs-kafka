@@ -21,28 +21,16 @@ import {
   KafkaClient,
   ConnectionBoundClient,
 } from './services/kafka-client.service';
-import { ConsumerRegistryService } from './services/consumer-registry.service';
-import { BatchProcessorService } from './services/batch-processor.service';
-import { IdempotencyService } from './services/idempotency.service';
-import { PressureManagerService } from './services/pressure-manager.service';
-import { DlqService } from './services/dlq.service';
-import { DlqRetryService } from './services/dlq-retry.service';
+
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
 
 // Store registered connection names for tracking
 const KAFKA_CONNECTION_NAMES = Symbol('KAFKA_CONNECTION_NAMES');
 
-// Core providers that should be singleton across the app
-// KafkaHealthIndicator is included but requires TerminusModule to be imported by the user
+// Core infrastructure providers - consumer services are now in ConsumerModule
 const CORE_PROVIDERS: Provider[] = [
   KafkaCoreService,
   KafkaClient,
-  ConsumerRegistryService,
-  BatchProcessorService,
-  IdempotencyService,
-  PressureManagerService,
-  DlqService,
-  DlqRetryService,
   KafkaHealthIndicator,
 ];
 
@@ -110,7 +98,6 @@ export class KafkaModule implements OnModuleInit {
         KafkaCoreService,
         KafkaClient,
         KafkaHealthIndicator,
-        ConsumerRegistryService,
       ],
     };
   }
@@ -124,7 +111,6 @@ export class KafkaModule implements OnModuleInit {
       KafkaCoreService,
       KafkaClient,
       KafkaHealthIndicator,
-      ConsumerRegistryService,
     ];
 
     // Create providers for each connection
@@ -239,7 +225,6 @@ export class KafkaModule implements OnModuleInit {
         KafkaCoreService,
         KafkaClient,
         KafkaHealthIndicator,
-        ConsumerRegistryService,
       ],
       global: options.global ?? true,
     };

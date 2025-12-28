@@ -553,7 +553,29 @@ await kafka.send('topic', message, {
 
 Integrate with `@nestjs/terminus`:
 
+> **Note:** To use `KafkaHealthIndicator` with full Terminus integration, you must import `TerminusModule`. Without it, the health indicator will use a fallback implementation that returns plain objects.
+
 ```typescript
+// app.module.ts
+import { Module } from '@nestjs/common';
+import { TerminusModule } from '@nestjs/terminus';
+import { KafkaModule, ConsumerModule } from '@loipv/nestjs-kafka';
+
+@Module({
+  imports: [
+    TerminusModule,  // Required for health checks
+    KafkaModule.forRoot({
+      clientId: 'my-app',
+      brokers: ['localhost:9092'],
+    }),
+    ConsumerModule.forRoot(),
+  ],
+})
+export class AppModule {}
+```
+
+```typescript
+// health.controller.ts
 import { Controller, Get } from '@nestjs/common';
 import { HealthCheck, HealthCheckService } from '@nestjs/terminus';
 import { KafkaHealthIndicator } from '@loipv/nestjs-kafka';
@@ -578,6 +600,14 @@ export class HealthController {
   checkBrokers() {
     return this.health.check([
       () => this.kafkaHealth.checkBrokers('kafka-brokers'),
+    ]);
+  }
+
+  @Get('kafka/lag')
+  @HealthCheck()
+  checkLag() {
+    return this.health.check([
+      () => this.kafkaHealth.checkConsumerLag('kafka-lag', 'my-consumer-group', 1000),
     ]);
   }
 }
