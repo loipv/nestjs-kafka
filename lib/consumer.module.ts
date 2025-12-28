@@ -15,6 +15,8 @@ import { IdempotencyService } from './services/idempotency.service';
 import { PressureManagerService } from './services/pressure-manager.service';
 import { DlqService } from './services/dlq.service';
 import { DlqRetryService } from './services/dlq-retry.service';
+import { DlqMetricsService } from './services/dlq-metrics.service';
+import { CircuitBreakerService } from './services/circuit-breaker.service';
 
 // Token for consumers from forFeature
 const KAFKA_FEATURE_CONSUMERS = 'KAFKA_FEATURE_CONSUMERS';
@@ -26,6 +28,8 @@ const CONSUMER_PROVIDERS: Provider[] = [
   BatchProcessorService,
   IdempotencyService,
   PressureManagerService,
+  DlqMetricsService,
+  CircuitBreakerService,
   DlqService,
   DlqRetryService,
 ];
@@ -76,6 +80,8 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
         ConsumerRegistryService,
         DlqService,
         DlqRetryService,
+        DlqMetricsService,
+        CircuitBreakerService,
       ],
     };
   }

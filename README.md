@@ -349,12 +349,72 @@ async handlePayment(message: KafkaMessagePayload) {
 1. Message fails in handler → sent to DLQ topic
 2. DLQ retry consumer picks up message
 3. Waits with exponential backoff delay
-4. Re-publishes to original topic
+4. Calls original handler again
 5. If still fails after max DLQ retries → sent to `finalDlqTopic` or dropped
 
-**Headers added during DLQ retry:**
-- `x-dlq-retry-from-dlq`: Current retry count from DLQ
-- `x-dlq-retry-timestamp`: Timestamp of retry attempt
+**DLQ Headers:**
+
+| Header | Description |
+|--------|-------------|
+| `x-dlq-original-topic` | Original topic name |
+| `x-dlq-handler-retry-count` | Retries before sent to DLQ |
+| `x-dlq-timestamp` | Timestamp when sent to DLQ |
+| `x-dlq-error-message` | Error message |
+| `x-dlq-reprocess-count` | Reprocess attempts from DLQ |
+| `x-dlq-reprocess-timestamp` | Timestamp of reprocess |
+| `x-final-dlq-reason` | Reason sent to final DLQ |
+
+### Circuit Breaker
+
+The DLQ system includes a circuit breaker to prevent flooding DLQ when the system is unhealthy:
+
+```typescript
+import { CircuitBreakerService, DlqService } from '@loipv/nestjs-kafka';
+
+@Injectable()
+export class MonitoringService {
+  constructor(
+    private readonly circuitBreaker: CircuitBreakerService,
+    private readonly dlqService: DlqService,
+  ) {}
+
+  getCircuitStates() {
+    return this.circuitBreaker.getAllStates();
+  }
+
+  resetCircuit(dlqTopic: string) {
+    this.dlqService.resetCircuit(dlqTopic);
+  }
+}
+```
+
+**Circuit States:**
+- `CLOSED`: Normal operation
+- `OPEN`: DLQ blocked (failure threshold exceeded)
+- `HALF_OPEN`: Testing recovery
+
+### DLQ Metrics
+
+Track DLQ operations with the metrics service:
+
+```typescript
+import { DlqMetricsService } from '@loipv/nestjs-kafka';
+
+@Injectable()
+export class MonitoringService {
+  constructor(private readonly dlqMetrics: DlqMetricsService) {}
+
+  @Get('metrics/dlq')
+  getMetrics() {
+    return this.dlqMetrics.getMetrics();
+    // Returns:
+    // {
+    //   global: { handlerRetries, messagesSentToDlq, reprocessAttempts, ... },
+    //   byTopic: { 'orders': { handlerRetries, sentToDlq, ... } }
+    // }
+  }
+}
+```
 
 ### Consumer with Idempotency
 
@@ -492,6 +552,13 @@ interface ConsumerOptions {
     maxRetries?: number;          // Default: 3
     retryDelay?: number;          // Default: 1000
     retryBackoffMultiplier?: number; // Default: 2
+    retry?: {                     // DLQ auto-retry options
+      enabled?: boolean;
+      maxRetries?: number;
+      delay?: number;
+      backoffMultiplier?: number;
+      finalDlqTopic?: string;
+    };
   };
 
   // Commit settings
@@ -627,6 +694,8 @@ export { Consumer } from './decorators';
 
 // Services
 export { KafkaClient } from './services/kafka-client.service';
+export { DlqMetricsService } from './services/dlq-metrics.service';
+export { CircuitBreakerService } from './services/circuit-breaker.service';
 
 // Health
 export { KafkaHealthIndicator } from './health/kafka-health-indicator';
@@ -637,6 +706,7 @@ export {
   KafkaModuleAsyncOptions,
   ConsumerOptions,
   DlqOptions,
+  DlqRetryOptions,
   ProducerMessage,
   SendOptions,
   GroupedBatch,

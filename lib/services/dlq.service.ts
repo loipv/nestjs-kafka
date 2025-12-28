@@ -2,6 +2,17 @@ import { Injectable, Logger, forwardRef, Inject } from '@nestjs/common';
 import { KafkaMessage, IHeaders } from 'kafkajs';
 import { KafkaClient } from './kafka-client.service';
 import { DlqOptions } from '../interfaces';
+import { DlqMetricsService } from './dlq-metrics.service';
+import { CircuitBreakerService, CircuitState } from './circuit-breaker.service';
+
+// Header constants for clarity
+export const DLQ_HEADERS = {
+  ORIGINAL_TOPIC: 'x-dlq-original-topic',
+  HANDLER_RETRY_COUNT: 'x-dlq-handler-retry-count',  // Renamed from x-dlq-retry-count
+  TIMESTAMP: 'x-dlq-timestamp',
+  ERROR_MESSAGE: 'x-dlq-error-message',
+  ERROR_STACK: 'x-dlq-error-stack',
+} as const;
 
 interface RetryState {
   retryCount: number;
@@ -16,6 +27,8 @@ export class DlqService {
   constructor(
     @Inject(forwardRef(() => KafkaClient))
     private readonly kafkaClient: KafkaClient,
+    private readonly metrics: DlqMetricsService,
+    private readonly circuitBreaker: CircuitBreakerService,
   ) { }
 
   async handleFailure(
@@ -39,29 +52,50 @@ export class DlqService {
 
     const maxRetries = options.maxRetries ?? 3;
 
+    // Record retry attempt
+    this.metrics.recordHandlerRetry(originalTopic);
+
     if (state.retryCount <= maxRetries) {
       const baseDelay = options.retryDelay ?? 1000;
       const multiplier = options.retryBackoffMultiplier ?? 2;
       const delay = baseDelay * Math.pow(multiplier, state.retryCount - 1);
 
       this.logger.warn(
-        `Retry ${state.retryCount}/${maxRetries} for message, waiting ${delay}ms`,
+        `Retry ${state.retryCount}/${maxRetries} for message from ${originalTopic}, waiting ${delay}ms`,
       );
 
       await this.sleep(delay);
       return true;
     }
 
-    await this.sendToDlq(
-      message,
-      error,
-      options,
-      originalTopic,
-      state.retryCount,
-      connection,
-    );
-    this.retryStates.delete(messageKey);
+    // Check circuit breaker before sending to DLQ
+    const circuitKey = `dlq:${options.topic}`;
+    if (!this.circuitBreaker.canExecute(circuitKey)) {
+      const circuitState = this.circuitBreaker.getState(circuitKey);
+      this.logger.error(
+        `Circuit breaker ${circuitState} for DLQ ${options.topic}, message dropped`,
+      );
+      this.retryStates.delete(messageKey);
+      this.metrics.recordFinalFailure(originalTopic, false);
+      return false;
+    }
 
+    try {
+      await this.sendToDlq(
+        message,
+        error,
+        options,
+        originalTopic,
+        state.retryCount,
+        connection,
+      );
+      this.circuitBreaker.recordSuccess(circuitKey);
+    } catch (dlqError) {
+      this.circuitBreaker.recordFailure(circuitKey);
+      throw dlqError;
+    }
+
+    this.retryStates.delete(messageKey);
     return false;
   }
 
@@ -79,22 +113,24 @@ export class DlqService {
       Object.assign(headers, message.headers);
     }
 
-    headers['x-dlq-original-topic'] = originalTopic;
-    headers['x-dlq-retry-count'] = String(retryCount);
-    headers['x-dlq-timestamp'] = new Date().toISOString();
+    // Use new header names
+    headers[DLQ_HEADERS.ORIGINAL_TOPIC] = originalTopic;
+    headers[DLQ_HEADERS.HANDLER_RETRY_COUNT] = String(retryCount);
+    headers[DLQ_HEADERS.TIMESTAMP] = new Date().toISOString();
 
     if (options.includeErrorInfo !== false) {
-      headers['x-dlq-error-message'] = error.message;
-      headers['x-dlq-error-stack'] = error.stack || '';
+      headers[DLQ_HEADERS.ERROR_MESSAGE] = error.message;
+      headers[DLQ_HEADERS.ERROR_STACK] = error.stack || '';
     }
 
     try {
-      // Convert Buffer value to string to maintain same format as original topic
       const messageValue = message.value
         ? message.value.toString('utf-8')
         : null;
       const messageKey = message.key
-        ? (Buffer.isBuffer(message.key) ? message.key.toString('utf-8') : message.key)
+        ? Buffer.isBuffer(message.key)
+          ? message.key.toString('utf-8')
+          : message.key
         : null;
 
       await this.kafkaClient.send(
@@ -106,6 +142,9 @@ export class DlqService {
         },
         connection ? { connection } : undefined,
       );
+
+      // Record metrics
+      this.metrics.recordSentToDlq(originalTopic, options.topic);
 
       this.logger.warn(
         `Message sent to DLQ: ${options.topic} after ${retryCount} retries`,
@@ -135,5 +174,19 @@ export class DlqService {
   ): void {
     const key = this.getMessageKey(message, topic, partition);
     this.retryStates.delete(key);
+  }
+
+  /**
+   * Get circuit breaker state for a DLQ topic
+   */
+  getCircuitState(dlqTopic: string): CircuitState {
+    return this.circuitBreaker.getState(`dlq:${dlqTopic}`);
+  }
+
+  /**
+   * Manually reset circuit breaker for a DLQ topic
+   */
+  resetCircuit(dlqTopic: string): void {
+    this.circuitBreaker.reset(`dlq:${dlqTopic}`);
   }
 }

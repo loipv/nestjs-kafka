@@ -15,6 +15,20 @@ import {
     DEFAULT_KAFKA_CONNECTION,
 } from '../interfaces';
 import { deserializeMessage } from '../interfaces/message.interface';
+import { DlqMetricsService } from './dlq-metrics.service';
+import { DLQ_HEADERS } from './dlq.service';
+
+// DLQ Retry specific headers
+export const DLQ_RETRY_HEADERS = {
+    REPROCESS_COUNT: 'x-dlq-reprocess-count',        // Renamed from x-dlq-consumer-retry-count
+    REPROCESS_TIMESTAMP: 'x-dlq-reprocess-timestamp', // Renamed from x-dlq-retry-timestamp
+    REPROCESS_ERROR: 'x-dlq-reprocess-error',        // Renamed from x-dlq-retry-error
+    // Final DLQ headers
+    FINAL_DLQ_REASON: 'x-final-dlq-reason',
+    FINAL_DLQ_REPROCESS_COUNT: 'x-final-dlq-reprocess-count',
+    FINAL_DLQ_TIMESTAMP: 'x-final-dlq-timestamp',
+    FINAL_DLQ_SOURCE: 'x-final-dlq-source',
+} as const;
 
 interface DlqTopicHandler {
     dlqTopic: string;
@@ -50,6 +64,7 @@ export class DlqRetryService implements OnApplicationShutdown {
         private readonly kafkaCore: KafkaCoreService,
         @Inject(forwardRef(() => KafkaClient))
         private readonly kafkaClient: KafkaClient,
+        private readonly metrics: DlqMetricsService,
     ) { }
 
     /**
@@ -203,33 +218,36 @@ export class DlqRetryService implements OnApplicationShutdown {
             handler;
         const headers = message.headers || {};
 
-        // Get current DLQ consumer retry count (separate from original consumer retry count)
-        const dlqRetryCountHeader = headers['x-dlq-consumer-retry-count'];
-        const currentRetryCount = dlqRetryCountHeader
-            ? parseInt(dlqRetryCountHeader.toString(), 10)
+        // Get current reprocess count (using new header name)
+        const reprocessCountHeader = headers[DLQ_RETRY_HEADERS.REPROCESS_COUNT];
+        const currentReprocessCount = reprocessCountHeader
+            ? parseInt(reprocessCountHeader.toString(), 10)
             : 0;
 
         const maxRetries = retryOptions.maxRetries ?? 3;
         const baseDelay = retryOptions.delay ?? 60000;
         const backoffMultiplier = retryOptions.backoffMultiplier ?? 2;
 
+        // Record reprocess attempt
+        this.metrics.recordReprocessAttempt(dlqTopic);
+
         // Check if we've exceeded max DLQ retries
-        if (currentRetryCount >= maxRetries) {
+        if (currentReprocessCount >= maxRetries) {
             await this.handleMaxRetriesExceeded(
                 message,
                 retryOptions,
                 connection,
                 dlqTopic,
-                currentRetryCount,
+                currentReprocessCount,
             );
             return;
         }
 
         // Calculate delay with exponential backoff
-        const delay = baseDelay * Math.pow(backoffMultiplier, currentRetryCount);
+        const delay = baseDelay * Math.pow(backoffMultiplier, currentReprocessCount);
 
         this.logger.log(
-            `DLQ retry ${currentRetryCount + 1}/${maxRetries} for message from ${dlqTopic}, waiting ${delay}ms`,
+            `DLQ reprocess ${currentReprocessCount + 1}/${maxRetries} for message from ${dlqTopic}, waiting ${delay}ms`,
         );
 
         // Wait before retrying
@@ -237,23 +255,27 @@ export class DlqRetryService implements OnApplicationShutdown {
 
         try {
             // Deserialize message if needed (based on original consumer options)
+            // Note: Use dlqTopic here so message.topic reflects the actual topic being consumed
             const processedMessage =
                 originalOptions.deserialize !== false
-                    ? deserializeMessage(message, originalTopic, partition)
+                    ? deserializeMessage(message, dlqTopic, partition)
                     : message;
 
             // Call original handler
             await originalHandler(processedMessage);
 
+            // Record success
+            this.metrics.recordReprocessSuccess(dlqTopic);
+
             this.logger.log(
-                `DLQ message processed successfully from ${dlqTopic} (retry ${currentRetryCount + 1}/${maxRetries})`,
+                `DLQ message processed successfully from ${dlqTopic} (reprocess ${currentReprocessCount + 1}/${maxRetries})`,
             );
         } catch (error) {
             this.logger.warn(
-                `DLQ handler failed for ${dlqTopic}, sending back to DLQ (retry ${currentRetryCount + 1}/${maxRetries})`,
+                `DLQ handler failed for ${dlqTopic}, sending back to DLQ (reprocess ${currentReprocessCount + 1}/${maxRetries})`,
             );
 
-            // Send back to DLQ with incremented retry count
+            // Build new headers with updated reprocess count
             const newHeaders: Record<string, string> = {};
 
             // Copy existing headers
@@ -263,16 +285,19 @@ export class DlqRetryService implements OnApplicationShutdown {
                 }
             }
 
-            newHeaders['x-dlq-consumer-retry-count'] = String(currentRetryCount + 1);
-            newHeaders['x-dlq-retry-timestamp'] = new Date().toISOString();
-            newHeaders['x-dlq-retry-error'] = (error as Error).message;
+            // Use new header names
+            newHeaders[DLQ_RETRY_HEADERS.REPROCESS_COUNT] = String(currentReprocessCount + 1);
+            newHeaders[DLQ_RETRY_HEADERS.REPROCESS_TIMESTAMP] = new Date().toISOString();
+            newHeaders[DLQ_RETRY_HEADERS.REPROCESS_ERROR] = (error as Error).message;
 
             // Convert Buffer to string to maintain same format
             const messageValue = message.value
                 ? message.value.toString('utf-8')
                 : null;
             const messageKey = message.key
-                ? (Buffer.isBuffer(message.key) ? message.key.toString('utf-8') : message.key)
+                ? Buffer.isBuffer(message.key)
+                    ? message.key.toString('utf-8')
+                    : message.key
                 : null;
 
             await this.kafkaClient.send(
@@ -295,7 +320,7 @@ export class DlqRetryService implements OnApplicationShutdown {
         retryOptions: DlqRetryOptions,
         connection: string,
         dlqTopic: string,
-        retryCount: number,
+        reprocessCount: number,
     ): Promise<void> {
         const finalDlqTopic = retryOptions.finalDlqTopic;
 
@@ -310,18 +335,20 @@ export class DlqRetryService implements OnApplicationShutdown {
                 }
             }
 
-            headers['x-final-dlq-reason'] = 'max-dlq-retries-exceeded';
-            headers['x-final-dlq-retry-count'] = String(retryCount);
-            headers['x-final-dlq-timestamp'] = new Date().toISOString();
-            headers['x-final-dlq-source'] = dlqTopic;
+            // Use new header names
+            headers[DLQ_RETRY_HEADERS.FINAL_DLQ_REASON] = 'max-reprocess-exceeded';
+            headers[DLQ_RETRY_HEADERS.FINAL_DLQ_REPROCESS_COUNT] = String(reprocessCount);
+            headers[DLQ_RETRY_HEADERS.FINAL_DLQ_TIMESTAMP] = new Date().toISOString();
+            headers[DLQ_RETRY_HEADERS.FINAL_DLQ_SOURCE] = dlqTopic;
 
             try {
-                // Convert Buffer to string to maintain same format
                 const messageValue = message.value
                     ? message.value.toString('utf-8')
                     : null;
                 const messageKey = message.key
-                    ? (Buffer.isBuffer(message.key) ? message.key.toString('utf-8') : message.key)
+                    ? Buffer.isBuffer(message.key)
+                        ? message.key.toString('utf-8')
+                        : message.key
                     : null;
 
                 await this.kafkaClient.send(
@@ -334,8 +361,11 @@ export class DlqRetryService implements OnApplicationShutdown {
                     { connection },
                 );
 
+                // Record as sent to final DLQ
+                this.metrics.recordFinalFailure(dlqTopic, true);
+
                 this.logger.warn(
-                    `Message sent to final DLQ ${finalDlqTopic} after ${retryCount} retries from ${dlqTopic}`,
+                    `Message sent to final DLQ ${finalDlqTopic} after ${reprocessCount} reprocesses from ${dlqTopic}`,
                 );
             } catch (error) {
                 this.logger.error(
@@ -345,8 +375,9 @@ export class DlqRetryService implements OnApplicationShutdown {
             }
         } else {
             // No finalDlqTopic configured - drop message after max retries
+            this.metrics.recordFinalFailure(dlqTopic, false);
             this.logger.warn(
-                `Message dropped after ${retryCount} DLQ retries from ${dlqTopic} (no finalDlqTopic configured)`,
+                `Message dropped after ${reprocessCount} DLQ reprocesses from ${dlqTopic} (no finalDlqTopic configured)`,
             );
         }
     }
