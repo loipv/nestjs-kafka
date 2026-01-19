@@ -11,6 +11,7 @@ A production-ready NestJS module for Kafka client and consumer functionality bui
 - **Back Pressure**: Automatic pause/resume when consumers are overwhelmed
 - **Idempotency**: In-memory duplicate prevention with TTL
 - **Dead Letter Queue (DLQ)**: Automatic retry with exponential backoff
+- **OpenTelemetry Tracing**: Distributed tracing across produce → consume with same trace ID
 - **Health Checks**: Integration with `@nestjs/terminus`
 - **Graceful Shutdown**: Proper cleanup on application shutdown
 
@@ -26,6 +27,14 @@ Make sure you have the following peer dependencies installed:
 
 ```bash
 npm install @nestjs/common @nestjs/core @nestjs/terminus reflect-metadata rxjs
+```
+
+### Optional: OpenTelemetry Tracing
+
+For distributed tracing support:
+
+```bash
+npm install @opentelemetry/api @opentelemetry/sdk-trace-node @opentelemetry/auto-instrumentations-node
 ```
 
 ## Quick Start
@@ -724,6 +733,121 @@ export class HealthController {
 }
 ```
 
+## OpenTelemetry Tracing
+
+The library supports distributed tracing with OpenTelemetry, allowing you to trace messages from producer to consumer with the same trace ID.
+
+### How It Works
+
+1. **Producer**: When sending a message, the library creates a span and injects the trace context (W3C Trace Context format) into Kafka message headers
+2. **Consumer**: When receiving a message, the library extracts the trace context from headers and creates a child span linked to the producer's trace
+
+```
+┌─────────────────┐                         ┌─────────────────┐
+│  Producer App   │                         │  Consumer App   │
+│                 │                         │                 │
+│  ┌───────────┐  │      Kafka Topic        │  ┌───────────┐  │
+│  │  publish  │──┼─────────────────────────┼──│  process  │  │
+│  │  span     │  │  Headers:               │  │  span     │  │
+│  │           │  │  traceparent: 00-abc... │  │           │  │
+│  └───────────┘  │                         │  └───────────┘  │
+│  TraceID: abc   │                         │  TraceID: abc   │
+└─────────────────┘                         └─────────────────┘
+```
+
+### Enable Tracing
+
+```typescript
+// app.module.ts
+import { Module } from '@nestjs/common';
+import { KafkaModule, ConsumerModule } from '@loipv/nestjs-kafka';
+
+@Module({
+  imports: [
+    KafkaModule.forRoot({
+      clientId: 'my-app',
+      brokers: ['localhost:9092'],
+      tracing: {
+        enabled: true,
+        tracerName: '@loipv/nestjs-kafka', // Optional: custom tracer name
+        tracerVersion: '1.0.0',            // Optional: custom tracer version
+      },
+    }),
+    ConsumerModule.forRoot(),
+  ],
+})
+export class AppModule {}
+```
+
+### Prerequisites
+
+1. Install OpenTelemetry packages:
+
+```bash
+npm install @opentelemetry/api @opentelemetry/sdk-trace-node @opentelemetry/exporter-trace-otlp-http
+```
+
+2. Initialize OpenTelemetry SDK before your NestJS app starts:
+
+```typescript
+// tracing.ts
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { Resource } from '@opentelemetry/resources';
+import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
+
+const sdk = new NodeSDK({
+  resource: new Resource({
+    [ATTR_SERVICE_NAME]: 'my-kafka-service',
+  }),
+  traceExporter: new OTLPTraceExporter({
+    url: 'http://localhost:4318/v1/traces', // Jaeger/OTLP endpoint
+  }),
+});
+
+sdk.start();
+```
+
+```typescript
+// main.ts
+import './tracing'; // Initialize tracing first
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  await app.listen(3000);
+}
+bootstrap();
+```
+
+### Tracing Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable OpenTelemetry tracing |
+| `tracerName` | string | `'@loipv/nestjs-kafka'` | Custom tracer name |
+| `tracerVersion` | string | - | Custom tracer version |
+
+### Span Attributes
+
+**Producer Span:**
+- `messaging.system`: `'kafka'`
+- `messaging.destination`: Topic name
+- `messaging.destination_kind`: `'topic'`
+- `messaging.operation`: `'publish'`
+- `messaging.kafka.message_key`: Message key (if present)
+
+**Consumer Span:**
+- `messaging.system`: `'kafka'`
+- `messaging.destination`: Topic name
+- `messaging.destination_kind`: `'topic'`
+- `messaging.operation`: `'process'`
+- `messaging.message_id`: Message offset
+- `messaging.kafka.partition`: Partition number
+- `messaging.kafka.consumer_group`: Consumer group ID
+- `messaging.kafka.message_key`: Message key (if present)
+
 ## API Reference
 
 ### Exports
@@ -738,6 +862,7 @@ export { Consumer } from './decorators';
 
 // Services
 export { KafkaClient } from './services/kafka-client.service';
+export { TracingService } from './services/tracing.service';
 export { DlqMetricsService } from './services/dlq-metrics.service';
 export { CircuitBreakerService } from './services/circuit-breaker.service';
 
@@ -748,6 +873,7 @@ export { KafkaHealthIndicator } from './health/kafka-health-indicator';
 export {
   KafkaModuleOptions,
   KafkaModuleAsyncOptions,
+  TracingOptions,
   ConsumerOptions,
   DlqOptions,
   DlqRetryOptions,

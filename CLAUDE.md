@@ -86,6 +86,7 @@ lib/
 - Dead Letter Queue with exponential backoff retry and auto-retry from DLQ
 - Circuit breaker for DLQ operations
 - DLQ metrics tracking
+- **OpenTelemetry tracing** (distributed tracing across produce → consume)
 - Graceful shutdown with proper cleanup
 
 ## Important Behavior Notes
@@ -133,6 +134,37 @@ async handleLogs(message: KafkaMessage) {
 ### Retry Mechanism With DLQ
 
 When **using DLQ**, failed messages are sent to the DLQ topic after max retries. The message is NOT skipped or dropped.
+
+### OpenTelemetry Tracing
+
+The library supports distributed tracing with OpenTelemetry. When enabled, trace context is:
+1. **Injected** into Kafka message headers when producing (W3C Trace Context format)
+2. **Extracted** from headers when consuming, linking producer and consumer spans
+
+**Enable tracing:**
+```typescript
+KafkaModule.forRoot({
+  clientId: 'my-app',
+  brokers: ['localhost:9092'],
+  tracing: {
+    enabled: true,
+    tracerName: '@loipv/nestjs-kafka', // Optional
+  },
+})
+```
+
+**Prerequisites:**
+- Install `@opentelemetry/api` (peer dependency)
+- Set up OpenTelemetry SDK in your application
+
+**Trace flow:**
+```
+Producer App                    Consumer App
+┌─────────────────┐            ┌─────────────────┐
+│  Span: publish  │ ────────── │  Span: process  │
+│  TraceID: abc   │   Kafka    │  TraceID: abc   │
+└─────────────────┘  Headers   └─────────────────┘
+```
 
 ## Tech Stack
 

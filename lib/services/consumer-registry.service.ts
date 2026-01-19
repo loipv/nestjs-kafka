@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown, Optional } from '@nestjs/common';
 import { Consumer, EachBatchPayload, EachMessagePayload } from 'kafkajs';
 import { KafkaCoreService } from './kafka-core.service';
 import { BatchProcessorService } from './batch-processor.service';
@@ -9,6 +9,7 @@ import { IdempotencyService } from './idempotency.service';
 import { PressureManagerService } from './pressure-manager.service';
 import { DlqService } from './dlq.service';
 import { DlqRetryService } from './dlq-retry.service';
+import { TracingService } from './tracing.service';
 import {
   ConsumerMetadata,
   ConsumerOptions,
@@ -51,6 +52,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     private readonly pressureManager: PressureManagerService,
     private readonly dlqService: DlqService,
     private readonly dlqRetryService: DlqRetryService,
+    @Optional() private readonly tracingService?: TracingService,
   ) { }
 
   registerConsumers(consumers: ConsumerMetadata[]): void {
@@ -252,7 +254,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { consumer, topics, options } = group;
+    const { groupId, consumer, topics, options } = group;
     const restartOnFailure = this.buildRestartOnFailure(options.retry);
 
     await consumer.run({
@@ -288,7 +290,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           }
         }
 
-        try {
+        // Wrap message processing in a trace span
+        const processMessage = async () => {
           const processedMessage =
             topicOptions.deserialize !== false
               ? deserializeMessage(message, topic, partition)
@@ -306,6 +309,24 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           // Clear retry states for both DLQ and non-DLQ
           this.dlqService.clearRetryState(message, topic, partition);
           this.clearMessageRetryState(message, topic, partition);
+        };
+
+        try {
+          if (this.tracingService?.isEnabled()) {
+            await this.tracingService.withConsumeSpan(
+              {
+                topic,
+                partition,
+                offset: message.offset,
+                key: message.key?.toString(),
+                groupId,
+                headers: message.headers,
+              },
+              processMessage,
+            );
+          } else {
+            await processMessage();
+          }
         } catch (error) {
           await this.handleError(message, error as Error, metadata, partition);
         }
@@ -314,7 +335,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { consumer, topics, options } = group;
+    const { groupId, consumer, topics, options } = group;
     const restartOnFailure = this.buildRestartOnFailure(options.retry);
 
     await consumer.run({
@@ -350,6 +371,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
               partition,
               topicOptions,
               handler,
+              groupId,
             );
           });
 
@@ -380,7 +402,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
               }
             }
 
-            try {
+            // Wrap message processing in a trace span
+            const processMessage = async () => {
               const processedMessage =
                 topicOptions.deserialize !== false
                   ? deserializeMessage(message, topic, partition)
@@ -398,6 +421,24 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
               // Clear retry states for both DLQ and non-DLQ
               this.dlqService.clearRetryState(message, topic, partition);
               this.clearMessageRetryState(message, topic, partition);
+            };
+
+            try {
+              if (this.tracingService?.isEnabled()) {
+                await this.tracingService.withConsumeSpan(
+                  {
+                    topic,
+                    partition,
+                    offset: message.offset,
+                    key: message.key?.toString(),
+                    groupId,
+                    headers: message.headers,
+                  },
+                  processMessage,
+                );
+              } else {
+                await processMessage();
+              }
             } catch (error) {
               await this.handleError(
                 message,
@@ -421,6 +462,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     partition: number,
     options: ConsumerOptions,
     handler: (...args: any[]) => Promise<void>,
+    groupId?: string,
   ): Promise<void> {
     let processableMessages = messages;
 
@@ -438,12 +480,33 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         )
         : processableMessages;
 
-    if (options.groupByKey) {
-      const grouped =
-        this.batchProcessor.groupMessagesByKey(deserializedMessages);
-      await handler(grouped);
+    // Process batch - create a span for the batch if tracing is enabled
+    const processBatch = async () => {
+      if (options.groupByKey) {
+        const grouped =
+          this.batchProcessor.groupMessagesByKey(deserializedMessages);
+        await handler(grouped);
+      } else {
+        await handler(deserializedMessages);
+      }
+    };
+
+    // For batch processing, use the first message's headers to extract trace context
+    const firstMessage = messages[0];
+    if (this.tracingService?.isEnabled() && firstMessage) {
+      await this.tracingService.withConsumeSpan(
+        {
+          topic,
+          partition,
+          offset: firstMessage.offset,
+          key: firstMessage.key?.toString(),
+          groupId,
+          headers: firstMessage.headers,
+        },
+        processBatch,
+      );
     } else {
-      await handler(deserializedMessages);
+      await processBatch();
     }
 
     if (options.idempotencyKey) {

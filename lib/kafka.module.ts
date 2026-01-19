@@ -21,6 +21,7 @@ import {
   KafkaClient,
   ConnectionBoundClient,
 } from './services/kafka-client.service';
+import { TracingService } from './services/tracing.service';
 
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
 
@@ -32,6 +33,7 @@ const CORE_PROVIDERS: Provider[] = [
   KafkaCoreService,
   KafkaClient,
   KafkaHealthIndicator,
+  TracingService,
 ];
 
 @Global()
@@ -98,6 +100,7 @@ export class KafkaModule implements OnModuleInit {
         KafkaCoreService,
         KafkaClient,
         KafkaHealthIndicator,
+        TracingService,
       ],
     };
   }
@@ -111,6 +114,7 @@ export class KafkaModule implements OnModuleInit {
       KafkaCoreService,
       KafkaClient,
       KafkaHealthIndicator,
+      TracingService,
     ];
 
     // Create providers for each connection
@@ -225,6 +229,7 @@ export class KafkaModule implements OnModuleInit {
         KafkaCoreService,
         KafkaClient,
         KafkaHealthIndicator,
+        TracingService,
       ],
       global: options.global ?? true,
     };

@@ -23,7 +23,10 @@
     "back-pressure",
     "microservices",
     "message-queue",
-    "event-driven"
+    "event-driven",
+    "opentelemetry",
+    "tracing",
+    "observability"
   ],
   "scripts": {
     "build": "nest build",
@@ -42,12 +45,22 @@
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/terminus": "^11.0.0",
+    "@opentelemetry/api": "^1.0.0",
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
+    "@nestjs/terminus": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
     "@eslint/js": "^9.18.0",
+    "@opentelemetry/api": "^1.9.0",
     "@nestjs/cli": "^11.0.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",

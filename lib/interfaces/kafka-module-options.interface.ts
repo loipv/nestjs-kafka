@@ -20,6 +20,15 @@ export interface ProducerConfig {
   maxInFlightRequests?: number;
 }
 
+export interface TracingOptions {
+  /** Enable OpenTelemetry tracing. Default: false */
+  enabled?: boolean;
+  /** Custom tracer name. Default: '@loipv/nestjs-kafka' */
+  tracerName?: string;
+  /** Custom tracer version. */
+  tracerVersion?: string;
+}
+
 export const DEFAULT_KAFKA_CONNECTION: string = 'default';
 
 export interface KafkaModuleOptions {
@@ -42,6 +51,9 @@ export interface KafkaModuleOptions {
   defaultConsumerGroupId?: string;
 
   logLevel?: 'NOTHING' | 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
+
+  /** OpenTelemetry tracing configuration */
+  tracing?: TracingOptions;
 }
 
 export interface KafkaModuleAsyncOptions extends Pick<

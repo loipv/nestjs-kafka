@@ -10,6 +10,7 @@ export {
   KafkaClient,
   ConnectionBoundClient,
 } from './services/kafka-client.service';
+export { TracingService } from './services/tracing.service';
 
 // Health
 export { KafkaHealthIndicator } from './health/kafka-health-indicator';

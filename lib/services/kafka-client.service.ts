@@ -1,4 +1,4 @@
-import { Injectable, OnApplicationShutdown, Logger } from '@nestjs/common';
+import { Injectable, OnApplicationShutdown, Logger, Optional } from '@nestjs/common';
 import { ProducerRecord, Message } from 'kafkajs';
 import {
   ProducerMessage,
@@ -6,6 +6,7 @@ import {
   DEFAULT_KAFKA_CONNECTION,
 } from '../interfaces';
 import { KafkaCoreService } from './kafka-core.service';
+import { TracingService } from './tracing.service';
 
 export interface SendOptionsWithConnection extends SendOptions {
   /** Connection name to use. Default: 'default' */
@@ -21,7 +22,10 @@ export class KafkaClient implements OnApplicationShutdown {
   private readonly defaultBatchSize = 100;
   private readonly defaultBatchTimeout = 100;
 
-  constructor(private readonly kafkaCore: KafkaCoreService) {}
+  constructor(
+    private readonly kafkaCore: KafkaCoreService,
+    @Optional() private readonly tracingService?: TracingService,
+  ) {}
 
   async onApplicationShutdown(): Promise<void> {
     await this.flushAllBatches();
@@ -39,7 +43,17 @@ export class KafkaClient implements OnApplicationShutdown {
     const connectionName = options?.connection || DEFAULT_KAFKA_CONNECTION;
     await this.kafkaCore.connectProducer(connectionName);
 
-    const kafkaMessage = this.serializeMessage(message);
+    // Start tracing span and inject trace context into headers
+    const { span, headers } = this.tracingService?.startProduceSpan({
+      topic,
+      key: message.key ? String(message.key) : null,
+      headers: message.headers,
+    }) ?? { span: null, headers: message.headers || {} };
+
+    const kafkaMessage = this.serializeMessage({
+      ...message,
+      headers, // Use headers with trace context
+    });
 
     const record: ProducerRecord = {
       topic,
@@ -53,11 +67,13 @@ export class KafkaClient implements OnApplicationShutdown {
       const producer = this.kafkaCore.getProducer(connectionName);
       await producer.send(record);
       this.logger.debug(`[${connectionName}] Message sent to topic: ${topic}`);
+      this.tracingService?.endProduceSpan(span);
     } catch (error) {
       this.logger.error(
         `[${connectionName}] Failed to send message to topic: ${topic}`,
         error,
       );
+      this.tracingService?.endProduceSpan(span, error as Error);
       throw error;
     }
   }
@@ -73,7 +89,18 @@ export class KafkaClient implements OnApplicationShutdown {
     const connectionName = options?.connection || DEFAULT_KAFKA_CONNECTION;
     await this.kafkaCore.connectProducer(connectionName);
 
-    const kafkaMessages = messages.map((msg) => this.serializeMessage(msg));
+    // Create spans and inject trace context for each message
+    const spans: any[] = [];
+    const kafkaMessages = messages.map((msg) => {
+      const { span, headers } = this.tracingService?.startProduceSpan({
+        topic,
+        key: msg.key ? String(msg.key) : null,
+        headers: msg.headers,
+      }) ?? { span: null, headers: msg.headers || {} };
+
+      spans.push(span);
+      return this.serializeMessage({ ...msg, headers });
+    });
 
     const record: ProducerRecord = {
       topic,
@@ -89,11 +116,13 @@ export class KafkaClient implements OnApplicationShutdown {
       this.logger.debug(
         `[${connectionName}] Batch of ${messages.length} messages sent to topic: ${topic}`,
       );
+      spans.forEach((span) => this.tracingService?.endProduceSpan(span));
     } catch (error) {
       this.logger.error(
         `[${connectionName}] Failed to send batch to topic: ${topic}`,
         error,
       );
+      spans.forEach((span) => this.tracingService?.endProduceSpan(span, error as Error));
       throw error;
     }
   }
@@ -108,10 +137,21 @@ export class KafkaClient implements OnApplicationShutdown {
     const connectionName = options?.connection || DEFAULT_KAFKA_CONNECTION;
     await this.kafkaCore.connectProducer(connectionName);
 
+    // Create spans and inject trace context for each message
+    const allSpans: any[] = [];
     const batch = {
       topicMessages: topicMessages.map(({ topic, messages }) => ({
         topic,
-        messages: messages.map((msg) => this.serializeMessage(msg)),
+        messages: messages.map((msg) => {
+          const { span, headers } = this.tracingService?.startProduceSpan({
+            topic,
+            key: msg.key ? String(msg.key) : null,
+            headers: msg.headers,
+          }) ?? { span: null, headers: msg.headers || {} };
+
+          allSpans.push(span);
+          return this.serializeMessage({ ...msg, headers });
+        }),
       })),
       acks: options?.acks,
       timeout: options?.timeout,
@@ -124,17 +164,20 @@ export class KafkaClient implements OnApplicationShutdown {
       this.logger.debug(
         `[${connectionName}] Multi-topic batch sent to ${topicMessages.length} topics`,
       );
+      allSpans.forEach((span) => this.tracingService?.endProduceSpan(span));
     } catch (error) {
       this.logger.error(
         `[${connectionName}] Failed to send multi-topic batch`,
         error,
       );
+      allSpans.forEach((span) => this.tracingService?.endProduceSpan(span, error as Error));
       throw error;
     }
   }
 
   /**
    * Queue a message for batched sending
+   * Note: Trace context is injected at queue time to capture the caller's context
    */
   async sendQueued(
     topic: string,
@@ -144,7 +187,16 @@ export class KafkaClient implements OnApplicationShutdown {
     const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
     await this.kafkaCore.connectProducer(connectionName);
 
-    const kafkaMessage = this.serializeMessage(message);
+    // Inject trace context into headers at queue time
+    const { headers } = this.tracingService?.startProduceSpan({
+      topic,
+      key: message.key ? String(message.key) : null,
+      headers: message.headers,
+    }) ?? { span: null, headers: message.headers || {} };
+
+    // Note: We don't track spans for queued messages since they're flushed asynchronously
+    // The trace context is captured in headers for downstream consumers to use
+    const kafkaMessage = this.serializeMessage({ ...message, headers });
 
     // Get or create buffer for this connection
     if (!this.batchBuffers.has(connectionName)) {

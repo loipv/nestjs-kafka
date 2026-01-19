@@ -8,3 +8,4 @@ export * from './dlq-metrics.service';
 export * from './circuit-breaker.service';
 export * from './dlq.service';
 export * from './dlq-retry.service';
+export * from './tracing.service';
