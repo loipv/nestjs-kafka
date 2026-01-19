@@ -32,11 +32,17 @@ interface ConsumerGroup {
   hasBatchConsumer: boolean;
 }
 
+interface MessageRetryState {
+  retryCount: number;
+  lastError?: Error;
+}
+
 @Injectable()
 export class ConsumerRegistryService implements OnApplicationShutdown {
   private readonly logger = new Logger(ConsumerRegistryService.name);
   private consumerGroups = new Map<string, ConsumerGroup>();
   private isShuttingDown = false;
+  private messageRetryStates = new Map<string, MessageRetryState>();
 
   constructor(
     private readonly kafkaCore: KafkaCoreService,
@@ -297,7 +303,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
             );
           }
 
+          // Clear retry states for both DLQ and non-DLQ
           this.dlqService.clearRetryState(message, topic, partition);
+          this.clearMessageRetryState(message, topic, partition);
         } catch (error) {
           await this.handleError(message, error as Error, metadata, partition);
         }
@@ -387,7 +395,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
                 );
               }
 
+              // Clear retry states for both DLQ and non-DLQ
               this.dlqService.clearRetryState(message, topic, partition);
+              this.clearMessageRetryState(message, topic, partition);
             } catch (error) {
               await this.handleError(
                 message,
@@ -454,6 +464,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     this.logger.error(`Error processing message from ${topic}`, error);
 
     if (options.dlq) {
+      // With DLQ: Use DLQ service for retry and DLQ handling
       const shouldRetry = await this.dlqService.handleFailure(
         message,
         error,
@@ -467,8 +478,81 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         throw error;
       }
     } else {
-      throw error;
+      // Without DLQ: Implement retry mechanism here
+      const messageKey = this.getMessageKey(message, topic, partition);
+      let state = this.messageRetryStates.get(messageKey);
+
+      if (!state) {
+        state = { retryCount: 0 };
+        this.messageRetryStates.set(messageKey, state);
+      }
+
+      state.retryCount++;
+      state.lastError = error;
+
+      // Get max retries from retry options, default to 3
+      const maxRetries = options.retry?.retries ?? 3;
+
+      if (state.retryCount <= maxRetries) {
+        // Calculate exponential backoff delay
+        const baseDelay = options.retry?.initialRetryTime ?? 1000;
+        const multiplier = options.retry?.multiplier ?? 2;
+        const delay = baseDelay * Math.pow(multiplier, state.retryCount - 1);
+
+        this.logger.warn(
+          `Retry ${state.retryCount}/${maxRetries} for message from ${topic}, waiting ${delay}ms`,
+        );
+
+        await this.sleep(delay);
+        throw error; // Retry: throw error to kafkaJS for retry
+      } else {
+        // Exceeded max retries
+        const skipMessage = options.retry?.skipMessageOnMaxRetries ?? false;
+
+        this.messageRetryStates.delete(messageKey);
+
+        if (skipMessage) {
+          // Skip message to avoid blocking consumer
+          this.logger.error(
+            `Message from ${topic} failed after ${state.retryCount} retries. Skipping message to avoid blocking consumer. ` +
+            `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
+          );
+          this.logger.error(
+            `Dropped message details - Topic: ${topic}, Key: ${message.key?.toString()}, Error: ${error.message}`,
+          );
+          // DO NOT throw error - let kafkaJS commit offset and skip this message
+          // This allows consumer to continue processing other messages
+        } else {
+          // Throw error to potentially restart consumer
+          this.logger.error(
+            `Message from ${topic} failed after ${state.retryCount} retries. Throwing error as configured. ` +
+            `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
+          );
+          throw error;
+        }
+      }
     }
+  }
+
+  private getMessageKey(
+    message: any,
+    topic: string,
+    partition?: number,
+  ): string {
+    return `${topic}:${partition ?? 0}:${message.offset}`;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private clearMessageRetryState(
+    message: any,
+    topic: string,
+    partition?: number,
+  ): void {
+    const key = this.getMessageKey(message, topic, partition);
+    this.messageRetryStates.delete(key);
   }
 
   async gracefulShutdown(): Promise<void> {
@@ -496,6 +580,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     // Shutdown DLQ retry consumers
     await this.dlqRetryService.gracefulShutdown();
+
+    // Clear retry states
+    this.messageRetryStates.clear();
 
     this.logger.log('All consumer groups shut down gracefully');
   }

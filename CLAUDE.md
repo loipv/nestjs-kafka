@@ -41,6 +41,7 @@ lib/
 │   └── message.interface.ts
 ├── decorators/
 │   ├── consumer.decorator.ts        # @Consumer() method decorator
+│   ├── inject-kafka-client.decorator.ts # @InjectKafkaClient() for named connections
 │   └── constants.ts
 ├── services/
 │   ├── kafka-core.service.ts        # [KafkaModule] Connection management
@@ -50,7 +51,9 @@ lib/
 │   ├── idempotency.service.ts       # [ConsumerModule] Duplicate prevention
 │   ├── pressure-manager.service.ts  # [ConsumerModule] Back pressure
 │   ├── dlq.service.ts               # [ConsumerModule] Dead Letter Queue
-│   └── dlq-retry.service.ts         # [ConsumerModule] DLQ Retry
+│   ├── dlq-retry.service.ts         # [ConsumerModule] DLQ auto-retry
+│   ├── dlq-metrics.service.ts       # [ConsumerModule] DLQ metrics tracking
+│   └── circuit-breaker.service.ts   # [ConsumerModule] Circuit breaker for DLQ
 ├── discovery/
 │   └── consumer-discovery.service.ts # [ConsumerModule] Auto-discover @Consumer
 └── health/
@@ -64,20 +67,72 @@ lib/
 
 ### Key Components
 
-- **KafkaModule**: Root module with `forRoot()` and `forRootAsync()` for configuration
-- **KafkaClient**: Producer service with `send()`, `sendBatch()`, `sendQueued()` methods
-- **@Consumer() decorator**: Method decorator to define topic consumers with batch/pressure/DLQ options
+- **KafkaModule**: Root module with `forRoot()`, `forRootAsync()`, and `forRootMultiple()` for configuration
+  - Supports multi-connection setup with named connections
 - **ConsumerModule**: Auto-discovers and registers consumer methods on app startup
+  - Use `forRoot()` in app module, `forFeature([...consumers])` in feature modules
+- **KafkaClient**: Producer service with `send()`, `sendBatch()`, `sendQueued()`, `sendMultiTopicBatch()` methods
+- **@Consumer() decorator**: Method decorator to define topic consumers with batch/pressure/DLQ options
+- **@InjectKafkaClient() decorator**: Inject named connection clients in services
 - **KafkaHealthIndicator**: Health checks for Kafka connections
 
 ### Features
 
+- Multi-connection support (connect to multiple Kafka clusters simultaneously)
 - Intelligent batch processing with configurable size and timeout
 - Key-based message grouping for ordered processing within batches
 - Back pressure management (pause/resume consumption)
 - In-memory idempotency with TTL
-- Dead Letter Queue with exponential backoff retry
-- Graceful shutdown
+- Dead Letter Queue with exponential backoff retry and auto-retry from DLQ
+- Circuit breaker for DLQ operations
+- DLQ metrics tracking
+- Graceful shutdown with proper cleanup
+
+## Important Behavior Notes
+
+### Retry Mechanism Without DLQ
+
+When **NOT using DLQ**, the library implements an in-memory retry mechanism with exponential backoff:
+
+1. **Retry with delay**: Message will be retried up to `retry.retries` times (default: 3) with exponential backoff
+2. **After max retries exceeded**:
+   - By default (`skipMessageOnMaxRetries: false`): Error is **thrown**, which may cause consumer to stop/restart
+   - If `skipMessageOnMaxRetries: true`: Message is **skipped** and offset is committed to avoid blocking the consumer
+
+**Configuration options:**
+- `skipMessageOnMaxRetries: false` (default): Throw error to ensure no message is silently dropped
+- `skipMessageOnMaxRetries: true`: Skip message to prevent consumer blocking (useful for multi-topic consumers)
+
+**Example:**
+```typescript
+// Default behavior: Throw error after max retries
+@Consumer('orders', {
+  retry: {
+    retries: 3,
+    initialRetryTime: 1000,
+    multiplier: 2,
+    // skipMessageOnMaxRetries: false (default)
+  },
+})
+async handleOrder(message: KafkaMessage) {
+  // If this fails 3 times, error is thrown
+}
+
+// Skip message to avoid blocking (for multi-topic consumers)
+@Consumer('non-critical-logs', {
+  retry: {
+    retries: 5,
+    skipMessageOnMaxRetries: true, // Skip to avoid blocking
+  },
+})
+async handleLogs(message: KafkaMessage) {
+  // If this fails 5 times, message is skipped
+}
+```
+
+### Retry Mechanism With DLQ
+
+When **using DLQ**, failed messages are sent to the DLQ topic after max retries. The message is NOT skipped or dropped.
 
 ## Tech Stack
 
@@ -90,7 +145,7 @@ lib/
 ## Usage Example
 
 ```typescript
-// app.module.ts
+// app.module.ts (Root Module)
 @Module({
   imports: [
     // Infrastructure module (producer, connections)
@@ -100,12 +155,21 @@ lib/
     }),
     // Consumer module (required if using @Consumer decorator)
     ConsumerModule.forRoot(),
+    OrderModule,  // Feature module
   ],
-  providers: [OrderConsumer],
 })
 export class AppModule {}
 
-// order.consumer.ts
+// order/order.module.ts (Feature Module)
+@Module({
+  imports: [
+    ConsumerModule.forFeature([OrderConsumer]),  // Register consumers in feature module
+  ],
+  providers: [OrderConsumer, OrderService],
+})
+export class OrderModule {}
+
+// order/order.consumer.ts
 @Injectable()
 export class OrderConsumer {
   @Consumer('orders')
@@ -124,7 +188,7 @@ export class OrderConsumer {
   }
 }
 
-// order.service.ts
+// order/order.service.ts
 @Injectable()
 export class OrderService {
   constructor(private kafka: KafkaClient) {}

@@ -481,6 +481,49 @@ async handleBinary(message: KafkaMessage) {
 
 ### Retry & Restart on Failure
 
+#### Retry Mechanism (Without DLQ)
+
+When **NOT using DLQ**, the library implements an in-memory retry mechanism with exponential backoff:
+
+```typescript
+@Consumer('orders', {
+  retry: {
+    retries: 3,                    // Default: 3 retries
+    initialRetryTime: 1000,        // Default: 1000ms
+    multiplier: 2,                 // Default: 2 (exponential backoff)
+    skipMessageOnMaxRetries: false, // Default: false (throw error)
+  },
+})
+async handleOrders(message: KafkaMessagePayload) {
+  // If this fails, it will retry: 1s, 2s, 4s delays
+  // After 3 retries, error is thrown (consumer may stop/restart)
+}
+
+// Skip message to avoid blocking consumer (useful for multi-topic consumers)
+@Consumer('non-critical-logs', {
+  retry: {
+    retries: 5,
+    skipMessageOnMaxRetries: true, // Skip message after max retries
+  },
+})
+async handleLogs(message: KafkaMessagePayload) {
+  // If this fails 5 times, message is skipped (offset committed)
+  // Consumer continues processing next message
+}
+```
+
+**Important Notes:**
+- **Default behavior** (`skipMessageOnMaxRetries: false`): Error is thrown after max retries, ensuring no message is silently dropped
+- **Skip mode** (`skipMessageOnMaxRetries: true`): Message is skipped after max retries to prevent consumer blocking
+- **With DLQ**: Messages are sent to DLQ topic after max retries (recommended approach)
+
+**When to use skip mode:**
+- Multi-topic consumers where one failing topic shouldn't block others
+- Non-critical messages that can be safely dropped
+- Development/debugging environments
+
+#### Consumer Restart Control
+
 Control consumer restart behavior when errors occur:
 
 ```typescript
@@ -574,6 +617,7 @@ interface ConsumerOptions {
     factor?: number;              // Default: 0.2
     multiplier?: number;          // Default: 2
     restartOnFailure?: boolean | ((error: Error) => Promise<boolean>);
+    skipMessageOnMaxRetries?: boolean; // Default: false (throw error after max retries)
   };
 }
 ```

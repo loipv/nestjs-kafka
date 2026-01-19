@@ -55,6 +55,15 @@ export interface ConsumerRetryOptions {
    * - function: custom logic to decide
    */
   restartOnFailure?: boolean | ((error: Error) => Promise<boolean>);
+  /**
+   * Skip message after max retries exceeded (for non-DLQ scenarios).
+   * - true: skip message and continue (prevents consumer blocking)
+   * - false: throw error after max retries (default, may cause consumer to stop)
+   *
+   * Note: This only applies when DLQ is NOT configured.
+   * With DLQ, messages are sent to DLQ topic after max retries.
+   */
+  skipMessageOnMaxRetries?: boolean;
 }
 
 export interface ConsumerOptions {
