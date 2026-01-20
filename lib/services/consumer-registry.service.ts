@@ -1,7 +1,12 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { Injectable, Logger, OnApplicationShutdown, Optional } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnApplicationShutdown,
+  Optional,
+} from '@nestjs/common';
 import { Consumer, EachBatchPayload, EachMessagePayload } from 'kafkajs';
 import { KafkaCoreService } from './kafka-core.service';
 import { BatchProcessorService } from './batch-processor.service';
@@ -53,7 +58,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     private readonly dlqService: DlqService,
     private readonly dlqRetryService: DlqRetryService,
     @Optional() private readonly tracingService?: TracingService,
-  ) { }
+  ) {}
 
   registerConsumers(consumers: ConsumerMetadata[]): void {
     // Group consumers by groupId
@@ -82,12 +87,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         maxBytesPerPartition: 1048576,
         retry: options.retry
           ? {
-            retries: options.retry.retries,
-            maxRetryTime: options.retry.maxRetryTime,
-            initialRetryTime: options.retry.initialRetryTime,
-            factor: options.retry.factor,
-            multiplier: options.retry.multiplier,
-          }
+              retries: options.retry.retries,
+              maxRetryTime: options.retry.maxRetryTime,
+              initialRetryTime: options.retry.initialRetryTime,
+              factor: options.retry.factor,
+              multiplier: options.retry.multiplier,
+            }
           : undefined,
       });
 
@@ -205,7 +210,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         try {
           await admin.connect();
           const existingTopics = await admin.listTopics();
-          const newTopics = Array.from(topicsToCreate).filter((t) => !existingTopics.includes(t));
+          const newTopics = Array.from(topicsToCreate).filter(
+            (t) => !existingTopics.includes(t),
+          );
 
           if (newTopics.length > 0) {
             await admin.createTopics({
@@ -476,8 +483,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const deserializedMessages =
       options.deserialize !== false
         ? processableMessages.map((msg) =>
-          deserializeMessage(msg, topic, partition),
-        )
+            deserializeMessage(msg, topic, partition),
+          )
         : processableMessages;
 
     // Process batch - create a span for the batch if tracing is enabled
@@ -491,17 +498,19 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       }
     };
 
-    // For batch processing, use the first message's headers to extract trace context
-    const firstMessage = messages[0];
-    if (this.tracingService?.isEnabled() && firstMessage) {
-      await this.tracingService.withConsumeSpan(
+    // For batch processing, use links to connect all message traces
+    // First message becomes parent, others are linked
+    if (this.tracingService?.isEnabled() && messages.length > 0) {
+      await this.tracingService.withBatchConsumeSpan(
         {
           topic,
           partition,
-          offset: firstMessage.offset,
-          key: firstMessage.key?.toString(),
           groupId,
-          headers: firstMessage.headers,
+          messagesHeaders: messages.map((msg) => ({
+            offset: msg.offset,
+            key: msg.key?.toString(),
+            headers: msg.headers,
+          })),
         },
         processBatch,
       );
@@ -578,7 +587,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           // Skip message to avoid blocking consumer
           this.logger.error(
             `Message from ${topic} failed after ${state.retryCount} retries. Skipping message to avoid blocking consumer. ` +
-            `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
+              `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
           );
           this.logger.error(
             `Dropped message details - Topic: ${topic}, Key: ${message.key?.toString()}, Error: ${error.message}`,
@@ -589,7 +598,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           // Throw error to potentially restart consumer
           this.logger.error(
             `Message from ${topic} failed after ${state.retryCount} retries. Throwing error as configured. ` +
-            `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
+              `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
           );
           throw error;
         }

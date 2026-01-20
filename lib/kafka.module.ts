@@ -44,7 +44,7 @@ export class KafkaModule implements OnModuleInit {
     @Optional()
     @Inject(KAFKA_CONNECTION_NAMES)
     private readonly connectionNames?: string[],
-  ) { }
+  ) {}
 
   onModuleInit(): void {
     // Connection registration is handled by the factory providers
@@ -93,8 +93,10 @@ export class KafkaModule implements OnModuleInit {
 
     return {
       module: KafkaModule,
+      global: true,
       providers,
       exports: [
+        KAFKA_MODULE_OPTIONS,
         optionsToken,
         clientToken,
         KafkaCoreService,
@@ -111,6 +113,7 @@ export class KafkaModule implements OnModuleInit {
   static forRootMultiple(optionsArray: KafkaModuleOptions[]): DynamicModule {
     const providers: Provider[] = [];
     const exports: (string | symbol | Provider)[] = [
+      KAFKA_MODULE_OPTIONS,
       KafkaCoreService,
       KafkaClient,
       KafkaHealthIndicator,
@@ -224,6 +227,7 @@ export class KafkaModule implements OnModuleInit {
       imports: [...(options.imports || [])],
       providers,
       exports: [
+        KAFKA_MODULE_OPTIONS,
         optionsToken,
         clientToken,
         KafkaCoreService,
