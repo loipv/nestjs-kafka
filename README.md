@@ -741,42 +741,19 @@ The library supports distributed tracing with OpenTelemetry, allowing you to tra
 
 1. **Producer**: When sending a message, the library creates a span and injects the trace context (W3C Trace Context format) into Kafka message headers
 2. **Consumer**: When receiving a message, the library extracts the trace context from headers and creates a child span linked to the producer's trace
+3. **Batch Consumer**: For batch processing, the first message's trace becomes the parent, and all other messages are added as span links
 
 ```
 ┌─────────────────┐                         ┌─────────────────┐
-│  Producer App   │                         │  Consumer App   │
-│                 │                         │                 │
+│  HTTP Request   │                         │  Consumer App   │
+│  TraceID: abc   │                         │                 │
 │  ┌───────────┐  │      Kafka Topic        │  ┌───────────┐  │
 │  │  publish  │──┼─────────────────────────┼──│  process  │  │
 │  │  span     │  │  Headers:               │  │  span     │  │
 │  │           │  │  traceparent: 00-abc... │  │           │  │
 │  └───────────┘  │                         │  └───────────┘  │
-│  TraceID: abc   │                         │  TraceID: abc   │
+│                 │                         │  TraceID: abc   │
 └─────────────────┘                         └─────────────────┘
-```
-
-### Enable Tracing
-
-```typescript
-// app.module.ts
-import { Module } from '@nestjs/common';
-import { KafkaModule, ConsumerModule } from '@loipv/nestjs-kafka';
-
-@Module({
-  imports: [
-    KafkaModule.forRoot({
-      clientId: 'my-app',
-      brokers: ['localhost:9092'],
-      tracing: {
-        enabled: true,
-        tracerName: '@loipv/nestjs-kafka', // Optional: custom tracer name
-        tracerVersion: '1.0.0',            // Optional: custom tracer version
-      },
-    }),
-    ConsumerModule.forRoot(),
-  ],
-})
-export class AppModule {}
 ```
 
 ### Prerequisites
@@ -784,10 +761,10 @@ export class AppModule {}
 1. Install OpenTelemetry packages:
 
 ```bash
-npm install @opentelemetry/api @opentelemetry/sdk-trace-node @opentelemetry/exporter-trace-otlp-http
+npm install @opentelemetry/api @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http
 ```
 
-2. Initialize OpenTelemetry SDK before your NestJS app starts:
+2. **IMPORTANT**: Initialize OpenTelemetry SDK **BEFORE** your NestJS app starts:
 
 ```typescript
 // tracing.ts
@@ -810,7 +787,7 @@ sdk.start();
 
 ```typescript
 // main.ts
-import './tracing'; // Initialize tracing first
+import './tracing'; // MUST be first import
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
@@ -821,32 +798,147 @@ async function bootstrap() {
 bootstrap();
 ```
 
+### Important: Disable KafkaJS Auto-Instrumentation
+
+If you're using `@opentelemetry/auto-instrumentations-node`, you **MUST** disable the KafkaJS auto-instrumentation to use this library's tracing. Otherwise, you'll get duplicate spans and the library's spans (with `consumer.group` attribute) won't be used.
+
+```typescript
+// tracing.ts
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+
+const sdk = new NodeSDK({
+  instrumentations: [
+    getNodeAutoInstrumentations({
+      // Disable kafkajs auto-instrumentation
+      '@opentelemetry/instrumentation-kafkajs': {
+        enabled: false,
+      },
+    }),
+  ],
+  // ... other config
+});
+
+sdk.start();
+```
+
+### Enable Tracing
+
+```typescript
+// app.module.ts
+import { Module } from '@nestjs/common';
+import { KafkaModule, ConsumerModule } from '@loipv/nestjs-kafka';
+
+@Module({
+  imports: [
+    KafkaModule.forRoot({
+      clientId: 'my-app',
+      brokers: ['localhost:9092'],
+      tracing: {
+        enabled: true,                        // Required: enable tracing
+        tracerName: 'my-kafka-service',       // Optional: custom tracer name
+        tracerVersion: '1.0.0',               // Optional: custom tracer version
+      },
+    }),
+    ConsumerModule.forRoot(),
+  ],
+})
+export class AppModule {}
+```
+
 ### Tracing Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable OpenTelemetry tracing |
 | `tracerName` | string | `'@loipv/nestjs-kafka'` | Custom tracer name |
-| `tracerVersion` | string | - | Custom tracer version |
+| `tracerVersion` | string | `'0.0.1'` | Custom tracer version |
 
-### Span Attributes
+### Span Names
+
+Span names include the consumer group for easy identification in tracing UI:
+
+| Type | Span Name Format | Example |
+|------|------------------|---------|
+| Producer | `{topic} publish` | `orders publish` |
+| Consumer | `{groupId} {topic} process` | `order-group orders process` |
+| Batch Consumer | `{groupId} {topic} process batch` | `order-group orders process batch` |
+
+### Span Attributes (OpenTelemetry Semantic Conventions v1.24+)
 
 **Producer Span:**
-- `messaging.system`: `'kafka'`
-- `messaging.destination`: Topic name
-- `messaging.destination_kind`: `'topic'`
-- `messaging.operation`: `'publish'`
-- `messaging.kafka.message_key`: Message key (if present)
+
+| Attribute | Example | Description |
+|-----------|---------|-------------|
+| `messaging.system` | `kafka` | Messaging system |
+| `messaging.destination.name` | `orders` | Topic name |
+| `messaging.operation.name` | `publish` | Operation name |
+| `messaging.operation.type` | `publish` | Operation type |
+| `messaging.destination.partition.id` | `0` | Partition (if specified) |
+| `messaging.kafka.message.key` | `customer-123` | Message key (if present) |
 
 **Consumer Span:**
-- `messaging.system`: `'kafka'`
-- `messaging.destination`: Topic name
-- `messaging.destination_kind`: `'topic'`
-- `messaging.operation`: `'process'`
-- `messaging.message_id`: Message offset
-- `messaging.kafka.partition`: Partition number
-- `messaging.kafka.consumer_group`: Consumer group ID
-- `messaging.kafka.message_key`: Message key (if present)
+
+| Attribute | Example | Description |
+|-----------|---------|-------------|
+| `messaging.system` | `kafka` | Messaging system |
+| `messaging.destination.name` | `orders` | Topic name |
+| `messaging.destination.partition.id` | `0` | Partition number |
+| `messaging.operation.name` | `process` | Operation name |
+| `messaging.operation.type` | `process` | Operation type |
+| `messaging.kafka.offset` | `12345` | Message offset |
+| `messaging.kafka.consumer.group` | `order-group` | Consumer group ID |
+| `messaging.kafka.message.key` | `customer-123` | Message key (if present) |
+
+**Batch Consumer Span (additional):**
+
+| Attribute | Example | Description |
+|-----------|---------|-------------|
+| `messaging.batch.message_count` | `100` | Number of messages in batch |
+
+### Batch Tracing with Links
+
+For batch consumers (`batch: true`), messages from different requests/traces are processed together. The library handles this by:
+
+1. **First message's trace** becomes the **parent** (for trace continuity)
+2. **All other messages** are added as **span links** (shows relationship in tracing UI)
+
+```
+Request A (trace-A) ──publish──▶ Message 1 ──┐
+Request B (trace-B) ──publish──▶ Message 2 ──┼──▶ Batch Consumer Span
+Request C (trace-C) ──publish──▶ Message 3 ──┘      │
+                                                     ├── Parent: trace-A
+                                                     └── Links: [trace-B, trace-C]
+```
+
+This allows you to:
+- Follow the full trace from the first message's request
+- See all related traces via span links in your tracing UI (Jaeger, Zipkin, etc.)
+
+### Trace Context Propagation
+
+The library uses W3C Trace Context format for propagation via Kafka headers:
+
+| Header | Format | Example |
+|--------|--------|---------|
+| `traceparent` | `{version}-{traceId}-{spanId}-{flags}` | `00-abc123...-def456...-01` |
+| `tracestate` | Vendor-specific state | `vendor=value` |
+
+### Troubleshooting
+
+**No spans appearing:**
+1. Ensure `tracing.enabled: true` in KafkaModule options
+2. Ensure OpenTelemetry SDK is initialized **before** NestJS app starts
+3. Ensure `@opentelemetry/api` is installed
+4. If using auto-instrumentations, disable `@opentelemetry/instrumentation-kafkajs`
+
+**Missing `messaging.kafka.consumer.group` attribute:**
+- You're likely using `@opentelemetry/instrumentation-kafkajs` which creates its own spans
+- Disable it and use this library's TracingService instead
+
+**Duplicate spans:**
+- Both auto-instrumentation and this library are creating spans
+- Disable `@opentelemetry/instrumentation-kafkajs` in auto-instrumentations config
 
 ## API Reference
 
