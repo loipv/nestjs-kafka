@@ -1,10 +1,18 @@
-import { Injectable, OnApplicationShutdown, Logger, Optional } from '@nestjs/common';
-import { ProducerRecord, Message } from 'kafkajs';
+import {
+  Injectable,
+  OnApplicationShutdown,
+  Logger,
+  Optional,
+} from '@nestjs/common';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import {
   ProducerMessage,
   SendOptions,
   DEFAULT_KAFKA_CONNECTION,
 } from '../interfaces';
+
+type ProducerRecord = KafkaJS.ProducerRecord;
+type Message = KafkaJS.Message;
 import { KafkaCoreService } from './kafka-core.service';
 import { TracingService } from './tracing.service';
 
@@ -58,9 +66,6 @@ export class KafkaClient implements OnApplicationShutdown {
     const record: ProducerRecord = {
       topic,
       messages: [kafkaMessage],
-      acks: options?.acks,
-      timeout: options?.timeout,
-      compression: options?.compression,
     };
 
     try {
@@ -105,9 +110,6 @@ export class KafkaClient implements OnApplicationShutdown {
     const record: ProducerRecord = {
       topic,
       messages: kafkaMessages,
-      acks: options?.acks,
-      timeout: options?.timeout,
-      compression: options?.compression,
     };
 
     try {
@@ -122,7 +124,9 @@ export class KafkaClient implements OnApplicationShutdown {
         `[${connectionName}] Failed to send batch to topic: ${topic}`,
         error,
       );
-      spans.forEach((span) => this.tracingService?.endProduceSpan(span, error as Error));
+      spans.forEach((span) =>
+        this.tracingService?.endProduceSpan(span, error as Error),
+      );
       throw error;
     }
   }
@@ -153,9 +157,6 @@ export class KafkaClient implements OnApplicationShutdown {
           return this.serializeMessage({ ...msg, headers });
         }),
       })),
-      acks: options?.acks,
-      timeout: options?.timeout,
-      compression: options?.compression,
     };
 
     try {
@@ -170,7 +171,9 @@ export class KafkaClient implements OnApplicationShutdown {
         `[${connectionName}] Failed to send multi-topic batch`,
         error,
       );
-      allSpans.forEach((span) => this.tracingService?.endProduceSpan(span, error as Error));
+      allSpans.forEach((span) =>
+        this.tracingService?.endProduceSpan(span, error as Error),
+      );
       throw error;
     }
   }

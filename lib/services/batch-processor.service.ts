@@ -1,10 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { KafkaMessage, EachBatchPayload } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import {
   ConsumerOptions,
   GroupedBatch,
   KafkaMessagePayload,
 } from '../interfaces';
+
+type KafkaMessage = KafkaJS.KafkaMessage;
+type EachBatchPayload = KafkaJS.EachBatchPayload;
 
 interface BatchAccumulator {
   add: (message: KafkaMessage) => Promise<void>;
@@ -127,7 +130,7 @@ export class BatchProcessorService {
 
         await accumulator.add(message);
         payload.resolveOffset(message.offset);
-        await payload.heartbeat();
+        // Note: heartbeat() is automatic in confluent-kafka-javascript
       }
 
       await accumulator.flush();

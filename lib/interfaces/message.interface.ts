@@ -1,4 +1,7 @@
-import { IHeaders, KafkaMessage } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
+
+type IHeaders = KafkaJS.IHeaders;
+type KafkaMessage = KafkaJS.KafkaMessage;
 
 export interface KafkaMessagePayload<T = any> {
   key?: string | null;
@@ -103,10 +106,16 @@ export interface ProducerMessage {
   timestamp?: string;
 }
 
+/**
+ * Options for sending messages.
+ *
+ * BREAKING CHANGE (v1.0.0): acks, timeout, and compression have been moved to
+ * producer-level configuration in KafkaModule.forRoot({ producer: { ... } }).
+ * These options are no longer supported per-send call in confluent-kafka-javascript.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface SendOptions {
-  acks?: -1 | 0 | 1;
-  timeout?: number;
-  compression?: 0 | 1 | 2 | 3 | 4;
+  // Note: acks, timeout, compression removed - now configured at producer level
 }
 
 export interface GroupedBatch<T = any> {

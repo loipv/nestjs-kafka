@@ -16,7 +16,7 @@ describe('KafkaHealthIndicator', () => {
         const mockAdminClient = {
             connect: jest.fn(),
             disconnect: jest.fn(),
-            describeCluster: jest.fn(),
+            listTopics: jest.fn(),
             fetchOffsets: jest.fn(),
         };
 
@@ -69,24 +69,19 @@ describe('KafkaHealthIndicator', () => {
     });
 
     describe('checkBrokers', () => {
-        it('should return cluster info when brokers are healthy', async () => {
-            const mockClusterInfo = {
-                brokers: [{ nodeId: 0, host: 'localhost', port: 9092 }],
-                controller: 0,
-                clusterId: 'test-cluster',
-            };
+        it('should return connected info when brokers are healthy', async () => {
+            const mockTopics = ['topic-1', 'topic-2', 'topic-3'];
 
             const admin = kafkaCore.getKafka().admin();
-            (admin.describeCluster as jest.Mock).mockResolvedValue(mockClusterInfo);
+            (admin.listTopics as jest.Mock).mockResolvedValue(mockTopics);
 
             const result = await healthIndicator.checkBrokers('kafka-brokers');
 
             expect(result).toEqual({
                 'kafka-brokers': {
                     status: 'up',
-                    brokers: 1,
-                    controller: 0,
-                    clusterId: 'test-cluster',
+                    connected: true,
+                    topicCount: 3,
                 },
             });
             expect(admin.connect).toHaveBeenCalled();

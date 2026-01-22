@@ -1,7 +1,7 @@
 {
   "name": "@loipv/nestjs-kafka",
-  "version": "0.1.0",
-  "description": "A production-ready NestJS module for Kafka client and consumer functionality built on top of kafkajs",
+  "version": "1.0.0",
+  "description": "A production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript",
   "author": "loipv792@gmail.com",
   "private": false,
   "license": "MIT",
@@ -13,7 +13,9 @@
   "keywords": [
     "nestjs",
     "kafka",
-    "kafkajs",
+    "confluent",
+    "confluent-kafka",
+    "librdkafka",
     "consumer",
     "producer",
     "batch",
@@ -39,7 +41,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "kafkajs": "^2.2.4"
+    "@confluentinc/kafka-javascript": "^1.8.0"
   },
   "peerDependencies": {
     "@nestjs/common": "^11.0.0",

@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Kafka, logLevel, Producer } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { KafkaModuleOptions, DEFAULT_KAFKA_CONNECTION } from '../interfaces';
+
+type Kafka = InstanceType<typeof KafkaJS.Kafka>;
+type Producer = KafkaJS.Producer;
 
 interface KafkaConnection {
   kafka: Kafka;
@@ -27,36 +30,36 @@ export class KafkaCoreService {
       return;
     }
 
-    const kafka = new Kafka({
+    // Build Kafka config with only defined values to avoid undefined property issues
+    const kafkaConfig: KafkaJS.KafkaConfig = {
       clientId: options.clientId,
       brokers: options.brokers as string[],
-      ssl: options.ssl,
-      sasl: options.sasl,
-      connectionTimeout: options.connectionTimeout,
-      requestTimeout: options.requestTimeout,
-      enforceRequestTimeout: options.enforceRequestTimeout,
-      retry: options.retry,
       logLevel: this.mapLogLevel(options.logLevel),
-      logCreator:
-        () =>
-        ({ level, log }) => {
-          const { message, ...extra } = log;
-          switch (level) {
-            case logLevel.ERROR:
-              this.logger.error(`[${name}] ${message}`, extra);
-              break;
-            case logLevel.WARN:
-              this.logger.warn(`[${name}] ${message}`, extra);
-              break;
-            case logLevel.INFO:
-              this.logger.log(`[${name}] ${message}`);
-              break;
-            case logLevel.DEBUG:
-              this.logger.debug(`[${name}] ${message}`);
-              break;
-          }
-        },
-    });
+      // Use default library logger - custom logger can cause issues with internal log formatting
+    };
+
+    // Add optional settings only if defined
+    if (options.ssl !== undefined) {
+      kafkaConfig.ssl =
+        typeof options.ssl === 'boolean' ? options.ssl : !!options.ssl;
+    }
+    if (options.sasl !== undefined) {
+      kafkaConfig.sasl = options.sasl;
+    }
+    if (options.connectionTimeout !== undefined) {
+      kafkaConfig.connectionTimeout = options.connectionTimeout;
+    }
+    if (options.requestTimeout !== undefined) {
+      kafkaConfig.requestTimeout = options.requestTimeout;
+    }
+    if (options.enforceRequestTimeout !== undefined) {
+      kafkaConfig.enforceRequestTimeout = options.enforceRequestTimeout;
+    }
+    if (options.retry !== undefined) {
+      kafkaConfig.retry = options.retry;
+    }
+
+    const kafka = new KafkaJS.Kafka({ kafkaJS: kafkaConfig });
 
     const producer = kafka.producer(options.producer);
 
@@ -163,20 +166,20 @@ export class KafkaCoreService {
     }
   }
 
-  private mapLogLevel(level?: string): logLevel {
+  private mapLogLevel(level?: string): KafkaJS.logLevel {
     switch (level) {
       case 'NOTHING':
-        return logLevel.NOTHING;
+        return KafkaJS.logLevel.NOTHING;
       case 'ERROR':
-        return logLevel.ERROR;
+        return KafkaJS.logLevel.ERROR;
       case 'WARN':
-        return logLevel.WARN;
+        return KafkaJS.logLevel.WARN;
       case 'INFO':
-        return logLevel.INFO;
+        return KafkaJS.logLevel.INFO;
       case 'DEBUG':
-        return logLevel.DEBUG;
+        return KafkaJS.logLevel.DEBUG;
       default:
-        return logLevel.INFO;
+        return KafkaJS.logLevel.INFO;
     }
   }
 }

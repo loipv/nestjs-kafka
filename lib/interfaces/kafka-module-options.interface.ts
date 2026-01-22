@@ -1,16 +1,15 @@
 import { ModuleMetadata, Type } from '@nestjs/common';
-import { SASLOptions } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
+
+type SASLOptions = KafkaJS.SASLOptions;
 
 export interface RetryOptions {
   initialRetryTime?: number;
   retries?: number;
   maxRetryTime?: number;
-  factor?: number;
-  multiplier?: number;
 }
 
 export interface ProducerConfig {
-  createPartitioner?: () => any;
   retry?: RetryOptions;
   metadataMaxAge?: number;
   allowAutoTopicCreation?: boolean;
@@ -18,6 +17,25 @@ export interface ProducerConfig {
   transactionalId?: string;
   transactionTimeout?: number;
   maxInFlightRequests?: number;
+  /**
+   * Number of acknowledgments the producer requires before considering a request complete.
+   * -1: All in-sync replicas (default)
+   * 0: No acknowledgment
+   * 1: Leader acknowledgment only
+   * Note: In confluent-kafka-javascript, this is set at producer level, not per-send
+   */
+  acks?: -1 | 0 | 1;
+  /**
+   * Compression type for messages.
+   * 0: None, 1: GZIP, 2: Snappy, 3: LZ4, 4: ZSTD
+   * Note: In confluent-kafka-javascript, this is set at producer level, not per-send
+   */
+  compression?: 0 | 1 | 2 | 3 | 4;
+  /**
+   * Maximum time in ms to wait for the producer to send a message.
+   * Note: In confluent-kafka-javascript, this is set at producer level, not per-send
+   */
+  timeout?: number;
 }
 
 export interface TracingOptions {

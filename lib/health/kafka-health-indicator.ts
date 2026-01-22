@@ -76,19 +76,21 @@ export class KafkaHealthIndicator {
 
   /**
    * Check Kafka brokers connectivity and cluster info
+   * Note: In confluent-kafka-javascript, describeCluster is not available.
+   * We use listTopics to verify connectivity instead.
    */
   async checkBrokers(key: string): Promise<HealthIndicatorResult> {
     try {
       const admin = this.kafkaCore.getKafka().admin();
       await admin.connect();
 
-      const clusterInfo = await admin.describeCluster();
+      // Use listTopics to verify connectivity (describeCluster not available)
+      const topics = await admin.listTopics();
       await admin.disconnect();
 
       const details = {
-        brokers: clusterInfo.brokers.length,
-        controller: clusterInfo.controller,
-        clusterId: clusterInfo.clusterId,
+        connected: true,
+        topicCount: topics.length,
       };
 
       if (this.healthIndicatorService) {

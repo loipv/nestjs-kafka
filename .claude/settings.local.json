@@ -5,7 +5,9 @@
       "WebFetch(domain:docs.nestjs.com)",
       "WebFetch(domain:kafka.js.org)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:nestjs.github.io)"
+      "WebFetch(domain:nestjs.github.io)",
+      "Bash(npm run build:*)",
+      "Bash(npm test)"
     ]
   }
 }

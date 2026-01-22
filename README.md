@@ -1,6 +1,8 @@
 # @loipv/nestjs-kafka
 
-A production-ready NestJS module for Kafka client and consumer functionality built on top of [KafkaJS](https://kafka.js.org/). This library provides enterprise-grade features including intelligent batch processing, idempotency guarantees, key-based grouping, and automatic pressure management.
+A production-ready NestJS module for Kafka client and consumer functionality built on top of [confluent-kafka-javascript](https://github.com/confluentinc/confluent-kafka-javascript). This library provides enterprise-grade features including intelligent batch processing, idempotency guarantees, key-based grouping, and automatic pressure management.
+
+> **Note:** Starting from v1.0.0, this library uses `@confluentinc/kafka-javascript` instead of `kafkajs` for better performance and official Confluent support. See [Migration Guide](#migration-guide-from-v0x-to-v1x) for upgrade instructions.
 
 ## Features
 
@@ -18,7 +20,7 @@ A production-ready NestJS module for Kafka client and consumer functionality bui
 ## Installation
 
 ```bash
-npm install @loipv/nestjs-kafka kafkajs
+npm install @loipv/nestjs-kafka @confluentinc/kafka-javascript
 ```
 
 ### Peer Dependencies
@@ -28,6 +30,14 @@ Make sure you have the following peer dependencies installed:
 ```bash
 npm install @nestjs/common @nestjs/core @nestjs/terminus reflect-metadata rxjs
 ```
+
+### Platform Support
+
+confluent-kafka-javascript is built on librdkafka (C library). Supported platforms:
+- **Linux**: x64, arm64
+- **macOS**: arm64 (Apple Silicon)
+- **Windows**: x64
+- **Node.js**: 18, 20, 21, 22
 
 ### Optional: OpenTelemetry Tracing
 
@@ -80,7 +90,7 @@ export class OrderModule {}
 ```typescript
 import { Injectable } from '@nestjs/common';
 import { Consumer } from '@loipv/nestjs-kafka';
-import { KafkaMessage } from 'kafkajs';
+import { KafkaMessage } from '@confluentinc/kafka-javascript/kafkajs';
 
 @Injectable()
 export class OrderConsumer {
@@ -463,6 +473,34 @@ async handleOrder(message: KafkaMessage) {
 
 Use this to temporarily disable a consumer without removing the code.
 
+### Partition Assignment Strategy
+
+Control how partitions are assigned to consumers in a consumer group:
+
+```typescript
+@Consumer('orders', {
+  groupId: 'order-processors',
+  // Use cooperative-sticky for minimal rebalancing disruption
+  partitionAssigners: ['cooperative-sticky'],
+})
+async handleOrder(message: KafkaMessage) {
+  // Process order
+}
+
+// Multiple strategies (first one is primary)
+@Consumer('events', {
+  partitionAssigners: ['roundrobin', 'range'],
+})
+async handleEvent(message: KafkaMessage) {
+  // Process event
+}
+```
+
+**Available strategies:**
+- `'roundrobin'` - Assigns partitions in round-robin fashion across consumers
+- `'range'` - Assigns partitions based on ranges (default)
+- `'cooperative-sticky'` - Cooperative rebalancing with sticky assignment (recommended for minimal disruption during rebalancing)
+
 ### Auto-Deserialization
 
 Messages are automatically deserialized by default:
@@ -488,9 +526,7 @@ async handleBinary(message: KafkaMessage) {
 }
 ```
 
-### Retry & Restart on Failure
-
-#### Retry Mechanism (Without DLQ)
+### Retry Mechanism (Without DLQ)
 
 When **NOT using DLQ**, the library implements an in-memory retry mechanism with exponential backoff:
 
@@ -530,40 +566,6 @@ async handleLogs(message: KafkaMessagePayload) {
 - Multi-topic consumers where one failing topic shouldn't block others
 - Non-critical messages that can be safely dropped
 - Development/debugging environments
-
-#### Consumer Restart Control
-
-Control consumer restart behavior when errors occur:
-
-```typescript
-// Disable restart on failure
-@Consumer('critical-topic', {
-  retry: {
-    restartOnFailure: false,
-  },
-})
-async handleCritical(message: KafkaMessagePayload) {
-  // Consumer will NOT restart if this throws
-}
-
-// Custom restart logic
-@Consumer('orders', {
-  retry: {
-    retries: 10,
-    maxRetryTime: 60000,
-    restartOnFailure: async (error) => {
-      // Don't restart on authentication errors
-      if (error.message.includes('authentication')) {
-        return false;
-      }
-      return true; // Restart for other errors
-    },
-  },
-})
-async handleOrders(message: KafkaMessagePayload) {
-  // Process order
-}
-```
 
 ### All Consumer Options
 
@@ -618,14 +620,15 @@ interface ConsumerOptions {
   autoCommitInterval?: number;
   fromBeginning?: boolean;        // Default: false
 
-  // Retry & restart on failure
+  // Partition assignment strategy
+  partitionAssigners?: PartitionAssigner[];  // 'roundrobin' | 'range' | 'cooperative-sticky'
+
+  // Retry options
   retry?: {
     retries?: number;             // Default: 5
     maxRetryTime?: number;        // Default: 30000
     initialRetryTime?: number;    // Default: 300
-    factor?: number;              // Default: 0.2
-    multiplier?: number;          // Default: 2
-    restartOnFailure?: boolean | ((error: Error) => Promise<boolean>);
+    multiplier?: number;          // Default: 2 (exponential backoff)
     skipMessageOnMaxRetries?: boolean; // Default: false (throw error after max retries)
   };
 }
@@ -659,13 +662,26 @@ await kafka.sendMultiTopicBatch([
 await kafka.sendQueued('topic', { value: 'message' });
 ```
 
-### Send Options
+### Producer Options
+
+> **Note:** In v1.0.0+, `acks`, `timeout`, and `compression` are configured at the producer level in `KafkaModule.forRoot()`, not per-send call.
 
 ```typescript
-await kafka.send('topic', message, {
-  acks: -1,        // -1 (all), 0 (none), 1 (leader only)
-  timeout: 30000,
-  compression: 1,  // 0=None, 1=GZIP, 2=Snappy, 3=LZ4, 4=ZSTD
+// Configure producer options at module level
+KafkaModule.forRoot({
+  clientId: 'my-app',
+  brokers: ['localhost:9092'],
+  producer: {
+    acks: -1,        // -1 (all), 0 (none), 1 (leader only)
+    timeout: 30000,
+    compression: 1,  // 0=None, 1=GZIP, 2=Snappy, 3=LZ4, 4=ZSTD
+  },
+});
+
+// Send messages (acks/timeout/compression configured above)
+await kafka.send('topic', {
+  key: 'message-key',
+  value: { data: 'value' },
 });
 ```
 
@@ -974,6 +990,124 @@ export {
   GroupedBatch,
 } from './interfaces';
 ```
+
+## Migration Guide (from v0.x to v1.x)
+
+v1.0.0 introduces a **breaking change**: migrating from `kafkajs` to `@confluentinc/kafka-javascript` for better performance and official Confluent support.
+
+### Why Migrate?
+
+- **Performance**: confluent-kafka-javascript is built on librdkafka (C library) - significantly better performance
+- **Commercial Support**: Official Confluent support
+- **Active Development**: More active development compared to kafkajs
+
+### Breaking Changes
+
+#### 1. Install Dependencies
+
+```bash
+# Remove kafkajs, add confluent-kafka-javascript
+npm uninstall kafkajs
+npm install @confluentinc/kafka-javascript
+```
+
+#### 2. Update Imports
+
+```typescript
+// Before (v0.x)
+import { KafkaMessage } from 'kafkajs';
+
+// After (v1.x)
+import { KafkaMessage } from '@confluentinc/kafka-javascript/kafkajs';
+```
+
+#### 3. Producer Options Moved to Module Level
+
+`acks`, `timeout`, and `compression` are now configured at the producer level, not per-send call.
+
+```typescript
+// Before (v0.x) - per-send options
+await kafka.send('topic', message, {
+  acks: -1,
+  timeout: 30000,
+  compression: 1,
+});
+
+// After (v1.x) - producer-level options
+KafkaModule.forRoot({
+  clientId: 'my-app',
+  brokers: ['localhost:9092'],
+  producer: {
+    acks: -1,
+    timeout: 30000,
+    compression: 1,
+  },
+});
+
+await kafka.send('topic', message); // No acks/timeout/compression
+```
+
+#### 4. autoCommitThreshold Removed
+
+`autoCommitThreshold` is not supported in confluent-kafka-javascript. Remove this option from your consumer configuration.
+
+```typescript
+// Before (v0.x)
+@Consumer('topic', {
+  autoCommitThreshold: 100, // Not supported
+})
+
+// After (v1.x)
+@Consumer('topic', {
+  // autoCommitThreshold removed - use autoCommitInterval instead
+  autoCommitInterval: 5000,
+})
+```
+
+#### 5. Retry Options Changes
+
+The following retry options have been removed as they are not supported in confluent-kafka-javascript:
+
+- `retry.restartOnFailure` - Consumer restart control is handled by the library internally
+- `retry.factor` - Use `retry.multiplier` for exponential backoff
+
+```typescript
+// Before (v0.x)
+@Consumer('topic', {
+  retry: {
+    restartOnFailure: false,  // Removed
+    factor: 0.2,              // Removed
+  },
+})
+
+// After (v1.x)
+@Consumer('topic', {
+  retry: {
+    retries: 3,
+    multiplier: 2,            // Use multiplier for backoff
+  },
+})
+```
+
+#### 6. Platform Requirements
+
+confluent-kafka-javascript only supports:
+- **Linux**: x64, arm64
+- **macOS**: arm64 (Apple Silicon)
+- **Windows**: x64
+- **Node.js**: 18, 20, 21, 22
+
+### No Changes Required
+
+The following features work the same way:
+- `@Consumer()` decorator syntax
+- `KafkaClient.send()`, `sendBatch()`, `sendMultiTopicBatch()`, `sendQueued()`
+- DLQ configuration and retry
+- OpenTelemetry tracing
+- Health checks
+- Multi-connection support
+- Batch processing and key grouping
+- Idempotency and back pressure
 
 ## License
 

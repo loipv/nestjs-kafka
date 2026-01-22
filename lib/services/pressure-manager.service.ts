@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Consumer } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { PressureState, PressureManagerOptions } from '../interfaces';
+
+type Consumer = KafkaJS.Consumer;
 
 @Injectable()
 export class PressureManagerService {

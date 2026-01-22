@@ -1,4 +1,14 @@
-import { KafkaMessage } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
+
+type KafkaMessage = KafkaJS.KafkaMessage;
+
+/**
+ * Partition assignment strategies for consumer groups.
+ * - roundRobin: Assigns partitions to consumers in a round-robin fashion
+ * - range: Assigns partitions to consumers based on ranges
+ * - cooperativeSticky: Cooperative rebalancing with sticky assignment (recommended for minimal rebalancing disruption)
+ */
+export type PartitionAssigner = 'roundrobin' | 'range' | 'cooperative-sticky';
 
 /**
  * Options for DLQ retry - auto consume from DLQ and retry handler
@@ -44,17 +54,8 @@ export interface ConsumerRetryOptions {
   maxRetryTime?: number;
   /** Initial value used to calculate retry in ms. Default: 300 */
   initialRetryTime?: number;
-  /** Randomization factor. Default: 0.2 */
-  factor?: number;
-  /** Exponential factor. Default: 2 */
+  /** Exponential factor for internal retry backoff calculation. Default: 2 */
   multiplier?: number;
-  /**
-   * Control whether to restart consumer on failure.
-   * - true: always restart (default)
-   * - false: never restart
-   * - function: custom logic to decide
-   */
-  restartOnFailure?: boolean | ((error: Error) => Promise<boolean>);
   /**
    * Skip message after max retries exceeded (for non-DLQ scenarios).
    * - true: skip message and continue (prevents consumer blocking)
@@ -102,12 +103,23 @@ export interface ConsumerOptions {
 
   autoCommit?: boolean;
   autoCommitInterval?: number;
-  autoCommitThreshold?: number;
+  // Note: autoCommitThreshold is NOT supported in confluent-kafka-javascript
 
   fromBeginning?: boolean;
 
   /** Allow auto creation of topic if it doesn't exist. Default: false */
   allowAutoTopicCreation?: boolean;
+
+  /**
+   * Partition assignment strategies for consumer group rebalancing.
+   * - 'roundrobin': Assigns partitions in round-robin fashion
+   * - 'range': Assigns partitions based on ranges (default)
+   * - 'cooperative-sticky': Cooperative rebalancing with sticky assignment (recommended)
+   *
+   * Can specify multiple strategies; first one is primary.
+   * @example ['cooperative-sticky'] or ['roundrobin', 'range']
+   */
+  partitionAssigners?: PartitionAssigner[];
 
   /** Retry options for consumer restart on failure */
   retry?: ConsumerRetryOptions;

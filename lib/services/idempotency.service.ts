@@ -1,5 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import { KafkaMessage } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
+
+type KafkaMessage = KafkaJS.KafkaMessage;
 
 interface IdempotencyEntry {
   key: string;

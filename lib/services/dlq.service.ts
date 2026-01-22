@@ -1,6 +1,9 @@
 import { Injectable, Logger, forwardRef, Inject } from '@nestjs/common';
-import { KafkaMessage, IHeaders } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { KafkaClient } from './kafka-client.service';
+
+type KafkaMessage = KafkaJS.KafkaMessage;
+type IHeaders = KafkaJS.IHeaders;
 import { DlqOptions } from '../interfaces';
 import { DlqMetricsService } from './dlq-metrics.service';
 import { CircuitBreakerService, CircuitState } from './circuit-breaker.service';
@@ -8,7 +11,7 @@ import { CircuitBreakerService, CircuitState } from './circuit-breaker.service';
 // Header constants for clarity
 export const DLQ_HEADERS = {
   ORIGINAL_TOPIC: 'x-dlq-original-topic',
-  HANDLER_RETRY_COUNT: 'x-dlq-handler-retry-count',  // Renamed from x-dlq-retry-count
+  HANDLER_RETRY_COUNT: 'x-dlq-handler-retry-count', // Renamed from x-dlq-retry-count
   TIMESTAMP: 'x-dlq-timestamp',
   ERROR_MESSAGE: 'x-dlq-error-message',
   ERROR_STACK: 'x-dlq-error-stack',
@@ -29,7 +32,7 @@ export class DlqService {
     private readonly kafkaClient: KafkaClient,
     private readonly metrics: DlqMetricsService,
     private readonly circuitBreaker: CircuitBreakerService,
-  ) { }
+  ) {}
 
   async handleFailure(
     message: KafkaMessage,

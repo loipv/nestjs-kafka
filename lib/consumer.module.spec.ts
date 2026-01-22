@@ -11,28 +11,34 @@ import { DlqService } from './services/dlq.service';
 import { DlqRetryService } from './services/dlq-retry.service';
 import { Consumer } from './decorators/consumer.decorator';
 
-// Mock kafkajs
-jest.mock('kafkajs', () => ({
-    Kafka: jest.fn().mockImplementation(() => ({
-        producer: jest.fn().mockReturnValue({
-            connect: jest.fn(),
-            disconnect: jest.fn(),
-            send: jest.fn(),
-        }),
-        consumer: jest.fn().mockReturnValue({
-            connect: jest.fn(),
-            disconnect: jest.fn(),
-            subscribe: jest.fn(),
-            run: jest.fn(),
-            stop: jest.fn(),
-        }),
-    })),
-    logLevel: {
-        NOTHING: 0,
-        ERROR: 1,
-        WARN: 2,
-        INFO: 4,
-        DEBUG: 5,
+// Mock @confluentinc/kafka-javascript
+jest.mock('@confluentinc/kafka-javascript', () => ({
+    KafkaJS: {
+        Kafka: jest.fn().mockImplementation(() => ({
+            producer: jest.fn().mockReturnValue({
+                connect: jest.fn(),
+                disconnect: jest.fn(),
+                send: jest.fn(),
+            }),
+            consumer: jest.fn().mockReturnValue({
+                connect: jest.fn(),
+                disconnect: jest.fn(),
+                subscribe: jest.fn(),
+                run: jest.fn(),
+            }),
+            admin: jest.fn().mockReturnValue({
+                connect: jest.fn(),
+                disconnect: jest.fn(),
+                listTopics: jest.fn().mockResolvedValue([]),
+            }),
+        })),
+        logLevel: {
+            NOTHING: 0,
+            ERROR: 1,
+            WARN: 2,
+            INFO: 4,
+            DEBUG: 5,
+        },
     },
 }));
 

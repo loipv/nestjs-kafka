@@ -7,8 +7,12 @@ import {
   OnApplicationShutdown,
   Optional,
 } from '@nestjs/common';
-import { Consumer, EachBatchPayload, EachMessagePayload } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { KafkaCoreService } from './kafka-core.service';
+
+type Consumer = KafkaJS.Consumer;
+type EachBatchPayload = KafkaJS.EachBatchPayload;
+type EachMessagePayload = KafkaJS.EachMessagePayload;
 import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
 import { PressureManagerService } from './pressure-manager.service';
@@ -18,7 +22,6 @@ import { TracingService } from './tracing.service';
 import {
   ConsumerMetadata,
   ConsumerOptions,
-  ConsumerRetryOptions,
   DEFAULT_KAFKA_CONNECTION,
   deserializeMessage,
 } from '../interfaces';
@@ -79,22 +82,47 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     let group = this.consumerGroups.get(groupKey);
 
     if (!group) {
-      const consumer = this.kafkaCore.getKafka(connectionName).consumer({
+      // Build consumer config with only defined values
+      const consumerConfig: KafkaJS.ConsumerConfig = {
         groupId,
-        sessionTimeout: options.sessionTimeout,
-        heartbeatInterval: options.heartbeatInterval,
-        rebalanceTimeout: options.rebalanceTimeout,
         maxBytesPerPartition: 1048576,
-        retry: options.retry
-          ? {
-              retries: options.retry.retries,
-              maxRetryTime: options.retry.maxRetryTime,
-              initialRetryTime: options.retry.initialRetryTime,
-              factor: options.retry.factor,
-              multiplier: options.retry.multiplier,
-            }
-          : undefined,
-      });
+        autoCommit: options.autoCommit !== false,
+      };
+
+      // Add optional settings only if defined
+      if (options.sessionTimeout !== undefined) {
+        consumerConfig.sessionTimeout = options.sessionTimeout;
+      }
+      if (options.heartbeatInterval !== undefined) {
+        consumerConfig.heartbeatInterval = options.heartbeatInterval;
+      }
+      if (options.rebalanceTimeout !== undefined) {
+        consumerConfig.rebalanceTimeout = options.rebalanceTimeout;
+      }
+      if (options.fromBeginning !== undefined) {
+        consumerConfig.fromBeginning = options.fromBeginning;
+      }
+      if (options.autoCommitInterval !== undefined) {
+        consumerConfig.autoCommitInterval = options.autoCommitInterval;
+      }
+      if (options.allowAutoTopicCreation !== undefined) {
+        consumerConfig.allowAutoTopicCreation = options.allowAutoTopicCreation;
+      }
+      if (options.partitionAssigners && options.partitionAssigners.length > 0) {
+        consumerConfig.partitionAssigners =
+          options.partitionAssigners as KafkaJS.PartitionAssigners[];
+      }
+      if (options.retry) {
+        consumerConfig.retry = {
+          retries: options.retry.retries,
+          maxRetryTime: options.retry.maxRetryTime,
+          initialRetryTime: options.retry.initialRetryTime,
+        };
+      }
+
+      const consumer = this.kafkaCore
+        .getKafka(connectionName)
+        .consumer({ kafkaJS: consumerConfig });
 
       group = {
         groupId,
@@ -147,20 +175,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         );
       }
     }
-  }
-
-  private buildRestartOnFailure(
-    retry?: ConsumerRetryOptions,
-  ): ((error: Error) => Promise<boolean>) | undefined {
-    if (!retry?.restartOnFailure) {
-      return undefined;
-    }
-
-    if (typeof retry.restartOnFailure === 'function') {
-      return retry.restartOnFailure;
-    }
-
-    return () => Promise.resolve(retry.restartOnFailure as boolean);
   }
 
   async startAll(): Promise<void> {
@@ -232,12 +246,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       }
 
       for (const topic of topicList) {
-        const topicHandler = topics.get(topic)!;
-        const opts = topicHandler.metadata.options;
-        await consumer.subscribe({
-          topic,
-          fromBeginning: opts.fromBeginning,
-        });
+        await consumer.subscribe({ topic });
+        // Note: fromBeginning is configured at consumer level in confluent-kafka-javascript
       }
 
       this.logger.log(
@@ -262,205 +272,219 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
   private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
     const { groupId, consumer, topics, options } = group;
-    const restartOnFailure = this.buildRestartOnFailure(options.retry);
 
-    await consumer.run({
-      autoCommit: options.autoCommit !== false,
-      autoCommitInterval: options.autoCommitInterval,
-      autoCommitThreshold: options.autoCommitThreshold,
-      partitionsConsumedConcurrently: options.partitionsConsumedConcurrently,
-      ...(restartOnFailure && { restartOnFailure }),
-      eachMessage: async (payload: EachMessagePayload) => {
-        if (this.isShuttingDown) return;
+    // Build run config with only defined values
+    // Note: restartOnFailure is not supported in confluent-kafka-javascript
+    const runConfig: KafkaJS.ConsumerRunConfig = {};
 
-        const { topic, message, partition } = payload;
+    if (
+      options.partitionsConsumedConcurrently !== undefined &&
+      options.partitionsConsumedConcurrently > 0
+    ) {
+      runConfig.partitionsConsumedConcurrently =
+        options.partitionsConsumedConcurrently;
+    }
 
-        // Find the handler for this topic
-        const topicHandler = topics.get(topic);
-        if (!topicHandler) {
-          this.logger.warn(`No handler found for topic: ${topic}`);
+    runConfig.eachMessage = async (payload: EachMessagePayload) => {
+      if (this.isShuttingDown) return;
+
+      const { topic, message, partition } = payload;
+
+      // Find the handler for this topic
+      const topicHandler = topics.get(topic);
+      if (!topicHandler) {
+        this.logger.warn(`No handler found for topic: ${topic}`);
+        return;
+      }
+
+      const { metadata, handler } = topicHandler;
+      const topicOptions = metadata.options;
+
+      if (topicOptions.idempotencyKey) {
+        if (
+          this.idempotencyService.isProcessed(
+            message,
+            topicOptions.idempotencyKey,
+          )
+        ) {
+          this.logger.debug(`Skipping duplicate message from ${topic}`);
           return;
         }
+      }
 
-        const { metadata, handler } = topicHandler;
-        const topicOptions = metadata.options;
+      // Wrap message processing in a trace span
+      const processMessage = async () => {
+        const processedMessage =
+          topicOptions.deserialize !== false
+            ? deserializeMessage(message, topic, partition)
+            : message;
+
+        await handler(processedMessage);
 
         if (topicOptions.idempotencyKey) {
-          if (
-            this.idempotencyService.isProcessed(
-              message,
-              topicOptions.idempotencyKey,
-            )
-          ) {
-            this.logger.debug(`Skipping duplicate message from ${topic}`);
-            return;
-          }
+          this.idempotencyService.markProcessed(
+            message,
+            topicOptions.idempotencyKey,
+          );
         }
 
-        // Wrap message processing in a trace span
-        const processMessage = async () => {
-          const processedMessage =
-            topicOptions.deserialize !== false
-              ? deserializeMessage(message, topic, partition)
-              : message;
+        // Clear retry states for both DLQ and non-DLQ
+        this.dlqService.clearRetryState(message, topic, partition);
+        this.clearMessageRetryState(message, topic, partition);
+      };
 
-          await handler(processedMessage);
-
-          if (topicOptions.idempotencyKey) {
-            this.idempotencyService.markProcessed(
-              message,
-              topicOptions.idempotencyKey,
-            );
-          }
-
-          // Clear retry states for both DLQ and non-DLQ
-          this.dlqService.clearRetryState(message, topic, partition);
-          this.clearMessageRetryState(message, topic, partition);
-        };
-
-        try {
-          if (this.tracingService?.isEnabled()) {
-            await this.tracingService.withConsumeSpan(
-              {
-                topic,
-                partition,
-                offset: message.offset,
-                key: message.key?.toString(),
-                groupId,
-                headers: message.headers,
-              },
-              processMessage,
-            );
-          } else {
-            await processMessage();
-          }
-        } catch (error) {
-          await this.handleError(message, error as Error, metadata, partition);
+      try {
+        if (this.tracingService?.isEnabled()) {
+          await this.tracingService.withConsumeSpan(
+            {
+              topic,
+              partition,
+              offset: message.offset,
+              key: message.key?.toString(),
+              groupId,
+              headers: message.headers,
+            },
+            processMessage,
+          );
+        } else {
+          await processMessage();
         }
-      },
-    });
+      } catch (error) {
+        await this.handleError(message, error as Error, metadata, partition);
+      }
+    };
+
+    await consumer.run(runConfig);
   }
 
   private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
     const { groupId, consumer, topics, options } = group;
-    const restartOnFailure = this.buildRestartOnFailure(options.retry);
 
-    await consumer.run({
-      autoCommit: false,
-      partitionsConsumedConcurrently: options.partitionsConsumedConcurrently,
-      ...(restartOnFailure && { restartOnFailure }),
-      eachBatch: async (payload: EachBatchPayload) => {
-        if (this.isShuttingDown) return;
+    // Build run config with only defined values
+    // Note: restartOnFailure is not supported in confluent-kafka-javascript
+    const runConfig: KafkaJS.ConsumerRunConfig = {};
 
-        const { batch } = payload;
-        const { topic, partition, messages } = batch;
+    if (
+      options.partitionsConsumedConcurrently !== undefined &&
+      options.partitionsConsumedConcurrently > 0
+    ) {
+      runConfig.partitionsConsumedConcurrently =
+        options.partitionsConsumedConcurrently;
+    }
 
-        // Find the handler for this topic
-        const topicHandler = topics.get(topic);
-        if (!topicHandler) {
-          this.logger.warn(`No handler found for topic: ${topic}`);
-          return;
+    runConfig.eachBatch = async (payload: EachBatchPayload) => {
+      if (this.isShuttingDown) return;
+
+      const { batch } = payload;
+      const { topic, partition, messages } = batch;
+
+      // Find the handler for this topic
+      const topicHandler = topics.get(topic);
+      if (!topicHandler) {
+        this.logger.warn(`No handler found for topic: ${topic}`);
+        return;
+      }
+
+      const { metadata, handler } = topicHandler;
+      const topicOptions = metadata.options;
+
+      // Check if this topic uses batch processing
+      if (topicOptions.batch) {
+        // Use batch accumulator
+        const accumulator =
+          this.batchProcessor.createBatchAccumulator(topicOptions);
+
+        accumulator.onFlush(async (batchMessages) => {
+          await this.processBatchMessages(
+            batchMessages,
+            topic,
+            partition,
+            topicOptions,
+            handler,
+            groupId,
+          );
+        });
+
+        for (const message of messages) {
+          if (!payload.isRunning() || payload.isStale()) break;
+
+          await accumulator.add(message);
+          payload.resolveOffset(message.offset);
+          // Note: heartbeat() is automatic in confluent-kafka-javascript
         }
 
-        const { metadata, handler } = topicHandler;
-        const topicOptions = metadata.options;
+        await accumulator.flush();
+      } else {
+        // Process messages one by one (non-batch consumer in a batch group)
+        for (const message of messages) {
+          if (!payload.isRunning() || payload.isStale()) break;
 
-        // Check if this topic uses batch processing
-        if (topicOptions.batch) {
-          // Use batch accumulator
-          const accumulator =
-            this.batchProcessor.createBatchAccumulator(topicOptions);
-
-          accumulator.onFlush(async (batchMessages) => {
-            await this.processBatchMessages(
-              batchMessages,
-              topic,
-              partition,
-              topicOptions,
-              handler,
-              groupId,
-            );
-          });
-
-          for (const message of messages) {
-            if (!payload.isRunning() || payload.isStale()) break;
-
-            await accumulator.add(message);
-            payload.resolveOffset(message.offset);
-            await payload.heartbeat();
+          if (topicOptions.idempotencyKey) {
+            if (
+              this.idempotencyService.isProcessed(
+                message,
+                topicOptions.idempotencyKey,
+              )
+            ) {
+              payload.resolveOffset(message.offset);
+              // Note: heartbeat() is automatic in confluent-kafka-javascript
+              continue;
+            }
           }
 
-          await accumulator.flush();
-        } else {
-          // Process messages one by one (non-batch consumer in a batch group)
-          for (const message of messages) {
-            if (!payload.isRunning() || payload.isStale()) break;
+          // Wrap message processing in a trace span
+          const processMessage = async () => {
+            const processedMessage =
+              topicOptions.deserialize !== false
+                ? deserializeMessage(message, topic, partition)
+                : message;
+
+            await handler(processedMessage);
 
             if (topicOptions.idempotencyKey) {
-              if (
-                this.idempotencyService.isProcessed(
-                  message,
-                  topicOptions.idempotencyKey,
-                )
-              ) {
-                payload.resolveOffset(message.offset);
-                await payload.heartbeat();
-                continue;
-              }
-            }
-
-            // Wrap message processing in a trace span
-            const processMessage = async () => {
-              const processedMessage =
-                topicOptions.deserialize !== false
-                  ? deserializeMessage(message, topic, partition)
-                  : message;
-
-              await handler(processedMessage);
-
-              if (topicOptions.idempotencyKey) {
-                this.idempotencyService.markProcessed(
-                  message,
-                  topicOptions.idempotencyKey,
-                );
-              }
-
-              // Clear retry states for both DLQ and non-DLQ
-              this.dlqService.clearRetryState(message, topic, partition);
-              this.clearMessageRetryState(message, topic, partition);
-            };
-
-            try {
-              if (this.tracingService?.isEnabled()) {
-                await this.tracingService.withConsumeSpan(
-                  {
-                    topic,
-                    partition,
-                    offset: message.offset,
-                    key: message.key?.toString(),
-                    groupId,
-                    headers: message.headers,
-                  },
-                  processMessage,
-                );
-              } else {
-                await processMessage();
-              }
-            } catch (error) {
-              await this.handleError(
+              this.idempotencyService.markProcessed(
                 message,
-                error as Error,
-                metadata,
-                partition,
+                topicOptions.idempotencyKey,
               );
             }
 
-            payload.resolveOffset(message.offset);
-            await payload.heartbeat();
+            // Clear retry states for both DLQ and non-DLQ
+            this.dlqService.clearRetryState(message, topic, partition);
+            this.clearMessageRetryState(message, topic, partition);
+          };
+
+          try {
+            if (this.tracingService?.isEnabled()) {
+              await this.tracingService.withConsumeSpan(
+                {
+                  topic,
+                  partition,
+                  offset: message.offset,
+                  key: message.key?.toString(),
+                  groupId,
+                  headers: message.headers,
+                },
+                processMessage,
+              );
+            } else {
+              await processMessage();
+            }
+          } catch (error) {
+            await this.handleError(
+              message,
+              error as Error,
+              metadata,
+              partition,
+            );
           }
+
+          payload.resolveOffset(message.offset);
+          // Note: heartbeat() is automatic in confluent-kafka-javascript
         }
-      },
-    });
+      }
+    };
+
+    await consumer.run(runConfig);
   }
 
   private async processBatchMessages(
@@ -576,7 +600,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         );
 
         await this.sleep(delay);
-        throw error; // Retry: throw error to kafkaJS for retry
+        throw error; // Retry: throw error to trigger consumer retry
       } else {
         // Exceeded max retries
         const skipMessage = options.retry?.skipMessageOnMaxRetries ?? false;
@@ -592,7 +616,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           this.logger.error(
             `Dropped message details - Topic: ${topic}, Key: ${message.key?.toString()}, Error: ${error.message}`,
           );
-          // DO NOT throw error - let kafkaJS commit offset and skip this message
+          // DO NOT throw error - let consumer commit offset and skip this message
           // This allows consumer to continue processing other messages
         } else {
           // Throw error to potentially restart consumer
@@ -635,7 +659,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       async (group) => {
         try {
           if (group.isRunning) {
-            await group.consumer.stop();
+            // Note: stop() is not supported in confluent-kafka-javascript, use disconnect() directly
             await group.consumer.disconnect();
           }
         } catch (error) {

@@ -1,6 +1,8 @@
 import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
-import { IHeaders } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { KAFKA_MODULE_OPTIONS, KafkaModuleOptions } from '../interfaces';
+
+type IHeaders = KafkaJS.IHeaders;
 
 // OpenTelemetry types - dynamically imported
 type OtelApi = typeof import('@opentelemetry/api');

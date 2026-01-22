@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is `@loipv/nestjs-kafka`, a production-ready NestJS module for Kafka client and consumer functionality built on top of kafkajs. The library provides enterprise-grade features including intelligent batch processing, idempotency guarantees, key-based grouping, and automatic pressure management.
+This is `@loipv/nestjs-kafka`, a production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript (librdkafka). The library provides enterprise-grade features including intelligent batch processing, idempotency guarantees, key-based grouping, and automatic pressure management.
 
 ## Commands
 
@@ -169,10 +169,18 @@ Producer App                    Consumer App
 ## Tech Stack
 
 - NestJS 11
-- kafkajs
+- @confluentinc/kafka-javascript (librdkafka-based, KafkaJS-compatible API)
 - TypeScript (ES2023 target, CommonJS module)
 - Jest for testing
 - ESLint + Prettier for code style
+
+## Important Notes for confluent-kafka-javascript
+
+1. **Producer options** (`acks`, `compression`, `timeout`) are configured at producer level in `KafkaModule.forRoot()`, NOT per-send call
+2. **heartbeat()** is automatic - no manual calls needed
+3. **consumer.stop()** is not supported - use `disconnect()` directly
+4. **autoCommitThreshold** is not supported - use `autoCommitInterval` instead
+5. **Platform support**: Linux (x64/arm64), macOS (arm64), Windows (x64), Node.js 18-22
 
 ## Usage Example
 
