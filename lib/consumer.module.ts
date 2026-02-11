@@ -6,7 +6,6 @@ import {
   Type,
   Global,
   Provider,
-  Inject,
 } from '@nestjs/common';
 import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service';
 import { ConsumerRegistryService } from './services/consumer-registry.service';
@@ -17,9 +16,7 @@ import { DlqService } from './services/dlq.service';
 import { DlqRetryService } from './services/dlq-retry.service';
 import { DlqMetricsService } from './services/dlq-metrics.service';
 import { CircuitBreakerService } from './services/circuit-breaker.service';
-
-// Token for consumers from forFeature
-const KAFKA_FEATURE_CONSUMERS = 'KAFKA_FEATURE_CONSUMERS';
+import { ConsumerModuleOptions, CONSUMER_MODULE_OPTIONS } from './interfaces';
 
 // All consumer-related providers (moved from KafkaModule)
 const CONSUMER_PROVIDERS: Provider[] = [
@@ -36,7 +33,7 @@ const CONSUMER_PROVIDERS: Provider[] = [
 
 /**
  * ConsumerModule handles discovery and registration of Kafka consumers.
- * 
+ *
  * @example
  * // app.module.ts
  * @Module({
@@ -47,8 +44,8 @@ const CONSUMER_PROVIDERS: Provider[] = [
  *   ],
  * })
  * export class AppModule {}
- * 
- * // test/test.module.ts  
+ *
+ * // test/test.module.ts
  * @Module({
  *   imports: [ConsumerModule.forFeature([TestService])],
  *   providers: [TestService],
@@ -64,18 +61,33 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
   constructor(
     private readonly discoveryService: ConsumerDiscoveryService,
     private readonly registryService: ConsumerRegistryService,
-  ) { }
+  ) {}
 
   /**
    * Register the core ConsumerModule. Call once in root module.
    * This module depends on KafkaModule being imported first.
+   *
+   * @param options - Default options for all consumers (decorator options take precedence)
+   * @example
+   * ConsumerModule.forRoot({
+   *   partitionAssigners: ['cooperative-sticky'],
+   *   allowAutoTopicCreation: true,
+   *   sessionTimeout: 30000,
+   * })
    */
-  static forRoot(): DynamicModule {
+  static forRoot(options?: ConsumerModuleOptions): DynamicModule {
     return {
       module: ConsumerModule,
       global: true,
-      providers: CONSUMER_PROVIDERS,
+      providers: [
+        {
+          provide: CONSUMER_MODULE_OPTIONS,
+          useValue: options || {},
+        },
+        ...CONSUMER_PROVIDERS,
+      ],
       exports: [
+        CONSUMER_MODULE_OPTIONS,
         ConsumerDiscoveryService,
         ConsumerRegistryService,
         DlqService,
@@ -89,14 +101,14 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
   /**
    * Register consumers from a feature module.
    * Consumer classes must also be in the feature module's providers array.
-   * 
+   *
    * @param consumers - Consumer classes with @Consumer decorated methods
    */
   static forFeature(consumers: Type<any>[]): DynamicModule {
     // Create unique provider that collects consumer instances
     const collectorProvider: Provider = {
       provide: `KAFKA_COLLECTOR_${Date.now()}_${Math.random().toString(36)}`,
-      useFactory: (...instances: any[]) => {
+      useFactory: (...instances: any[]): any[] => {
         // Add to static collection for later discovery
         ConsumerModule.consumerInstances.push(...instances);
         return instances;
@@ -107,10 +119,7 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
     return {
       module: ConsumerModule,
       // Include consumer classes as providers so they can be injected
-      providers: [
-        ...consumers,
-        collectorProvider,
-      ],
+      providers: [...consumers, collectorProvider],
       exports: consumers,
     };
   }

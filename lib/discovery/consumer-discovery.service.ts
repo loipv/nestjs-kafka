@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, Logger } from '@nestjs/common';
 import { KAFKA_CONSUMER_METADATA } from '../decorators/constants';
 import { ConsumerMethodMetadata } from '../decorators/consumer.decorator';
@@ -48,17 +50,16 @@ export class ConsumerDiscoveryService {
 
       const prototype = Object.getPrototypeOf(instance);
       const methodNames = Object.getOwnPropertyNames(prototype).filter(
-        (name) => name !== 'constructor' && typeof prototype[name] === 'function',
+        (name) =>
+          name !== 'constructor' && typeof prototype[name] === 'function',
       );
 
       for (const methodName of methodNames) {
         const methodRef = prototype[methodName];
 
         // Check for @Consumer decorator metadata
-        const metadata: ConsumerMethodMetadata | undefined = Reflect.getMetadata(
-          KAFKA_CONSUMER_METADATA,
-          methodRef,
-        );
+        const metadata: ConsumerMethodMetadata | undefined =
+          Reflect.getMetadata(KAFKA_CONSUMER_METADATA, methodRef);
 
         if (!metadata) continue;
 
@@ -70,7 +71,8 @@ export class ConsumerDiscoveryService {
           continue;
         }
 
-        const connection = metadata.options.connection || DEFAULT_KAFKA_CONNECTION;
+        const connection =
+          metadata.options.connection || DEFAULT_KAFKA_CONNECTION;
 
         const consumerMetadata: ConsumerMetadata = {
           topic: metadata.topic,

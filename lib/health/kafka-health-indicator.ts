@@ -3,11 +3,14 @@ import { KafkaClient } from '../services/kafka-client.service';
 import { KafkaCoreService } from '../services/kafka-core.service';
 
 // Import types only, service is optional
-import type { HealthIndicatorService, HealthIndicatorResult } from '@nestjs/terminus';
+import type {
+  HealthIndicatorService,
+  HealthIndicatorResult,
+} from '@nestjs/terminus';
 
 /**
  * Kafka Health Indicator for @nestjs/terminus
- * 
+ *
  * Note: To use this health indicator, you must import TerminusModule in your application.
  * If TerminusModule is not imported, the health indicator will use a fallback implementation.
  *
@@ -15,7 +18,7 @@ import type { HealthIndicatorService, HealthIndicatorResult } from '@nestjs/term
  * ```typescript
  * // app.module.ts
  * import { TerminusModule } from '@nestjs/terminus';
- * 
+ *
  * @Module({
  *   imports: [
  *     TerminusModule,
@@ -23,7 +26,7 @@ import type { HealthIndicatorService, HealthIndicatorResult } from '@nestjs/term
  *   ],
  * })
  * export class AppModule {}
- * 
+ *
  * // health.controller.ts
  * @Controller('health')
  * export class HealthController {
@@ -47,8 +50,9 @@ export class KafkaHealthIndicator {
   constructor(
     private readonly kafkaClient: KafkaClient,
     private readonly kafkaCore: KafkaCoreService,
-    @Optional() private readonly healthIndicatorService?: HealthIndicatorService,
-  ) { }
+    @Optional()
+    private readonly healthIndicatorService?: HealthIndicatorService,
+  ) {}
 
   /**
    * Check if Kafka producer is healthy (connected)
@@ -61,7 +65,10 @@ export class KafkaHealthIndicator {
       if (isHealthy) {
         return indicator.up({ connected: true });
       }
-      return indicator.down({ connected: false, message: 'Kafka producer is not connected' });
+      return indicator.down({
+        connected: false,
+        message: 'Kafka producer is not connected',
+      });
     }
 
     // Fallback without TerminusModule

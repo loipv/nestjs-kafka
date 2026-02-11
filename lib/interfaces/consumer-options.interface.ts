@@ -148,3 +148,67 @@ export interface PressureManagerOptions {
   maxQueueSize: number;
   checkIntervalMs?: number;
 }
+
+/**
+ * Default options for all consumers when not specified in @Consumer decorator.
+ * These options will be merged with decorator options (decorator takes precedence).
+ */
+export interface ConsumerModuleOptions {
+  /**
+   * Default partition assignment strategies for consumer groups.
+   * Applied when @Consumer decorator doesn't specify partitionAssigners.
+   * @example ['cooperative-sticky']
+   */
+  partitionAssigners?: PartitionAssigner[];
+
+  /**
+   * Default setting for auto topic creation.
+   * Applied when @Consumer decorator doesn't specify allowAutoTopicCreation.
+   */
+  allowAutoTopicCreation?: boolean;
+
+  /**
+   * Default session timeout in ms.
+   * Applied when @Consumer decorator doesn't specify sessionTimeout.
+   */
+  sessionTimeout?: number;
+
+  /**
+   * Default heartbeat interval in ms.
+   * Applied when @Consumer decorator doesn't specify heartbeatInterval.
+   */
+  heartbeatInterval?: number;
+
+  /**
+   * Default rebalance timeout in ms.
+   * Applied when @Consumer decorator doesn't specify rebalanceTimeout.
+   */
+  rebalanceTimeout?: number;
+
+  /**
+   * Default auto commit setting.
+   * Applied when @Consumer decorator doesn't specify autoCommit.
+   */
+  autoCommit?: boolean;
+
+  /**
+   * Default auto commit interval in ms.
+   * Applied when @Consumer decorator doesn't specify autoCommitInterval.
+   */
+  autoCommitInterval?: number;
+
+  /**
+   * Default fromBeginning setting.
+   * Applied when @Consumer decorator doesn't specify fromBeginning.
+   */
+  fromBeginning?: boolean;
+
+  /**
+   * Default retry options for consumers.
+   * Applied when @Consumer decorator doesn't specify retry options.
+   */
+  retry?: ConsumerRetryOptions;
+}
+
+/** Injection token for ConsumerModule options */
+export const CONSUMER_MODULE_OPTIONS = Symbol('CONSUMER_MODULE_OPTIONS');

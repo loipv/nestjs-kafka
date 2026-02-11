@@ -46,6 +46,7 @@ lib/
 ├── services/
 │   ├── kafka-core.service.ts        # [KafkaModule] Connection management
 │   ├── kafka-client.service.ts      # [KafkaModule] Producer (send/sendBatch)
+│   ├── tracing.service.ts           # [KafkaModule] OpenTelemetry tracing
 │   ├── consumer-registry.service.ts # [ConsumerModule] Consumer lifecycle
 │   ├── batch-processor.service.ts   # [ConsumerModule] Batch accumulation
 │   ├── idempotency.service.ts       # [ConsumerModule] Duplicate prevention
@@ -70,7 +71,9 @@ lib/
 - **KafkaModule**: Root module with `forRoot()`, `forRootAsync()`, and `forRootMultiple()` for configuration
   - Supports multi-connection setup with named connections
 - **ConsumerModule**: Auto-discovers and registers consumer methods on app startup
-  - Use `forRoot()` in app module, `forFeature([...consumers])` in feature modules
+  - Use `forRoot(options?)` in app module with optional default options
+  - Use `forFeature([...consumers])` in feature modules
+  - Default options are merged with `@Consumer` decorator options (decorator takes precedence)
 - **KafkaClient**: Producer service with `send()`, `sendBatch()`, `sendQueued()`, `sendMultiTopicBatch()` methods
 - **@Consumer() decorator**: Method decorator to define topic consumers with batch/pressure/DLQ options
 - **@InjectKafkaClient() decorator**: Inject named connection clients in services
@@ -193,8 +196,13 @@ Producer App                    Consumer App
       clientId: 'my-app',
       brokers: ['localhost:9092'],
     }),
-    // Consumer module (required if using @Consumer decorator)
-    ConsumerModule.forRoot(),
+    // Consumer module with default options (applied to all @Consumer decorators)
+    ConsumerModule.forRoot({
+      partitionAssigners: ['cooperative-sticky'],  // Default for all consumers
+      allowAutoTopicCreation: true,                // Auto-create topics
+      sessionTimeout: 30000,
+      // These defaults are used when @Consumer doesn't specify them
+    }),
     OrderModule,  // Feature module
   ],
 })

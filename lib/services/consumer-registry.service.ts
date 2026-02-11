@@ -3,6 +3,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import {
   Injectable,
+  Inject,
   Logger,
   OnApplicationShutdown,
   Optional,
@@ -21,7 +22,9 @@ import { DlqRetryService } from './dlq-retry.service';
 import { TracingService } from './tracing.service';
 import {
   ConsumerMetadata,
+  ConsumerModuleOptions,
   ConsumerOptions,
+  CONSUMER_MODULE_OPTIONS,
   DEFAULT_KAFKA_CONNECTION,
   deserializeMessage,
 } from '../interfaces';
@@ -61,7 +64,65 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     private readonly dlqService: DlqService,
     private readonly dlqRetryService: DlqRetryService,
     @Optional() private readonly tracingService?: TracingService,
+    @Optional()
+    @Inject(CONSUMER_MODULE_OPTIONS)
+    private readonly moduleOptions?: ConsumerModuleOptions,
   ) {}
+
+  /**
+   * Merge module default options with decorator options.
+   * Decorator options take precedence over module defaults.
+   */
+  private mergeWithDefaults(options: ConsumerOptions): ConsumerOptions {
+    if (!this.moduleOptions) {
+      return options;
+    }
+
+    const defaults = this.moduleOptions;
+
+    return {
+      // Module defaults (applied if decorator doesn't specify)
+      ...(defaults.partitionAssigners !== undefined &&
+        options.partitionAssigners === undefined && {
+          partitionAssigners: defaults.partitionAssigners,
+        }),
+      ...(defaults.allowAutoTopicCreation !== undefined &&
+        options.allowAutoTopicCreation === undefined && {
+          allowAutoTopicCreation: defaults.allowAutoTopicCreation,
+        }),
+      ...(defaults.sessionTimeout !== undefined &&
+        options.sessionTimeout === undefined && {
+          sessionTimeout: defaults.sessionTimeout,
+        }),
+      ...(defaults.heartbeatInterval !== undefined &&
+        options.heartbeatInterval === undefined && {
+          heartbeatInterval: defaults.heartbeatInterval,
+        }),
+      ...(defaults.rebalanceTimeout !== undefined &&
+        options.rebalanceTimeout === undefined && {
+          rebalanceTimeout: defaults.rebalanceTimeout,
+        }),
+      ...(defaults.autoCommit !== undefined &&
+        options.autoCommit === undefined && {
+          autoCommit: defaults.autoCommit,
+        }),
+      ...(defaults.autoCommitInterval !== undefined &&
+        options.autoCommitInterval === undefined && {
+          autoCommitInterval: defaults.autoCommitInterval,
+        }),
+      ...(defaults.fromBeginning !== undefined &&
+        options.fromBeginning === undefined && {
+          fromBeginning: defaults.fromBeginning,
+        }),
+      // Merge retry options (decorator retry options take precedence)
+      ...(defaults.retry &&
+        !options.retry && {
+          retry: defaults.retry,
+        }),
+      // Decorator options (always applied, overrides defaults)
+      ...options,
+    };
+  }
 
   registerConsumers(consumers: ConsumerMetadata[]): void {
     // Group consumers by groupId
@@ -71,7 +132,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private registerConsumer(metadata: ConsumerMetadata): void {
-    const { topic, connection, options, target, methodName } = metadata;
+    const { topic, connection, target, methodName } = metadata;
+    // Merge module defaults with decorator options
+    const options = this.mergeWithDefaults(metadata.options);
     const groupId = options.groupId || `${topic}-group`;
     const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
 
@@ -156,9 +219,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       group.hasBatchConsumer = true;
     }
 
-    // Add topic handler to the group
+    // Add topic handler to the group with merged options
     const handler = target[methodName].bind(target);
-    group.topics.set(topic, { metadata, handler });
+    const mergedMetadata: ConsumerMetadata = {
+      ...metadata,
+      options, // Use merged options
+    };
+    group.topics.set(topic, { metadata: mergedMetadata, handler });
 
     this.logger.log(
       `Registered topic "${topic}" in group "${groupId}" (connection: ${connectionName})`,
@@ -167,7 +234,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     // Register DLQ retry consumer if enabled
     if (options.dlq?.retry?.enabled) {
       try {
-        this.dlqRetryService.registerDlqRetryConsumer(metadata, handler);
+        this.dlqRetryService.registerDlqRetryConsumer(mergedMetadata, handler);
       } catch (err) {
         this.logger.error(
           `Failed to register DLQ retry consumer for ${topic}`,

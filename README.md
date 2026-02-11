@@ -63,7 +63,11 @@ import { OrderModule } from './order/order.module';
       clientId: 'my-app',
       brokers: ['localhost:9092'],
     }),
-    ConsumerModule.forRoot(),  // Initialize in root module
+    // ConsumerModule with default options (applied to all @Consumer decorators)
+    ConsumerModule.forRoot({
+      partitionAssigners: ['cooperative-sticky'],  // Default for all consumers
+      allowAutoTopicCreation: true,                // Auto-create topics
+    }),
     OrderModule,
   ],
 })
@@ -168,6 +172,69 @@ KafkaModule.forRootAsync({
 });
 ```
 
+### ConsumerModule Options
+
+`ConsumerModule.forRoot()` accepts optional default options that apply to all `@Consumer` decorators. Decorator options take precedence over module defaults.
+
+```typescript
+ConsumerModule.forRoot({
+  // Partition assignment strategy (default for all consumers)
+  partitionAssigners: ['cooperative-sticky'],
+
+  // Auto-create topics if they don't exist
+  allowAutoTopicCreation: true,
+
+  // Consumer group settings
+  sessionTimeout: 30000,
+  heartbeatInterval: 3000,
+  rebalanceTimeout: 60000,
+
+  // Commit settings
+  autoCommit: true,
+  autoCommitInterval: 5000,
+  fromBeginning: false,
+
+  // Retry options
+  retry: {
+    retries: 3,
+    initialRetryTime: 1000,
+    multiplier: 2,
+  },
+});
+```
+
+**How defaults work:**
+
+```typescript
+// Module defaults
+ConsumerModule.forRoot({
+  partitionAssigners: ['cooperative-sticky'],
+  sessionTimeout: 30000,
+});
+
+// This consumer uses module defaults (cooperative-sticky, 30s timeout)
+@Consumer('orders')
+async handleOrder(message: KafkaMessage) {}
+
+// This consumer overrides partitionAssigners but keeps sessionTimeout from defaults
+@Consumer('events', { partitionAssigners: ['roundrobin'] })
+async handleEvent(message: KafkaMessage) {}
+```
+
+**ConsumerModuleOptions:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `partitionAssigners` | `PartitionAssigner[]` | Default partition assignment strategies |
+| `allowAutoTopicCreation` | `boolean` | Auto-create topics if not exist |
+| `sessionTimeout` | `number` | Session timeout in ms |
+| `heartbeatInterval` | `number` | Heartbeat interval in ms |
+| `rebalanceTimeout` | `number` | Rebalance timeout in ms |
+| `autoCommit` | `boolean` | Enable auto commit |
+| `autoCommitInterval` | `number` | Auto commit interval in ms |
+| `fromBeginning` | `boolean` | Start consuming from beginning |
+| `retry` | `ConsumerRetryOptions` | Default retry options |
+
 ### Multi-Connection (Multiple Kafka Clusters)
 
 Connect to multiple Kafka clusters simultaneously:
@@ -188,7 +255,7 @@ Connect to multiple Kafka clusters simultaneously:
       clientId: 'my-app-analytics',
       brokers: ['analytics-kafka:9092'],
     }),
-    ConsumerModule,
+    ConsumerModule.forRoot(),
   ],
 })
 export class AppModule {}
@@ -208,7 +275,7 @@ export class AppModule {}
         brokers: ['analytics-kafka:9092'],
       },
     ]),
-    ConsumerModule,
+    ConsumerModule.forRoot(),
   ],
 })
 export class AppModule {}
@@ -982,6 +1049,7 @@ export {
   KafkaModuleOptions,
   KafkaModuleAsyncOptions,
   TracingOptions,
+  ConsumerModuleOptions,
   ConsumerOptions,
   DlqOptions,
   DlqRetryOptions,

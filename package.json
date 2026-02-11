@@ -1,6 +1,6 @@
 {
   "name": "@loipv/nestjs-kafka",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript",
   "author": "loipv792@gmail.com",
   "private": false,
