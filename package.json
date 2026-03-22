@@ -1,12 +1,16 @@
 {
   "name": "@loipv/nestjs-kafka",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "A production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript",
   "author": "loipv792@gmail.com",
   "private": false,
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/loipv/nestjs-kafka.git"
+  },
   "files": [
     "dist"
   ],

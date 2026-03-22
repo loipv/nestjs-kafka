@@ -77,14 +77,13 @@ export class AppModule {}
 ```typescript
 // order/order.module.ts (Feature Module)
 import { Module } from '@nestjs/common';
-import { ConsumerModule } from '@loipv/nestjs-kafka';
 import { OrderConsumer } from './order.consumer';
+import { OrderService } from './order.service';
 
 @Module({
-  imports: [
-    ConsumerModule.forFeature([OrderConsumer]),  // Register consumers
-  ],
-  providers: [OrderConsumer],  // Must also be in providers
+  // No need to import ConsumerModule — consumers are auto-discovered!
+  // Just declare your consumer and its dependencies as providers.
+  providers: [OrderConsumer, OrderService],
 })
 export class OrderModule {}
 ```
@@ -174,7 +173,7 @@ KafkaModule.forRootAsync({
 
 ### ConsumerModule Options
 
-`ConsumerModule.forRoot()` accepts optional default options that apply to all `@Consumer` decorators. Decorator options take precedence over module defaults.
+`ConsumerModule.forRoot()` accepts optional default options that apply to all `@Consumer` decorators. All consumers are **automatically discovered** via their `@Consumer()` decorator — no explicit registration needed. Decorator options take precedence over module defaults.
 
 ```typescript
 ConsumerModule.forRoot({

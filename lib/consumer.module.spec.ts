@@ -42,13 +42,32 @@ jest.mock('@confluentinc/kafka-javascript', () => ({
   },
 }));
 
-// Test consumer class
+// A dependency service that TestConsumer injects
+@Injectable()
+class TestDependencyService {
+  getData(): string {
+    return 'test-data';
+  }
+}
+
+// Test consumer class that injects a dependency service
 @Injectable()
 class TestConsumer {
+  constructor(private readonly testDependency: TestDependencyService) {}
+
   @Consumer('test-topic')
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async handleMessage(message: any) {
-    // Process message
+    // Process message using dependency
+    this.testDependency.getData();
+  }
+}
+
+// A service without @Consumer (should NOT be discovered)
+@Injectable()
+class RegularService {
+  doSomething(): string {
+    return 'not a consumer';
   }
 }
 
@@ -57,7 +76,6 @@ describe('ConsumerModule', () => {
     let module: TestingModule;
 
     beforeEach(async () => {
-      // Clear static state between tests
       ConsumerModule.clearConsumers();
 
       module = await Test.createTestingModule({
@@ -117,7 +135,7 @@ describe('ConsumerModule', () => {
     });
   });
 
-  describe('forFeature', () => {
+  describe('auto-discovery', () => {
     let module: TestingModule;
 
     beforeEach(async () => {
@@ -130,32 +148,66 @@ describe('ConsumerModule', () => {
             brokers: ['localhost:9092'],
           }),
           ConsumerModule.forRoot(),
-          ConsumerModule.forFeature([TestConsumer]),
         ],
-        providers: [TestConsumer],
+        // Just declare consumer and its dependencies as providers.
+        // No forFeature() needed — auto-discovery handles everything.
+        providers: [TestConsumer, TestDependencyService, RegularService],
       }).compile();
+
+      // Initialize to trigger lifecycle hooks (onModuleInit)
+      // which triggers auto-discovery of @Consumer() decorated methods
+      await module.init();
     });
 
     afterEach(async () => {
       await module.close();
     });
 
-    it('should collect consumer instances', () => {
-      const instances = ConsumerModule.getConsumerInstances();
-      expect(instances.length).toBeGreaterThan(0);
-      expect(instances.some((i) => i instanceof TestConsumer)).toBe(true);
+    it('should auto-discover consumer via @Consumer decorator', () => {
+      const discoveryService = module.get<ConsumerDiscoveryService>(
+        ConsumerDiscoveryService,
+      );
+      const consumers = discoveryService.getConsumers();
+      expect(consumers.length).toBeGreaterThan(0);
+      expect(consumers.some((c) => c.target instanceof TestConsumer)).toBe(
+        true,
+      );
     });
 
-    it('should export consumer class', () => {
+    it('should resolve consumer with its injected dependencies', () => {
       const consumer = module.get<TestConsumer>(TestConsumer);
       expect(consumer).toBeDefined();
+      // TestConsumer should have TestDependencyService injected successfully
+      expect(consumer['testDependency']).toBeDefined();
+      expect(consumer['testDependency']).toBeInstanceOf(TestDependencyService);
+    });
+
+    it('should NOT discover non-consumer providers', () => {
+      const discoveryService = module.get<ConsumerDiscoveryService>(
+        ConsumerDiscoveryService,
+      );
+      const consumers = discoveryService.getConsumers();
+      // RegularService has no @Consumer decorator — should not be discovered
+      expect(consumers.some((c) => c.target instanceof RegularService)).toBe(
+        false,
+      );
+    });
+
+    it('should discover the correct topic from @Consumer metadata', () => {
+      const discoveryService = module.get<ConsumerDiscoveryService>(
+        ConsumerDiscoveryService,
+      );
+      const consumers = discoveryService.getConsumers();
+      const testConsumer = consumers.find(
+        (c) => c.target instanceof TestConsumer,
+      );
+      expect(testConsumer).toBeDefined();
+      expect(testConsumer!.topic).toBe('test-topic');
     });
   });
 
   describe('module separation', () => {
     it('should require KafkaModule for consumer services to work', async () => {
-      // ConsumerModule depends on KafkaCoreService and KafkaClient from KafkaModule
-      // This test verifies the dependency chain
       ConsumerModule.clearConsumers();
 
       const module = await Test.createTestingModule({
@@ -168,7 +220,6 @@ describe('ConsumerModule', () => {
         ],
       }).compile();
 
-      // ConsumerRegistryService should be able to inject KafkaCoreService
       const registry = module.get<ConsumerRegistryService>(
         ConsumerRegistryService,
       );

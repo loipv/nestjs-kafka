@@ -72,7 +72,7 @@ lib/
   - Supports multi-connection setup with named connections
 - **ConsumerModule**: Auto-discovers and registers consumer methods on app startup
   - Use `forRoot(options?)` in app module with optional default options
-  - Use `forFeature([...consumers])` in feature modules
+  - All `@Consumer()` decorated methods are automatically discovered via NestJS DiscoveryService
   - Default options are merged with `@Consumer` decorator options (decorator takes precedence)
 - **KafkaClient**: Producer service with `send()`, `sendBatch()`, `sendQueued()`, `sendMultiTopicBatch()` methods
 - **@Consumer() decorator**: Method decorator to define topic consumers with batch/pressure/DLQ options
@@ -210,9 +210,7 @@ export class AppModule {}
 
 // order/order.module.ts (Feature Module)
 @Module({
-  imports: [
-    ConsumerModule.forFeature([OrderConsumer]),  // Register consumers in feature module
-  ],
+  // No need to import ConsumerModule — consumers are auto-discovered!
   providers: [OrderConsumer, OrderService],
 })
 export class OrderModule {}
