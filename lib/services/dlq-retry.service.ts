@@ -224,9 +224,12 @@ export class DlqRetryService implements OnApplicationShutdown {
 
     // Get current reprocess count (using new header name)
     const reprocessCountHeader = headers[DLQ_RETRY_HEADERS.REPROCESS_COUNT];
-    const currentReprocessCount = reprocessCountHeader
+    const parsedCount = reprocessCountHeader
       ? parseInt(reprocessCountHeader.toString(), 10)
       : 0;
+    const currentReprocessCount = Number.isNaN(parsedCount)
+      ? 0
+      : Math.max(0, parsedCount);
 
     const maxRetries = retryOptions.maxRetries ?? 3;
     const baseDelay = retryOptions.delay ?? 60000;
@@ -285,7 +288,7 @@ export class DlqRetryService implements OnApplicationShutdown {
 
       // Copy existing headers
       for (const [key, value] of Object.entries(headers)) {
-        if (value) {
+        if (value !== undefined && value !== null) {
           newHeaders[key] = value.toString();
         }
       }
@@ -338,7 +341,7 @@ export class DlqRetryService implements OnApplicationShutdown {
       // Copy existing headers
       const existingHeaders = message.headers || {};
       for (const [key, value] of Object.entries(existingHeaders)) {
-        if (value) {
+        if (value !== undefined && value !== null) {
           headers[key] = value.toString();
         }
       }
@@ -391,12 +394,33 @@ export class DlqRetryService implements OnApplicationShutdown {
     }
   }
 
+  private shutdownResolvers = new Set<() => void>();
+
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.shutdownResolvers.delete(cancelFn);
+        resolve();
+      }, ms);
+
+      const cancelFn = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+
+      this.shutdownResolvers.add(cancelFn);
+    });
   }
 
   async gracefulShutdown(): Promise<void> {
     this.isShuttingDown = true;
+
+    // Cancel all in-flight retry delays so shutdown isn't blocked
+    for (const cancel of this.shutdownResolvers) {
+      cancel();
+    }
+    this.shutdownResolvers.clear();
+
     this.logger.log('Gracefully shutting down DLQ retry consumers...');
 
     const shutdownPromises = Array.from(this.dlqConsumerGroups.values()).map(

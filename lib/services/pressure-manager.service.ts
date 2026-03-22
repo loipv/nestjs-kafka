@@ -11,6 +11,7 @@ export class PressureManagerService {
   private states = new Map<string, PressureState>();
   private consumers = new Map<string, Consumer>();
   private options = new Map<string, PressureManagerOptions>();
+  private topics = new Map<string, string[]>();
 
   register(
     consumerId: string,
@@ -19,6 +20,7 @@ export class PressureManagerService {
   ): void {
     this.consumers.set(consumerId, consumer);
     this.options.set(consumerId, opts);
+    this.topics.set(consumerId, []);
     this.states.set(consumerId, {
       isPaused: false,
       currentQueueSize: 0,
@@ -27,6 +29,14 @@ export class PressureManagerService {
       maxConcurrency: opts.backPressureThreshold,
       utilizationPercent: 0,
     });
+  }
+
+  /**
+   * Update the list of topics consumed by this consumer.
+   * Call this after subscribing the consumer to topics.
+   */
+  setTopics(consumerId: string, topicList: string[]): void {
+    this.topics.set(consumerId, topicList);
   }
 
   updateQueueSize(consumerId: string, size: number): void {
@@ -53,6 +63,7 @@ export class PressureManagerService {
     const state = this.states.get(consumerId);
     const consumer = this.consumers.get(consumerId);
     const opts = this.options.get(consumerId);
+    const consumerTopics = this.topics.get(consumerId) ?? [];
 
     if (!state || !consumer || !opts) return;
 
@@ -63,11 +74,20 @@ export class PressureManagerService {
       this.logger.warn(
         `Back pressure triggered for ${consumerId}, pausing consumer`,
       );
-      consumer.pause([{ topic: '*' }]);
+      // Pause specific topics instead of wildcard to avoid affecting unrelated topics
+      const pauseList =
+        consumerTopics.length > 0
+          ? consumerTopics.map((topic) => ({ topic }))
+          : [{ topic: '*' }];
+      consumer.pause(pauseList);
       state.isPaused = true;
     } else if (shouldResume && state.isPaused) {
       this.logger.log(`Resuming consumer ${consumerId}`);
-      consumer.resume([{ topic: '*' }]);
+      const resumeList =
+        consumerTopics.length > 0
+          ? consumerTopics.map((topic) => ({ topic }))
+          : [{ topic: '*' }];
+      consumer.resume(resumeList);
       state.isPaused = false;
     }
   }

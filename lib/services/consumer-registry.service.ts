@@ -47,6 +47,7 @@ interface ConsumerGroup {
 interface MessageRetryState {
   retryCount: number;
   lastError?: Error;
+  lastAttemptAt: number;
 }
 
 @Injectable()
@@ -55,6 +56,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   private consumerGroups = new Map<string, ConsumerGroup>();
   private isShuttingDown = false;
   private messageRetryStates = new Map<string, MessageRetryState>();
+  private retryStateCleanupInterval: NodeJS.Timeout | null = null;
+  private readonly RETRY_STATE_TTL = 300000; // 5 minutes
 
   constructor(
     private readonly kafkaCore: KafkaCoreService,
@@ -216,7 +219,16 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     // Check if mixing batch and non-batch consumers in same group
     if (options.batch) {
+      if (group.topics.size > 0 && !group.hasBatchConsumer) {
+        this.logger.warn(
+          `Consumer group "${groupId}" mixes batch and non-batch consumers. This may cause unexpected behavior.`,
+        );
+      }
       group.hasBatchConsumer = true;
+    } else if (group.hasBatchConsumer) {
+      this.logger.warn(
+        `Consumer group "${groupId}" mixes batch and non-batch consumers. This may cause unexpected behavior.`,
+      );
     }
 
     // Add topic handler to the group with merged options
@@ -253,10 +265,21 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     // Start DLQ retry consumers
     await this.dlqRetryService.startAll();
+
+    // Start periodic cleanup of stale retry states
+    this.retryStateCleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [key, state] of this.messageRetryStates.entries()) {
+        if (now - state.lastAttemptAt > this.RETRY_STATE_TTL) {
+          this.messageRetryStates.delete(key);
+        }
+      }
+    }, 60000);
   }
 
   private async startConsumerGroup(group: ConsumerGroup): Promise<void> {
-    const { groupId, consumer, topics } = group;
+    const { groupId, consumer, topics, connection } = group;
+    const groupKey = `${connection}:${groupId}`;
 
     try {
       await consumer.connect();
@@ -316,6 +339,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         await consumer.subscribe({ topic });
         // Note: fromBeginning is configured at consumer level in confluent-kafka-javascript
       }
+
+      // Update pressure manager with subscribed topics for accurate pause/resume
+      this.pressureManager.setTopics(groupKey, topicList);
 
       this.logger.log(
         `Consumer group "${groupId}" subscribed to topics: ${topicList.join(', ')}`,
@@ -392,6 +418,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           this.idempotencyService.markProcessed(
             message,
             topicOptions.idempotencyKey,
+            topicOptions.idempotencyTtl,
           );
         }
 
@@ -512,6 +539,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
               this.idempotencyService.markProcessed(
                 message,
                 topicOptions.idempotencyKey,
+                topicOptions.idempotencyTtl,
               );
             }
 
@@ -646,12 +674,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       let state = this.messageRetryStates.get(messageKey);
 
       if (!state) {
-        state = { retryCount: 0 };
+        state = { retryCount: 0, lastAttemptAt: Date.now() };
         this.messageRetryStates.set(messageKey, state);
       }
 
       state.retryCount++;
       state.lastError = error;
+      state.lastAttemptAt = Date.now();
 
       // Get max retries from retry options, default to 3
       const maxRetries = options.retry?.retries ?? 3;
@@ -662,11 +691,14 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         const multiplier = options.retry?.multiplier ?? 2;
         const delay = baseDelay * Math.pow(multiplier, state.retryCount - 1);
 
+        const MAX_RETRY_DELAY = 30000; // Cap at 30s to avoid excessive consumer blocking
+        const cappedDelay = Math.min(delay, MAX_RETRY_DELAY);
+
         this.logger.warn(
-          `Retry ${state.retryCount}/${maxRetries} for message from ${topic}, waiting ${delay}ms`,
+          `Retry ${state.retryCount}/${maxRetries} for message from ${topic}, waiting ${cappedDelay}ms`,
         );
 
-        await this.sleep(delay);
+        await this.sleep(cappedDelay);
         throw error; // Retry: throw error to trigger consumer retry
       } else {
         // Exceeded max retries
@@ -705,8 +737,22 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     return `${topic}:${partition ?? 0}:${message.offset}`;
   }
 
+  private shutdownResolvers = new Set<() => void>();
+
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.shutdownResolvers.delete(cancelFn);
+        resolve();
+      }, ms);
+
+      const cancelFn = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+
+      this.shutdownResolvers.add(cancelFn);
+    });
   }
 
   private clearMessageRetryState(
@@ -720,6 +766,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
   async gracefulShutdown(): Promise<void> {
     this.isShuttingDown = true;
+
+    // Cancel all in-flight retry delays so shutdown isn't blocked
+    for (const cancel of this.shutdownResolvers) {
+      cancel();
+    }
+    this.shutdownResolvers.clear();
+
     this.logger.log('Starting graceful shutdown of consumers...');
 
     const shutdownPromises = Array.from(this.consumerGroups.values()).map(
@@ -743,6 +796,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     // Shutdown DLQ retry consumers
     await this.dlqRetryService.gracefulShutdown();
+
+    // Clear retry state cleanup interval
+    if (this.retryStateCleanupInterval) {
+      clearInterval(this.retryStateCleanupInterval);
+      this.retryStateCleanupInterval = null;
+    }
 
     // Clear retry states
     this.messageRetryStates.clear();

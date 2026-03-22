@@ -18,6 +18,7 @@ describe('KafkaHealthIndicator', () => {
       disconnect: jest.fn(),
       listTopics: jest.fn(),
       fetchOffsets: jest.fn(),
+      fetchTopicOffsets: jest.fn(),
     };
 
     const mockKafkaCore = {
@@ -113,8 +114,11 @@ describe('KafkaHealthIndicator', () => {
       (admin.fetchOffsets as jest.Mock).mockResolvedValue([
         {
           topic: 'test-topic',
-          partitions: [{ partition: 0, offset: '100' }],
+          partitions: [{ partition: 0, offset: '0' }],
         },
+      ]);
+      (admin.fetchTopicOffsets as jest.Mock).mockResolvedValue([
+        { partition: 0, offset: '100' },
       ]);
 
       const result = await healthIndicator.checkConsumerLag(
@@ -138,8 +142,11 @@ describe('KafkaHealthIndicator', () => {
       (admin.fetchOffsets as jest.Mock).mockResolvedValue([
         {
           topic: 'test-topic',
-          partitions: [{ partition: 0, offset: '5000' }],
+          partitions: [{ partition: 0, offset: '0' }],
         },
+      ]);
+      (admin.fetchTopicOffsets as jest.Mock).mockResolvedValue([
+        { partition: 0, offset: '5000' },
       ]);
 
       const result = await healthIndicator.checkConsumerLag(

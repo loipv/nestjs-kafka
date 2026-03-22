@@ -10,6 +10,7 @@ interface KafkaConnection {
   producer: Producer;
   options: KafkaModuleOptions;
   isProducerConnected: boolean;
+  connectingPromise: Promise<void> | null;
 }
 
 @Injectable()
@@ -22,6 +23,19 @@ export class KafkaCoreService {
    */
   registerConnection(options: KafkaModuleOptions): void {
     const name = options.name || DEFAULT_KAFKA_CONNECTION;
+
+    if (!options.clientId || options.clientId.trim() === '') {
+      throw new Error(
+        `Kafka connection "${name}": clientId is required and cannot be empty`,
+      );
+    }
+
+    const brokers = options.brokers;
+    if (!brokers || (Array.isArray(brokers) && brokers.length === 0)) {
+      throw new Error(
+        `Kafka connection "${name}": brokers is required and cannot be empty`,
+      );
+    }
 
     if (this.connections.has(name)) {
       this.logger.warn(
@@ -68,6 +82,7 @@ export class KafkaCoreService {
       producer,
       options,
       isProducerConnected: false,
+      connectingPromise: null,
     });
 
     this.logger.log(
@@ -114,11 +129,25 @@ export class KafkaCoreService {
       throw new Error(`Kafka connection "${connectionName}" not found`);
     }
 
-    if (!connection.isProducerConnected) {
-      await connection.producer.connect();
-      connection.isProducerConnected = true;
-      this.logger.log(`Producer connected for "${connectionName}"`);
+    if (connection.isProducerConnected) return;
+
+    // Guard against concurrent connect calls: reuse the in-flight promise
+    if (connection.connectingPromise) {
+      await connection.connectingPromise;
+      return;
     }
+
+    connection.connectingPromise = connection.producer
+      .connect()
+      .then(() => {
+        connection.isProducerConnected = true;
+        this.logger.log(`Producer connected for "${connectionName}"`);
+      })
+      .finally(() => {
+        connection.connectingPromise = null;
+      });
+
+    await connection.connectingPromise;
   }
 
   /**

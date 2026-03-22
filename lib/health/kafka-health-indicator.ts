@@ -87,13 +87,12 @@ export class KafkaHealthIndicator {
    * We use listTopics to verify connectivity instead.
    */
   async checkBrokers(key: string): Promise<HealthIndicatorResult> {
+    const admin = this.kafkaCore.getKafka().admin();
     try {
-      const admin = this.kafkaCore.getKafka().admin();
       await admin.connect();
 
       // Use listTopics to verify connectivity (describeCluster not available)
       const topics = await admin.listTopics();
-      await admin.disconnect();
 
       const details = {
         connected: true,
@@ -113,6 +112,12 @@ export class KafkaHealthIndicator {
       }
 
       return { [key]: { status: 'down', ...errorDetails } };
+    } finally {
+      try {
+        await admin.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
     }
   }
 
@@ -124,18 +129,36 @@ export class KafkaHealthIndicator {
     groupId: string,
     maxLag: number = 1000,
   ): Promise<HealthIndicatorResult> {
+    const admin = this.kafkaCore.getKafka().admin();
     try {
-      const admin = this.kafkaCore.getKafka().admin();
       await admin.connect();
 
-      const offsets = await admin.fetchOffsets({ groupId });
-      await admin.disconnect();
+      const committedOffsets = await admin.fetchOffsets({ groupId });
 
       let totalLag = 0;
-      for (const topicOffset of offsets) {
-        for (const partition of topicOffset.partitions) {
-          const offset = parseInt(partition.offset, 10);
-          totalLag += Math.max(0, offset);
+
+      for (const topicOffset of committedOffsets) {
+        try {
+          // Fetch the latest (high-watermark) offsets for each topic
+          const latestOffsets = await admin.fetchTopicOffsets(
+            topicOffset.topic,
+          );
+
+          for (const partition of topicOffset.partitions) {
+            const committed = parseInt(partition.offset, 10);
+            if (Number.isNaN(committed)) continue;
+
+            const latestPartition = latestOffsets.find(
+              (o) => o.partition === partition.partition,
+            );
+            const latest = latestPartition
+              ? parseInt(latestPartition.offset, 10)
+              : committed;
+            const lag = Number.isNaN(latest) ? 0 : Math.max(0, latest - committed);
+            totalLag += lag;
+          }
+        } catch {
+          // Skip topics where latest offsets cannot be fetched
         }
       }
 
@@ -156,6 +179,12 @@ export class KafkaHealthIndicator {
       }
 
       return { [key]: { status: 'down', ...errorDetails } };
+    } finally {
+      try {
+        await admin.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
     }
   }
 }

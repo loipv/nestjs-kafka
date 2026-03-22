@@ -69,7 +69,7 @@ const CONSUMER_PROVIDERS: Provider[] = [
 @Global()
 @Module({})
 export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
-  private static isStarted = false;
+  private isStarted = false;
 
   constructor(
     private readonly discoveryService: ConsumerDiscoveryService,
@@ -117,15 +117,16 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
   }
 
   static clearConsumers(): void {
-    ConsumerModule.isStarted = false;
+    // No-op: isStarted is now an instance variable, reset automatically on new instances.
+    // Kept for backward compatibility.
   }
 
   async onModuleInit(): Promise<void> {
-    // Only start once
-    if (ConsumerModule.isStarted) {
+    // Only start once per instance
+    if (this.isStarted) {
       return;
     }
-    ConsumerModule.isStarted = true;
+    this.isStarted = true;
 
     // Auto-discover all providers with @Consumer() decorated methods
     // using NestJS DiscoveryService. Consumers are resolved in their own
@@ -201,6 +202,6 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
 
   async onApplicationShutdown(): Promise<void> {
     await this.registryService.gracefulShutdown();
-    ConsumerModule.clearConsumers();
+    this.isStarted = false;
   }
 }

@@ -75,7 +75,13 @@ lib/
   - All `@Consumer()` decorated methods are automatically discovered via NestJS DiscoveryService
   - Default options are merged with `@Consumer` decorator options (decorator takes precedence)
 - **KafkaClient**: Producer service with `send()`, `sendBatch()`, `sendQueued()`, `sendMultiTopicBatch()` methods
+  - `sendQueued()`: Buffers messages and auto-flushes at 100 messages or 100ms timeout
+  - `forConnection(name)`: Returns a `ConnectionBoundClient` for fluent named-connection usage
 - **@Consumer() decorator**: Method decorator to define topic consumers with batch/pressure/DLQ options
+  - Default `groupId`: `${topic}-group` if not specified
+  - Multiple topics with the same `groupId` share one consumer group (multi-topic consumer)
+  - `disabled: true`: Skip this consumer at startup without removing the decorator
+  - `deserialize: false`: Receive raw `KafkaMessage` without JSON/string deserialization (default: true)
 - **@InjectKafkaClient() decorator**: Inject named connection clients in services
 - **KafkaHealthIndicator**: Health checks for Kafka connections
 
@@ -137,6 +143,10 @@ async handleLogs(message: KafkaMessage) {
 ### Retry Mechanism With DLQ
 
 When **using DLQ**, failed messages are sent to the DLQ topic after max retries. The message is NOT skipped or dropped.
+
+### Graceful Shutdown & In-Flight Delays
+
+Both `consumer-registry.service.ts` (consumer retry delays) and `dlq-retry.service.ts` (DLQ reprocess delays) use a `shutdownResolvers: Set<() => void>` pattern with a cancellable `sleep()` helper. On shutdown, all pending delays are immediately resolved so the process does not block waiting for delays that can be up to several minutes. Any new code that adds sleep-based retry loops must follow this same pattern.
 
 ### OpenTelemetry Tracing
 
@@ -225,12 +235,14 @@ export class OrderConsumer {
 
   @Consumer('orders-batch', {
     batch: true,
-    batchSize: 100,
-    groupByKey: true,
+    batchSize: 100,       // default: 100
+    batchTimeout: 5000,   // flush timeout in ms, default: 5000
+    groupByKey: true,     // handler receives Map<string, KafkaMessage[]> instead of KafkaMessage[]
     dlq: { topic: 'orders-dlq', maxRetries: 3 },
   })
-  async handleBatch(messages: KafkaMessage[]) {
-    // Process batch
+  async handleBatch(messages: KafkaMessage[] | Map<string, KafkaMessage[]>) {
+    // groupByKey=false: KafkaMessage[]
+    // groupByKey=true: Map<string, KafkaMessage[]>
   }
 }
 

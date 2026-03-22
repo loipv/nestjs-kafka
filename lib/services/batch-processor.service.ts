@@ -23,6 +23,7 @@ export class BatchProcessorService {
   createBatchAccumulator(options: ConsumerOptions): BatchAccumulator {
     const batchSize = options.batchSize || 100;
     const batchTimeout = options.batchTimeout || 5000;
+    const logger = this.logger;
 
     let buffer: KafkaMessage[] = [];
     let timer: NodeJS.Timeout | null = null;
@@ -48,7 +49,9 @@ export class BatchProcessorService {
     const scheduleFlush = () => {
       if (timer) return;
       timer = setTimeout(() => {
-        void flush();
+        flush().catch((err: unknown) => {
+          logger.error('Error during scheduled batch flush', err);
+        });
       }, batchTimeout);
     };
 

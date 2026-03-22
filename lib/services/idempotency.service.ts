@@ -6,6 +6,7 @@ type KafkaMessage = KafkaJS.KafkaMessage;
 interface IdempotencyEntry {
   key: string;
   timestamp: number;
+  ttl: number;
 }
 
 @Injectable()
@@ -14,7 +15,9 @@ export class IdempotencyService implements OnModuleDestroy {
 
   private processedKeys = new Map<string, IdempotencyEntry>();
   private cleanupInterval: NodeJS.Timeout | null = null;
-  private readonly defaultTtl = 3600000;
+  readonly defaultTtl = 3600000; // 1 hour
+  private readonly CLEANUP_INTERVAL = 60000; // 60 seconds
+  private readonly CLEANUP_BATCH_SIZE = 500; // process at most N entries per cycle
 
   constructor() {
     this.startCleanup();
@@ -31,12 +34,22 @@ export class IdempotencyService implements OnModuleDestroy {
     const key = this.extractKey(message, keyExtractor);
     if (!key) return false;
 
-    return this.processedKeys.has(key);
+    const entry = this.processedKeys.get(key);
+    if (!entry) return false;
+
+    // Check if entry has expired
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.processedKeys.delete(key);
+      return false;
+    }
+
+    return true;
   }
 
   markProcessed(
     message: KafkaMessage,
     keyExtractor?: (msg: KafkaMessage) => string | undefined,
+    ttl?: number,
   ): void {
     const key = this.extractKey(message, keyExtractor);
     if (!key) return;
@@ -44,6 +57,7 @@ export class IdempotencyService implements OnModuleDestroy {
     this.processedKeys.set(key, {
       key,
       timestamp: Date.now(),
+      ttl: ttl ?? this.defaultTtl,
     });
   }
 
@@ -72,14 +86,22 @@ export class IdempotencyService implements OnModuleDestroy {
 
   private startCleanup(): void {
     this.cleanupInterval = setInterval(() => {
-      const now = Date.now();
+      this.runCleanupBatch();
+    }, this.CLEANUP_INTERVAL);
+  }
 
-      for (const [key, entry] of this.processedKeys.entries()) {
-        if (now - entry.timestamp > this.defaultTtl) {
-          this.processedKeys.delete(key);
-        }
+  private runCleanupBatch(): void {
+    const now = Date.now();
+    let processed = 0;
+
+    for (const [key, entry] of this.processedKeys.entries()) {
+      if (processed >= this.CLEANUP_BATCH_SIZE) break;
+
+      if (now - entry.timestamp > entry.ttl) {
+        this.processedKeys.delete(key);
       }
-    }, 60000);
+      processed++;
+    }
   }
 
   stopCleanup(): void {

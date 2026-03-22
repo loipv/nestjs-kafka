@@ -395,8 +395,9 @@ export class TracingService {
    * Extract trace context from Kafka headers
    */
   private extractContext(headers: IHeaders): Context {
+    // this.otel is non-null when callers check isEnabled() first, but guard defensively
     if (!this.otel) {
-      return this.otel!.context.active();
+      return {} as Context;
     }
 
     const traceparent = this.getHeaderValue(headers, TRACEPARENT_HEADER);
@@ -425,15 +426,13 @@ export class TracingService {
 
     // Parse tracestate if present
     const tracestate = this.getHeaderValue(headers, TRACESTATE_HEADER);
-    if (tracestate) {
-      // Note: traceState parsing is simplified - in production you might want more robust parsing
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      (spanContext as any).traceState = this.otel.createTraceState(tracestate);
-    }
+    const finalSpanContext: import('@opentelemetry/api').SpanContext = tracestate
+      ? { ...spanContext, traceState: this.otel.createTraceState(tracestate) }
+      : spanContext;
 
     return this.otel.trace.setSpanContext(
       this.otel.context.active(),
-      spanContext,
+      finalSpanContext,
     );
   }
 

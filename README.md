@@ -433,7 +433,7 @@ async handlePayment(message: KafkaMessagePayload) {
 **DLQ Retry Flow:**
 1. Message fails in handler → sent to DLQ topic
 2. DLQ retry consumer picks up message
-3. Waits with exponential backoff delay
+3. Waits with exponential backoff delay (immediately cancelled on graceful shutdown)
 4. Calls original handler again
 5. If still fails after max DLQ retries → sent to `finalDlqTopic` or dropped
 

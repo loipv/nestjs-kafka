@@ -260,9 +260,16 @@ export class KafkaClient implements OnApplicationShutdown {
     if (this.batchTimers.has(timerKey)) return;
 
     const timer = setTimeout(() => {
-      void this.flushConnectionBatches(connectionName).then(() => {
-        this.batchTimers.delete(timerKey);
-      });
+      this.flushConnectionBatches(connectionName)
+        .catch((err: unknown) => {
+          this.logger.error(
+            `Failed to flush batch for connection "${connectionName}"`,
+            err,
+          );
+        })
+        .finally(() => {
+          this.batchTimers.delete(timerKey);
+        });
     }, this.defaultBatchTimeout);
 
     this.batchTimers.set(timerKey, timer);

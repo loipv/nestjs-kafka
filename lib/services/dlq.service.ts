@@ -122,8 +122,15 @@ export class DlqService {
     headers[DLQ_HEADERS.TIMESTAMP] = new Date().toISOString();
 
     if (options.includeErrorInfo !== false) {
-      headers[DLQ_HEADERS.ERROR_MESSAGE] = error.message;
-      headers[DLQ_HEADERS.ERROR_STACK] = error.stack || '';
+      const MAX_HEADER_LENGTH = 1000;
+      headers[DLQ_HEADERS.ERROR_MESSAGE] = (error.message || '').substring(
+        0,
+        MAX_HEADER_LENGTH,
+      );
+      headers[DLQ_HEADERS.ERROR_STACK] = (error.stack || '').substring(
+        0,
+        MAX_HEADER_LENGTH,
+      );
     }
 
     try {
