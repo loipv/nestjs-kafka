@@ -17,7 +17,6 @@ export class IdempotencyService implements OnModuleDestroy {
   private cleanupInterval: NodeJS.Timeout | null = null;
   readonly defaultTtl = 3600000; // 1 hour
   private readonly CLEANUP_INTERVAL = 60000; // 60 seconds
-  private readonly CLEANUP_BATCH_SIZE = 500; // process at most N entries per cycle
 
   constructor() {
     this.startCleanup();
@@ -92,15 +91,10 @@ export class IdempotencyService implements OnModuleDestroy {
 
   private runCleanupBatch(): void {
     const now = Date.now();
-    let processed = 0;
-
-    for (const [key, entry] of this.processedKeys.entries()) {
-      if (processed >= this.CLEANUP_BATCH_SIZE) break;
-
+    for (const [key, entry] of this.processedKeys) {
       if (now - entry.timestamp > entry.ttl) {
         this.processedKeys.delete(key);
       }
-      processed++;
     }
   }
 
