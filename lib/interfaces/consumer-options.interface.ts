@@ -123,6 +123,12 @@ export interface ConsumerOptions {
 
   /** Retry options for consumer restart on failure */
   retry?: ConsumerRetryOptions;
+
+  /** Partitions for auto-created topics. Default: 1 */
+  autoCreateTopicPartitions?: number;
+
+  /** Replication factor for auto-created topics. Default: 1 */
+  autoCreateTopicReplicationFactor?: number;
 }
 
 export interface ConsumerMetadata {
@@ -208,6 +214,18 @@ export interface ConsumerModuleOptions {
    * Applied when @Consumer decorator doesn't specify retry options.
    */
   retry?: ConsumerRetryOptions;
+
+  /**
+   * Default partition count for auto-created topics.
+   * Applied when @Consumer decorator doesn't specify autoCreateTopicPartitions.
+   */
+  autoCreateTopicPartitions?: number;
+
+  /**
+   * Default replication factor for auto-created topics.
+   * Applied when @Consumer decorator doesn't specify autoCreateTopicReplicationFactor.
+   */
+  autoCreateTopicReplicationFactor?: number;
 }
 
 /** Injection token for ConsumerModule options */

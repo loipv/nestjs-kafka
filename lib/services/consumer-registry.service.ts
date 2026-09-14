@@ -117,6 +117,15 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         options.fromBeginning === undefined && {
           fromBeginning: defaults.fromBeginning,
         }),
+      ...(defaults.autoCreateTopicPartitions !== undefined &&
+        options.autoCreateTopicPartitions === undefined && {
+          autoCreateTopicPartitions: defaults.autoCreateTopicPartitions,
+        }),
+      ...(defaults.autoCreateTopicReplicationFactor !== undefined &&
+        options.autoCreateTopicReplicationFactor === undefined && {
+          autoCreateTopicReplicationFactor:
+            defaults.autoCreateTopicReplicationFactor,
+        }),
       // Decorator options (always applied, overrides defaults)
       ...options,
     };
@@ -323,11 +332,14 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
           if (newTopics.length > 0) {
             await admin.createTopics({
-              topics: newTopics.map((topic) => ({
-                topic,
-                numPartitions: 1,
-                replicationFactor: 1,
-              })),
+              topics: newTopics.map((topic) => {
+                const opts = topics.get(topic)!.metadata.options;
+                return {
+                  topic,
+                  numPartitions: opts.autoCreateTopicPartitions ?? 1,
+                  replicationFactor: opts.autoCreateTopicReplicationFactor ?? 1,
+                };
+              }),
             });
             this.logger.log(`Auto-created topics: ${newTopics.join(', ')}`);
           }

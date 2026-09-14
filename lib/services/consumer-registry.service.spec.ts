@@ -23,4 +23,14 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
     const merged = (registry as any).mergeWithDefaults({}) as any;
     expect(merged.retry).toEqual({ retries: 7 });
   });
+
+  it('merges auto-create topic sizing defaults per field', () => {
+    const registry = makeRegistry({
+      autoCreateTopicPartitions: 3,
+      autoCreateTopicReplicationFactor: 3,
+    });
+    const merged = (registry as any).mergeWithDefaults({}) as any;
+    expect(merged.autoCreateTopicPartitions).toBe(3);
+    expect(merged.autoCreateTopicReplicationFactor).toBe(3);
+  });
 });
