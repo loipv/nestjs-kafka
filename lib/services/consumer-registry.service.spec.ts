@@ -115,3 +115,74 @@ describe('retry logic', () => {
     expect(attempts).toHaveBeenCalledTimes(1); // no hot-loop
   });
 });
+
+describe('consumer auto-restart', () => {
+  const makeRegistry = () =>
+    new ConsumerRegistryService(
+      {} as any, {} as any,
+      { stopCleanup: jest.fn() } as any,
+      { register: jest.fn(), setTopics: jest.fn() } as any,
+      { handleFailure: jest.fn() } as any,
+      {
+        registerOriginalGroupId: jest.fn(),
+        startAll: jest.fn().mockResolvedValue(undefined),
+        gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+      } as any,
+      undefined, undefined,
+    );
+
+  it('computeRestartDelay grows exponentially and caps at maxRetryTime', () => {
+    const r = makeRegistry();
+    const group = {
+      options: { retry: { initialRetryTime: 1000, multiplier: 2, maxRetryTime: 5000 } },
+      restartAttempts: 0,
+    } as any;
+    expect((r as any).computeRestartDelay(group)).toBe(1000);
+    group.restartAttempts = 2;
+    expect((r as any).computeRestartDelay(group)).toBe(4000);
+    group.restartAttempts = 10;
+    expect((r as any).computeRestartDelay(group)).toBe(5000); // capped
+  });
+
+  it('run() rejection (connection crash) schedules a consumer restart', async () => {
+    const restart = jest.fn().mockResolvedValue(undefined);
+    const consumer = {
+      connect: jest.fn(), subscribe: jest.fn(),
+      run: jest.fn().mockRejectedValue(new Error('connection reset')),
+      disconnect: jest.fn(), pause: jest.fn(), resume: jest.fn(),
+    };
+    const core = {
+      getKafka: jest.fn().mockReturnValue({
+        consumer: jest.fn().mockReturnValue(consumer),
+        admin: jest.fn().mockReturnValue({
+          connect: jest.fn(), disconnect: jest.fn(),
+          listTopics: jest.fn().mockResolvedValue([]),
+        }),
+      }),
+    };
+    const r = makeRegistry();
+    (r as any).kafkaCore = core;
+    (r as any).scheduleConsumerRestart = restart;
+    r.registerConsumers([{
+      topic: 't', connection: 'default', options: {},
+      target: { h: async () => {} }, methodName: 'h',
+    } as any]);
+    await (r as any).startAll();
+    await new Promise((resolve) => setImmediate(resolve)); // let the .catch microtask run
+    expect(restart).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: 't-group' }),
+      expect.any(Error),
+    );
+  });
+
+  it('does not restart while shutting down', async () => {
+    const r = makeRegistry();
+    const group = {
+      groupId: 'g', isRestarting: false, restartAttempts: 0,
+      consumer: { disconnect: jest.fn() },
+    } as any;
+    await (r as any).gracefulShutdown();
+    await (r as any).scheduleConsumerRestart(group, new Error('x'));
+    expect(group.restartAttempts).toBe(0); // returned before any sleep/reconnect
+  });
+});

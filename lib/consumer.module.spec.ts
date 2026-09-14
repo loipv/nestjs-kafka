@@ -24,7 +24,7 @@ jest.mock('@confluentinc/kafka-javascript', () => ({
         connect: jest.fn(),
         disconnect: jest.fn(),
         subscribe: jest.fn(),
-        run: jest.fn(),
+        run: jest.fn().mockResolvedValue(undefined),
       }),
       admin: jest.fn().mockReturnValue({
         connect: jest.fn(),

@@ -44,6 +44,8 @@ interface ConsumerGroup {
   options: ConsumerOptions; // Use first consumer's options for shared settings
   isRunning: boolean;
   hasBatchConsumer: boolean;
+  restartAttempts: number;
+  isRestarting: boolean;
 }
 
 @Injectable()
@@ -153,47 +155,11 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     let group = this.consumerGroups.get(groupKey);
 
     if (!group) {
-      // Build consumer config with only defined values
-      const consumerConfig: KafkaJS.ConsumerConfig = {
-        groupId,
-        maxBytesPerPartition: 1048576,
-        autoCommit: options.autoCommit !== false,
-      };
-
-      // Add optional settings only if defined
-      if (options.sessionTimeout !== undefined) {
-        consumerConfig.sessionTimeout = options.sessionTimeout;
-      }
-      if (options.heartbeatInterval !== undefined) {
-        consumerConfig.heartbeatInterval = options.heartbeatInterval;
-      }
-      if (options.rebalanceTimeout !== undefined) {
-        consumerConfig.rebalanceTimeout = options.rebalanceTimeout;
-      }
-      if (options.fromBeginning !== undefined) {
-        consumerConfig.fromBeginning = options.fromBeginning;
-      }
-      if (options.autoCommitInterval !== undefined) {
-        consumerConfig.autoCommitInterval = options.autoCommitInterval;
-      }
-      if (options.allowAutoTopicCreation !== undefined) {
-        consumerConfig.allowAutoTopicCreation = options.allowAutoTopicCreation;
-      }
-      if (options.partitionAssigners && options.partitionAssigners.length > 0) {
-        consumerConfig.partitionAssigners =
-          options.partitionAssigners as KafkaJS.PartitionAssigners[];
-      }
-      if (options.retry) {
-        consumerConfig.retry = {
-          retries: options.retry.retries,
-          maxRetryTime: options.retry.maxRetryTime,
-          initialRetryTime: options.retry.initialRetryTime,
-        };
-      }
-
       const consumer = this.kafkaCore
         .getKafka(connectionName)
-        .consumer({ kafkaJS: consumerConfig });
+        .consumer({
+          kafkaJS: this.buildConsumerConfig(groupId, options),
+        });
 
       group = {
         groupId,
@@ -203,6 +169,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         options,
         isRunning: false,
         hasBatchConsumer: false,
+        restartAttempts: 0,
+        isRestarting: false,
       };
 
       this.consumerGroups.set(groupKey, group);
@@ -440,7 +408,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       await this.runWithRetry(invokeOnce, message, metadata, partition);
     };
 
-    await consumer.run(runConfig);
+    // Non-awaited: run() may only settle when the consumer stops. The .catch
+    // is the ONLY restart trigger — handler errors never reach it (retried
+    // in-process by runWithRetry); anything landing here is infra.
+    consumer.run(runConfig).catch((err: Error) => {
+      void this.scheduleConsumerRestart(group, err);
+    });
   }
 
   private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
@@ -560,7 +533,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       }
     };
 
-    await consumer.run(runConfig);
+    // Non-awaited: run() may only settle when the consumer stops. The .catch
+    // is the ONLY restart trigger — handler errors never reach it (retried
+    // in-process by runWithRetry); anything landing here is infra.
+    consumer.run(runConfig).catch((err: Error) => {
+      void this.scheduleConsumerRestart(group, err);
+    });
   }
 
   private async processBatchMessages(
@@ -622,6 +600,137 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       for (const msg of processableMessages) {
         this.idempotencyService.markProcessed(msg, options.idempotencyKey);
       }
+    }
+  }
+
+  /** Build the confluent consumer config with only defined values. */
+  private buildConsumerConfig(
+    groupId: string,
+    options: ConsumerOptions,
+  ): KafkaJS.ConsumerConfig {
+    const consumerConfig: KafkaJS.ConsumerConfig = {
+      groupId,
+      maxBytesPerPartition: 1048576,
+      autoCommit: options.autoCommit !== false,
+    };
+
+    // Add optional settings only if defined
+    if (options.sessionTimeout !== undefined) {
+      consumerConfig.sessionTimeout = options.sessionTimeout;
+    }
+    if (options.heartbeatInterval !== undefined) {
+      consumerConfig.heartbeatInterval = options.heartbeatInterval;
+    }
+    if (options.rebalanceTimeout !== undefined) {
+      consumerConfig.rebalanceTimeout = options.rebalanceTimeout;
+    }
+    if (options.fromBeginning !== undefined) {
+      consumerConfig.fromBeginning = options.fromBeginning;
+    }
+    if (options.autoCommitInterval !== undefined) {
+      consumerConfig.autoCommitInterval = options.autoCommitInterval;
+    }
+    if (options.allowAutoTopicCreation !== undefined) {
+      consumerConfig.allowAutoTopicCreation = options.allowAutoTopicCreation;
+    }
+    if (options.partitionAssigners && options.partitionAssigners.length > 0) {
+      consumerConfig.partitionAssigners =
+        options.partitionAssigners as KafkaJS.PartitionAssigners[];
+    }
+    if (options.retry) {
+      consumerConfig.retry = {
+        retries: options.retry.retries,
+        maxRetryTime: options.retry.maxRetryTime,
+        initialRetryTime: options.retry.initialRetryTime,
+      };
+    }
+
+    return consumerConfig;
+  }
+
+  private computeRestartDelay(group: ConsumerGroup): number {
+    const retry = group.options.retry;
+    const base = retry?.initialRetryTime ?? 1000;
+    const multiplier = retry?.multiplier ?? 2;
+    const maxTime = retry?.maxRetryTime ?? 30000;
+    return Math.min(base * multiplier ** group.restartAttempts, maxTime);
+  }
+
+  /**
+   * Auto-restart a crashed consumer group with exponential backoff capped at
+   * retry.maxRetryTime. Unlimited attempts: a dead consumer means a stalled
+   * partition, which breaks the no-data-loss guarantee of
+   * skipMessageOnMaxRetries=false. Users break a poison-message loop with
+   * skipMessageOnMaxRetries=true or a DLQ.
+   *
+   * Only infra failures reach this (handler errors are retried in-process by
+   * runWithRetry and never kill the run loop) — so a healthy Kafka connection
+   * means a running app.
+   */
+  private async scheduleConsumerRestart(
+    group: ConsumerGroup,
+    reason: Error,
+  ): Promise<void> {
+    if (this.isShuttingDown || group.isRestarting) return;
+    group.isRestarting = true;
+
+    try {
+      while (!this.isShuttingDown) {
+        const delay = this.computeRestartDelay(group);
+        this.logger.error(
+          `Consumer group "${group.groupId}" crashed: ${reason.message}. ` +
+            `Restarting in ${delay}ms (restart attempt ${group.restartAttempts + 1})`,
+        );
+
+        await this.sleep(delay); // cancellable on shutdown
+        if (this.isShuttingDown) return;
+        group.restartAttempts++;
+
+        try {
+          // Best-effort cleanup of the crashed consumer
+          try {
+            await group.consumer.disconnect();
+          } catch {
+            // already dead
+          }
+
+          // Fresh consumer instance, same groupId → rebalance picks up uncommitted offsets
+          group.consumer = this.kafkaCore
+            .getKafka(group.connection)
+            .consumer({
+              kafkaJS: this.buildConsumerConfig(group.groupId, group.options),
+            });
+          group.isRunning = false;
+          await this.startConsumerGroup(group); // connect + subscribe + run
+
+          // Re-register so pause/resume targets the new consumer instance
+          this.pressureManager.register(
+            `${group.connection}:${group.groupId}`,
+            group.consumer,
+            {
+              backPressureThreshold: group.options.backPressureThreshold || 80,
+              resumeThreshold: 60,
+              maxQueueSize: group.options.maxQueueSize || 1000,
+              checkIntervalMs: 1000,
+            },
+          );
+
+          group.restartAttempts = 0; // fresh crash ladder starts from base delay
+          this.logger.log(
+            `Consumer group "${group.groupId}" restarted successfully`,
+          );
+          return;
+        } catch (restartError) {
+          reason = restartError as Error;
+          this.logger.error(
+            `Failed to restart consumer group "${group.groupId}"`,
+            restartError,
+          );
+          // loop continues with higher backoff
+        }
+      }
+    } finally {
+      group.isRestarting = false;
     }
   }
 
