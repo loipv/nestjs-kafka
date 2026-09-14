@@ -186,3 +186,58 @@ describe('consumer auto-restart', () => {
     expect(group.restartAttempts).toBe(0); // returned before any sleep/reconnect
   });
 });
+
+describe('batch offset semantics', () => {
+  it('resolves offsets only after successful flush (at-least-once)', async () => {
+    let captured: any;
+    const consumer = {
+      connect: jest.fn(), subscribe: jest.fn(),
+      run: jest.fn().mockImplementation((cfg) => { captured = cfg; return Promise.resolve(undefined); }),
+      disconnect: jest.fn(), pause: jest.fn(), resume: jest.fn(),
+    };
+    const admin = {
+      connect: jest.fn(), disconnect: jest.fn(),
+      listTopics: jest.fn().mockResolvedValue([]), createTopics: jest.fn(),
+    };
+    const core = {
+      getKafka: jest.fn().mockReturnValue({
+        consumer: jest.fn().mockReturnValue(consumer),
+        admin: jest.fn().mockReturnValue(admin),
+      }),
+    };
+    const handler = jest.fn().mockResolvedValue(undefined);
+    const registry = new ConsumerRegistryService(
+      core as any, new BatchProcessorService(), { filterDuplicates: (m: any[]) => m } as any,
+      { register: jest.fn(), setTopics: jest.fn() } as any,
+      {} as any, // dlqService — not used in this path
+      {} as any, // dlqRetryService — replaced below
+      undefined, undefined,
+    );
+    (registry as any).dlqRetryService = {
+      registerOriginalGroupId: jest.fn(),
+      startAll: jest.fn().mockResolvedValue(undefined),
+      gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+    };
+    registry.registerConsumers([{
+      topic: 't', connection: 'default',
+      options: { batch: true, batchSize: 2, batchTimeout: 5000 },
+      target: { h: handler }, methodName: 'h',
+    } as any]);
+    await (registry as any).startAll();
+
+    const msgs = [
+      { offset: '1', value: Buffer.from('a'), key: null, headers: {}, timestamp: '' },
+      { offset: '2', value: Buffer.from('b'), key: null, headers: {}, timestamp: '' },
+    ];
+    const resolveOffset = jest.fn();
+    await captured.eachBatch({
+      batch: { topic: 't', partition: 0, messages: msgs },
+      isRunning: () => true, isStale: () => false,
+      resolveOffset, heartbeat: () => {},
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);        // flushed as one batch
+    expect(resolveOffset).toHaveBeenCalledTimes(1);   // once, not per-add
+    expect(resolveOffset).toHaveBeenCalledWith('2'); // last offset, AFTER flush
+  });
+});

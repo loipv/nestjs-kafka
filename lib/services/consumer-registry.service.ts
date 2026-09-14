@@ -431,6 +431,11 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         options.partitionsConsumedConcurrently;
     }
 
+    // Batch groups commit ONLY what we explicitly resolve — never auto-resolve
+    // the whole fetched batch (that would ack unprocessed messages on a
+    // stale-break and break at-least-once).
+    runConfig.eachBatchAutoResolve = false;
+
     runConfig.eachBatch = async (payload: EachBatchPayload) => {
       if (this.isShuttingDown) return;
 
@@ -461,18 +466,23 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
             topicOptions,
             handler,
             groupId,
+            metadata,
           );
         });
 
+        let lastAddedOffset: string | null = null;
         for (const message of messages) {
           if (!payload.isRunning() || payload.isStale()) break;
 
           await accumulator.add(message);
-          payload.resolveOffset(message.offset);
-          // Note: heartbeat() is automatic in confluent-kafka-javascript
+          lastAddedOffset = message.offset;
+          // NO resolveOffset here — offsets resolve only after successful flush
         }
 
         await accumulator.flush();
+        if (lastAddedOffset !== null) {
+          payload.resolveOffset(lastAddedOffset);
+        }
       } else {
         // Process messages one by one (non-batch consumer in a batch group)
         for (const message of messages) {
@@ -548,6 +558,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     options: ConsumerOptions,
     handler: (...args: any[]) => Promise<void>,
     groupId?: string,
+    metadata?: ConsumerMetadata,
   ): Promise<void> {
     let processableMessages = messages;
 
@@ -576,24 +587,72 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       }
     };
 
-    // For batch processing, use links to connect all message traces
-    // First message becomes parent, others are linked
-    if (this.tracingService?.isEnabled() && messages.length > 0) {
-      await this.tracingService.withBatchConsumeSpan(
-        {
-          topic,
-          partition,
-          groupId,
-          messagesHeaders: messages.map((msg) => ({
-            offset: msg.offset,
-            key: msg.key?.toString(),
-            headers: msg.headers,
-          })),
-        },
-        processBatch,
-      );
-    } else {
-      await processBatch();
+    const invokeBatchOnce = async () => {
+      // For batch processing, use links to connect all message traces
+      // First message becomes parent, others are linked
+      if (this.tracingService?.isEnabled() && messages.length > 0) {
+        return this.tracingService.withBatchConsumeSpan(
+          {
+            topic,
+            partition,
+            groupId,
+            messagesHeaders: messages.map((msg) => ({
+              offset: msg.offset,
+              key: msg.key?.toString(),
+              headers: msg.headers,
+            })),
+          },
+          processBatch,
+        );
+      }
+      return processBatch();
+    };
+
+    // Batch retry policy mirrors the single-message path: skip=false →
+    // retry the batch indefinitely (handler errors never crash the consumer);
+    // DLQ configured → dead-letter every raw message after maxRetries;
+    // skip=true → skip after maxRetries.
+    const maxRetries = options.retry?.retries ?? 3;
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      try {
+        await invokeBatchOnce();
+        break; // success
+      } catch (error) {
+        const err = error as Error;
+        this.logger.error(
+          `Error processing batch from ${topic} (attempt ${attempt})`,
+          err,
+        );
+
+        if (attempt > maxRetries && metadata?.options.dlq) {
+          // Exhausted: dead-letter every raw message of the batch
+          // (sendToDlq failure rejects → infra crash path → auto-restart)
+          for (const msg of messages) {
+            await this.dlqService.sendToDlq(
+              msg,
+              err,
+              metadata.options.dlq,
+              topic,
+              attempt,
+              metadata.connection,
+            );
+          }
+          break;
+        }
+        if (
+          attempt > maxRetries &&
+          (options.retry?.skipMessageOnMaxRetries ?? false)
+        ) {
+          break; // skip — fall through to resolve offset
+        }
+        // retry (indefinitely when skip=false)
+        await this.sleep(this.computeRetryDelay(attempt, options.retry));
+        if (this.isShuttingDown) {
+          throw err; // one-shot rethrow: offset never resolved → redelivered next boot
+        }
+      }
     }
 
     if (options.idempotencyKey) {
