@@ -24,4 +24,17 @@ describe('KafkaClient', () => {
       expect(serialize({ value: undefined }).value).toBeNull();
     });
   });
+
+  describe('isHealthy', () => {
+    it('reports producer connection state, not registration', () => {
+      const core = { isProducerConnected: jest.fn().mockReturnValue(true) } as any;
+      expect(new KafkaClient(core).isHealthy()).toBe(true);
+      expect(core.isProducerConnected).toHaveBeenCalledWith(undefined);
+    });
+
+    it('returns false when producer never connected (lazy connect)', () => {
+      const core = { isProducerConnected: jest.fn().mockReturnValue(false) } as any;
+      expect(new KafkaClient(core).isHealthy()).toBe(false);
+    });
+  });
 });

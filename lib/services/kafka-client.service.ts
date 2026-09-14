@@ -229,10 +229,11 @@ export class KafkaClient implements OnApplicationShutdown {
   }
 
   /**
-   * Check if a specific connection is healthy
+   * Check if a specific connection is healthy (producer actually connected).
+   * Use checkBrokers() on KafkaHealthIndicator for an active connectivity probe.
    */
   isHealthy(connection?: string): boolean {
-    return this.kafkaCore.hasConnection(connection);
+    return this.kafkaCore.isProducerConnected(connection);
   }
 
   private serializeMessage(message: ProducerMessage): Message {

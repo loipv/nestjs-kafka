@@ -172,6 +172,16 @@ export class KafkaCoreService {
   }
 
   /**
+   * Check if the producer for a connection is actually connected
+   */
+  isProducerConnected(name?: string): boolean {
+    return (
+      this.connections.get(name || DEFAULT_KAFKA_CONNECTION)
+        ?.isProducerConnected ?? false
+    );
+  }
+
+  /**
    * Get all connection names
    */
   getConnectionNames(): string[] {
