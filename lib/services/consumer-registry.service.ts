@@ -83,7 +83,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     const defaults = this.moduleOptions;
 
-    return {
+    const merged: ConsumerOptions = {
       // Module defaults (applied if decorator doesn't specify)
       ...(defaults.partitionAssigners !== undefined &&
         options.partitionAssigners === undefined && {
@@ -117,14 +117,17 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         options.fromBeginning === undefined && {
           fromBeginning: defaults.fromBeginning,
         }),
-      // Merge retry options (decorator retry options take precedence)
-      ...(defaults.retry &&
-        !options.retry && {
-          retry: defaults.retry,
-        }),
       // Decorator options (always applied, overrides defaults)
       ...options,
     };
+
+    // Deep-merge retry per field (decorator wins per field) — must happen
+    // after the spread above, which would otherwise clobber with options.retry
+    if (defaults.retry || options.retry) {
+      merged.retry = { ...defaults.retry, ...options.retry };
+    }
+
+    return merged;
   }
 
   registerConsumers(consumers: ConsumerMetadata[]): void {
