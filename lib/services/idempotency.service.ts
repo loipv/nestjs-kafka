@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 
 type KafkaMessage = KafkaJS.KafkaMessage;
@@ -11,8 +11,6 @@ interface IdempotencyEntry {
 
 @Injectable()
 export class IdempotencyService implements OnModuleDestroy {
-  private readonly logger = new Logger(IdempotencyService.name);
-
   private processedKeys = new Map<string, IdempotencyEntry>();
   private cleanupInterval: NodeJS.Timeout | null = null;
   readonly defaultTtl = 3600000; // 1 hour
