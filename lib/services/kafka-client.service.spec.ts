@@ -37,4 +37,24 @@ describe('KafkaClient', () => {
       expect(new KafkaClient(core).isHealthy()).toBe(false);
     });
   });
+
+  describe('onApplicationShutdown', () => {
+    it('still disconnects producers when final flush fails', async () => {
+      const core = {
+        isProducerConnected: jest.fn().mockReturnValue(false),
+        disconnectAll: jest.fn().mockResolvedValue(undefined),
+        getProducer: jest.fn().mockReturnValue({
+          send: jest.fn().mockRejectedValue(new Error('broker down')),
+        }),
+      } as any;
+      const client = new KafkaClient(core);
+      (client as any).batchBuffers.set(
+        'default',
+        new Map([['t', [{ value: 'x' }]]]),
+      );
+
+      await expect(client.onApplicationShutdown()).resolves.toBeUndefined();
+      expect(core.disconnectAll).toHaveBeenCalledTimes(1);
+    });
+  });
 });

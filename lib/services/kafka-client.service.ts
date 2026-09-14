@@ -36,7 +36,11 @@ export class KafkaClient implements OnApplicationShutdown {
   ) {}
 
   async onApplicationShutdown(): Promise<void> {
-    await this.flushAllBatches();
+    try {
+      await this.flushAllBatches();
+    } catch (error) {
+      this.logger.error('Failed to flush queued batches during shutdown', error);
+    }
     await this.kafkaCore.disconnectAll();
   }
 
@@ -310,7 +314,16 @@ export class KafkaClient implements OnApplicationShutdown {
   private async flushAllBatches(): Promise<void> {
     const connections = Array.from(this.batchBuffers.keys());
     await Promise.all(
-      connections.map((conn) => this.flushConnectionBatches(conn)),
+      connections.map(async (conn) => {
+        try {
+          await this.flushConnectionBatches(conn);
+        } catch (error) {
+          this.logger.error(
+            `Failed to flush batches for connection "${conn}"`,
+            error,
+          );
+        }
+      }),
     );
 
     // Clear all timers
