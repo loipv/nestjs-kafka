@@ -17,3 +17,33 @@ describe('IdempotencyService cleanup', () => {
     jest.useRealTimers();
   });
 });
+
+describe('dedupe semantics', () => {
+  it('dedupes by idempotency-key header (Buffer or string)', () => {
+    const svc = new IdempotencyService();
+    const msg = { headers: { 'idempotency-key': Buffer.from('k1') } } as any;
+    expect(svc.isProcessed(msg)).toBe(false);
+    svc.markProcessed(msg);
+    expect(svc.isProcessed(msg)).toBe(true);
+    expect(svc.isProcessed({ headers: { 'idempotency-key': 'k1' } } as any)).toBe(true);
+  });
+
+  it('expires after TTL', () => {
+    jest.useFakeTimers();
+    const svc = new IdempotencyService();
+    const msg = { headers: { 'idempotency-key': 'k2' } } as any;
+    svc.markProcessed(msg, undefined, 1000);
+    jest.advanceTimersByTime(1500);
+    expect(svc.isProcessed(msg)).toBe(false);
+    svc.stopCleanup();
+    jest.useRealTimers();
+  });
+
+  it('filterDuplicates removes processed', () => {
+    const svc = new IdempotencyService();
+    const a = { headers: { 'idempotency-key': 'a' } } as any;
+    const b = { headers: { 'idempotency-key': 'b' } } as any;
+    svc.markProcessed(a);
+    expect(svc.filterDuplicates([a, b])).toEqual([b]);
+  });
+});
