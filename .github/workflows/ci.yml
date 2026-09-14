@@ -1,0 +1,49 @@
+name: CI
+
+on: push
+
+jobs:
+  lint-and-unit:
+    name: Lint + Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        # no --fix in CI: report, don't rewrite
+        run: npx eslint "{lib,test}/**/*.ts"
+
+      - name: Unit tests
+        run: npm test
+
+  e2e:
+    name: E2E (testcontainers)
+    runs-on: ubuntu-latest
+    # ubuntu runners ship Docker — testcontainers works out of the box
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Kafka e2e suite
+        run: npm run test:e2e
