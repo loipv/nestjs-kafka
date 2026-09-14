@@ -279,18 +279,43 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
             (t) => !existingTopics.includes(t),
           );
 
-          if (newTopics.length > 0) {
-            await admin.createTopics({
-              topics: newTopics.map((topic) => {
-                const opts = topics.get(topic)!.metadata.options;
-                return {
-                  topic,
-                  numPartitions: opts.autoCreateTopicPartitions ?? 1,
-                  replicationFactor: opts.autoCreateTopicReplicationFactor ?? 1,
-                };
-              }),
-            });
-            this.logger.log(`Auto-created topics: ${newTopics.join(', ')}`);
+          // Create topics ONE BY ONE: when multiple consumer groups start
+          // concurrently (e.g. a topic and its DLQ spy), they can share a
+          // topic in their creation lists — a single atomic createTopics call
+          // would fail wholesale on "already exists" and skip the rest.
+          for (const topic of newTopics) {
+            const opts = topics.get(topic)!.metadata.options;
+            try {
+              await admin.createTopics({
+                topics: [
+                  {
+                    topic,
+                    numPartitions: opts.autoCreateTopicPartitions ?? 1,
+                    replicationFactor:
+                      opts.autoCreateTopicReplicationFactor ?? 1,
+                  },
+                ],
+              });
+              this.logger.log(`Auto-created topic: ${topic}`);
+            } catch (error) {
+              // Concurrent creation by another group is fine — verify it exists
+              if (!(await admin.listTopics()).includes(topic)) {
+                throw error;
+              }
+            }
+          }
+
+          // Wait for topic metadata to propagate before subscribing —
+          // subscribing to a topic whose metadata isn't visible yet leaves
+          // the consumer with zero assignments (silent no-consumption).
+          const deadline = Date.now() + 10_000;
+          let visible = new Set(await admin.listTopics());
+          while (
+            topicList.some((t) => !visible.has(t)) &&
+            Date.now() < deadline
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            visible = new Set(await admin.listTopics());
           }
         } catch (error) {
           this.logger.warn(`Failed to auto-create topics: ${error}`);
