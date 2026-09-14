@@ -3,9 +3,6 @@ import {
   Global,
   Module,
   Provider,
-  OnModuleInit,
-  Inject,
-  Optional,
 } from '@nestjs/common';
 import {
   KafkaModuleOptions,
@@ -25,9 +22,6 @@ import { TracingService } from './services/tracing.service';
 
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
 
-// Store registered connection names for tracking
-const KAFKA_CONNECTION_NAMES = Symbol('KAFKA_CONNECTION_NAMES');
-
 // Core infrastructure providers - consumer services are now in ConsumerModule
 const CORE_PROVIDERS: Provider[] = [
   KafkaCoreService,
@@ -38,18 +32,7 @@ const CORE_PROVIDERS: Provider[] = [
 
 @Global()
 @Module({})
-export class KafkaModule implements OnModuleInit {
-  constructor(
-    private readonly kafkaCore: KafkaCoreService,
-    @Optional()
-    @Inject(KAFKA_CONNECTION_NAMES)
-    private readonly connectionNames?: string[],
-  ) {}
-
-  onModuleInit(): void {
-    // Connection registration is handled by the factory providers
-  }
-
+export class KafkaModule {
   /**
    * Register a single Kafka connection
    */
@@ -164,10 +147,6 @@ export class KafkaModule implements OnModuleInit {
       {
         provide: KAFKA_MODULE_OPTIONS,
         useValue: defaultOptions,
-      },
-      {
-        provide: KAFKA_CONNECTION_NAMES,
-        useValue: optionsArray.map((o) => o.name || DEFAULT_KAFKA_CONNECTION),
       },
       ...CORE_PROVIDERS,
     );

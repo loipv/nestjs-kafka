@@ -1,8 +1,6 @@
 import {
   Injectable,
   Logger,
-  forwardRef,
-  Inject,
   OnApplicationShutdown,
 } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
@@ -65,7 +63,6 @@ export class DlqRetryService implements OnApplicationShutdown {
 
   constructor(
     private readonly kafkaCore: KafkaCoreService,
-    @Inject(forwardRef(() => KafkaClient))
     private readonly kafkaClient: KafkaClient,
     private readonly metrics: DlqMetricsService,
   ) {}

@@ -1,4 +1,4 @@
-import { Injectable, Logger, forwardRef, Inject } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { KafkaClient } from './kafka-client.service';
 
@@ -28,7 +28,6 @@ export class DlqService {
   private retryStates = new Map<string, RetryState>();
 
   constructor(
-    @Inject(forwardRef(() => KafkaClient))
     private readonly kafkaClient: KafkaClient,
     private readonly metrics: DlqMetricsService,
     private readonly circuitBreaker: CircuitBreakerService,
