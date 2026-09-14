@@ -240,6 +240,8 @@ export class KafkaClient implements OnApplicationShutdown {
 
     if (message.value === null || message.value === undefined) {
       value = null;
+    } else if (Buffer.isBuffer(message.value)) {
+      value = message.value;
     } else if (typeof message.value === 'object') {
       value = JSON.stringify(message.value);
     } else {
