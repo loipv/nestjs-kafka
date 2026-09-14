@@ -360,6 +360,8 @@ async handleBatch(messages: KafkaMessage[]) {
 }
 ```
 
+**Delivery semantics (at-least-once):** offsets are committed only after a batch is processed successfully. If the process crashes mid-batch (or the handler keeps failing with `skipMessageOnMaxRetries: false`), the whole batch is redelivered — make your batch handler idempotent (see [Idempotency](#idempotency)). Batch handlers get the same retry/DLQ wiring as single-message handlers.
+
 ### Batch with Key Grouping
 
 ```typescript
@@ -594,20 +596,20 @@ async handleBinary(message: KafkaMessage) {
 
 ### Retry Mechanism (Without DLQ)
 
-When **NOT using DLQ**, the library implements an in-memory retry mechanism with exponential backoff:
+When **NOT using DLQ**, handler failures are retried **in-process** with capped exponential backoff — the consumer never crashes on handler errors:
 
 ```typescript
 @Consumer('orders', {
   retry: {
-    retries: 3,                    // Default: 3 retries
+    retries: 3,                    // DLQ/skip decision milestone (see below)
     initialRetryTime: 1000,        // Default: 1000ms
     multiplier: 2,                 // Default: 2 (exponential backoff)
-    skipMessageOnMaxRetries: false, // Default: false (throw error)
+    maxRetryTime: 30000,           // Default: 30000ms — hard cap for every delay
+    skipMessageOnMaxRetries: false, // Default: false (retry indefinitely)
   },
 })
 async handleOrders(message: KafkaMessagePayload) {
-  // If this fails, it will retry: 1s, 2s, 4s delays
-  // After 3 retries, error is thrown (consumer may stop/restart)
+  // If this fails, it is re-invoked in-process: 1s, 2s, 4s ... capped at 30s
 }
 
 // Skip message to avoid blocking consumer (useful for multi-topic consumers)
@@ -623,10 +625,13 @@ async handleLogs(message: KafkaMessagePayload) {
 }
 ```
 
-**Important Notes:**
-- **Default behavior** (`skipMessageOnMaxRetries: false`): Error is thrown after max retries, ensuring no message is silently dropped
-- **Skip mode** (`skipMessageOnMaxRetries: true`): Message is skipped after max retries to prevent consumer blocking
-- **With DLQ**: Messages are sent to DLQ topic after max retries (recommended approach)
+**Split-error policy:**
+- **Handler errors never crash the consumer.** With `skipMessageOnMaxRetries: false` (default) the message is retried **indefinitely** — never silently dropped, never lost. `retries` only marks when the skip/DLQ decision happens; it is NOT a hard limit in the default mode.
+- **Skip mode** (`skipMessageOnMaxRetries: true`): message is skipped after `retries` attempts (offset committed).
+- **Infra failures only** (Kafka connection loss, fatal client errors, DLQ send failure) kill the consumer run loop — and those **auto-restart** with the same capped exponential backoff (`retry.initialRetryTime`/`multiplier`/`maxRetryTime`), unlimited attempts. A healthy Kafka connection means a running app.
+- **With DLQ**: messages are sent to DLQ topic after `dlq.maxRetries` (recommended for long-retry workloads — see warning below).
+
+> **Long-retry warning:** indefinite in-process retry (`skipMessageOnMaxRetries: false`, no DLQ) blocks the partition and can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) — the consumer is then evicted from the group and rebalances every cycle while the poison message persists. No data is lost (redelivery resumes the retry; the crash is absorbed by auto-restart), but for workloads that need retries spanning minutes, configure a DLQ instead.
 
 **When to use skip mode:**
 - Multi-topic consumers where one failing topic shouldn't block others
@@ -657,6 +662,10 @@ interface ConsumerOptions {
   batchSize?: number;           // Default: 100
   batchTimeout?: number;        // Default: 5000
   groupByKey?: boolean;
+
+  // Auto-created topic sizing (when allowAutoTopicCreation: true)
+  autoCreateTopicPartitions?: number;        // Default: 1
+  autoCreateTopicReplicationFactor?: number; // Default: 1
 
   // Pressure management
   backPressureThreshold?: number; // Default: 80

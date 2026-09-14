@@ -18,7 +18,7 @@ npm run test:watch     # Watch mode
 npm run test:cov       # With coverage
 
 # Run a single test file
-npx jest path/to/file.spec.ts
+npx jest lib/services/<file>.spec.ts
 
 # Linting & Formatting
 npm run lint           # ESLint with auto-fix
@@ -27,6 +27,8 @@ npm run format         # Prettier
 # Publish to npm
 npm publish --access public
 ```
+
+Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir: lib`). `test/jest-e2e.json` exists for future e2e tests but none are written yet. This is a published npm library (`files: ["dist"]`, `prepublishOnly` builds).
 
 ## Architecture
 
@@ -100,22 +102,22 @@ lib/
 
 ## Important Behavior Notes
 
-### Retry Mechanism Without DLQ
+### Retry Mechanism Without DLQ — Split-Error Policy
 
-When **NOT using DLQ**, the library implements an in-memory retry mechanism with exponential backoff:
+Handler failures are retried **in-process** with capped exponential backoff (`initialRetryTime × multiplier^n`, capped at `maxRetryTime`, default 30s). **Handler errors NEVER crash the consumer.**
 
-1. **Retry with delay**: Message will be retried up to `retry.retries` times (default: 3) with exponential backoff
-2. **After max retries exceeded**:
-   - By default (`skipMessageOnMaxRetries: false`): Error is **thrown**, which may cause consumer to stop/restart
-   - If `skipMessageOnMaxRetries: true`: Message is **skipped** and offset is committed to avoid blocking the consumer
+1. **Default** (`skipMessageOnMaxRetries: false`): the message is retried **indefinitely** — never dropped, never lost. `retry.retries` is only a milestone for the skip/DLQ decision, NOT a hard limit in this mode.
+2. **Skip mode** (`skipMessageOnMaxRetries: true`): message is skipped after `retries` attempts and the offset commits.
 
-**Configuration options:**
-- `skipMessageOnMaxRetries: false` (default): Throw error to ensure no message is silently dropped
-- `skipMessageOnMaxRetries: true`: Skip message to prevent consumer blocking (useful for multi-topic consumers)
+**Auto-restart (infra crashes only):** only infra failures (Kafka connection loss, fatal client errors, DLQ send failure) kill the consumer run loop (surfaced via `consumer.run()` rejection). `scheduleConsumerRestart` rebuilds the consumer (new instance, same groupId) with the same capped exponential backoff, **unlimited attempts** — when the Kafka connection is healthy again, the app recovers on its own.
+
+**Known limitation:** indefinite in-process retry can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) → the consumer is evicted and rebalances periodically while a poison message persists (no data loss; the crash is absorbed by auto-restart). For retries spanning minutes, configure a DLQ.
+
+**Batch consumers** share the same policy and resolve offsets only after a successful flush (at-least-once) — batch handlers must be idempotent.
 
 **Example:**
 ```typescript
-// Default behavior: Throw error after max retries
+// Default behavior: retry indefinitely, consumer never crashes
 @Consumer('orders', {
   retry: {
     retries: 3,
@@ -125,7 +127,7 @@ When **NOT using DLQ**, the library implements an in-memory retry mechanism with
   },
 })
 async handleOrder(message: KafkaMessage) {
-  // If this fails 3 times, error is thrown
+  // If this keeps failing, it is re-invoked: 1s, 2s, 4s ... capped at 30s
 }
 
 // Skip message to avoid blocking (for multi-topic consumers)
@@ -146,7 +148,7 @@ When **using DLQ**, failed messages are sent to the DLQ topic after max retries.
 
 ### Graceful Shutdown & In-Flight Delays
 
-Both `consumer-registry.service.ts` (consumer retry delays) and `dlq-retry.service.ts` (DLQ reprocess delays) use a `shutdownResolvers: Set<() => void>` pattern with a cancellable `sleep()` helper. On shutdown, all pending delays are immediately resolved so the process does not block waiting for delays that can be up to several minutes. Any new code that adds sleep-based retry loops must follow this same pattern.
+`consumer-registry.service.ts` (the single retry/restart `sleep()`) and `dlq-retry.service.ts` (DLQ reprocess delays) use a `shutdownResolvers: Set<() => void>` pattern with a cancellable `sleep()` helper. On shutdown, all pending delays are immediately resolved so the process does not block waiting for delays that can be up to several minutes; `sleep()` also resolves immediately if shutdown was signalled before it registered. A retry aborted by shutdown rethrows **once** so the offset is never committed (message redelivered next boot). Any new code that adds sleep-based retry loops must follow this same pattern.
 
 ### OpenTelemetry Tracing
 
@@ -197,65 +199,4 @@ Producer App                    Consumer App
 
 ## Usage Example
 
-```typescript
-// app.module.ts (Root Module)
-@Module({
-  imports: [
-    // Infrastructure module (producer, connections)
-    KafkaModule.forRoot({
-      clientId: 'my-app',
-      brokers: ['localhost:9092'],
-    }),
-    // Consumer module with default options (applied to all @Consumer decorators)
-    ConsumerModule.forRoot({
-      partitionAssigners: ['cooperative-sticky'],  // Default for all consumers
-      allowAutoTopicCreation: true,                // Auto-create topics
-      sessionTimeout: 30000,
-      // These defaults are used when @Consumer doesn't specify them
-    }),
-    OrderModule,  // Feature module
-  ],
-})
-export class AppModule {}
-
-// order/order.module.ts (Feature Module)
-@Module({
-  // No need to import ConsumerModule — consumers are auto-discovered!
-  providers: [OrderConsumer, OrderService],
-})
-export class OrderModule {}
-
-// order/order.consumer.ts
-@Injectable()
-export class OrderConsumer {
-  @Consumer('orders')
-  async handleOrder(message: KafkaMessage) {
-    // Process single message
-  }
-
-  @Consumer('orders-batch', {
-    batch: true,
-    batchSize: 100,       // default: 100
-    batchTimeout: 5000,   // flush timeout in ms, default: 5000
-    groupByKey: true,     // handler receives Map<string, KafkaMessage[]> instead of KafkaMessage[]
-    dlq: { topic: 'orders-dlq', maxRetries: 3 },
-  })
-  async handleBatch(messages: KafkaMessage[] | Map<string, KafkaMessage[]>) {
-    // groupByKey=false: KafkaMessage[]
-    // groupByKey=true: Map<string, KafkaMessage[]>
-  }
-}
-
-// order/order.service.ts
-@Injectable()
-export class OrderService {
-  constructor(private kafka: KafkaClient) {}
-
-  async createOrder(order: Order) {
-    await this.kafka.send('orders', {
-      key: order.customerId,
-      value: order,
-    });
-  }
-}
-```
+See README.md for full usage docs (module setup, batch/DLQ/idempotency examples, multi-connection). Key shape: `KafkaModule.forRoot()` in the root module for infrastructure, `ConsumerModule.forRoot()` for consumer defaults, and `@Consumer()` methods in feature-module providers are auto-discovered — feature modules need no Kafka imports.
