@@ -39,7 +39,10 @@ export class KafkaClient implements OnApplicationShutdown {
     try {
       await this.flushAllBatches();
     } catch (error) {
-      this.logger.error('Failed to flush queued batches during shutdown', error);
+      this.logger.error(
+        'Failed to flush queued batches during shutdown',
+        error,
+      );
     }
     await this.kafkaCore.disconnectAll();
   }

@@ -16,7 +16,10 @@ describe('deserializeHeaders', () => {
   it('converts buffers and arrays, skips null/undefined', () => {
     expect(
       deserializeHeaders({
-        a: Buffer.from('x'), b: [Buffer.from('y')], c: null, d: 5,
+        a: Buffer.from('x'),
+        b: [Buffer.from('y')],
+        c: null,
+        d: 5,
       } as any),
     ).toEqual({ a: 'x', b: 'y', d: '5' });
   });
@@ -25,9 +28,22 @@ describe('deserializeHeaders', () => {
 describe('deserializeMessage', () => {
   it('assembles the payload with topic and partition', () => {
     const p = deserializeMessage(
-      { key: Buffer.from('k'), value: Buffer.from('"v"'), headers: {}, offset: '1', timestamp: '' } as any,
-      'my-topic', 3,
+      {
+        key: Buffer.from('k'),
+        value: Buffer.from('"v"'),
+        headers: {},
+        offset: '1',
+        timestamp: '',
+      } as any,
+      'my-topic',
+      3,
     );
-    expect(p).toMatchObject({ key: 'k', value: 'v', topic: 'my-topic', partition: 3, offset: '1' });
+    expect(p).toMatchObject({
+      key: 'k',
+      value: 'v',
+      topic: 'my-topic',
+      partition: 3,
+      offset: '1',
+    });
   });
 });

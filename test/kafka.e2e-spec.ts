@@ -1,12 +1,7 @@
 import { GenericContainer, Wait } from 'testcontainers';
 import { Test } from '@nestjs/testing';
 import { Injectable } from '@nestjs/common';
-import {
-  KafkaModule,
-  ConsumerModule,
-  Consumer,
-  KafkaClient,
-} from '../lib';
+import { KafkaModule, ConsumerModule, Consumer, KafkaClient } from '../lib';
 
 let kafka: Awaited<ReturnType<GenericContainer['start']>>;
 let bootstrap: string;
@@ -70,15 +65,22 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class RoundTripConsumer {
       @Consumer('e2e-roundtrip', {
-        groupId: 'e2e-rt', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-rt',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
       })
-      async handle(msg: any) { received.push(msg); }
+      async handle(msg: any) {
+        received.push(msg);
+      }
     }
 
     const app = await createApp([RoundTripConsumer]);
     const client = app.get(KafkaClient);
     await client.send('e2e-roundtrip', { value: { hello: 'world', n: 42 } });
-    await client.send('e2e-roundtrip', { key: 'bin', value: Buffer.from('raw-bytes') });
+    await client.send('e2e-roundtrip', {
+      key: 'bin',
+      value: Buffer.from('raw-bytes'),
+    });
 
     await waitFor(() => received.length >= 2);
     expect(received[0].value).toEqual({ hello: 'world', n: 42 });
@@ -95,7 +97,9 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class RetryConsumer {
       @Consumer('e2e-retry', {
-        groupId: 'e2e-retry-g', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-retry-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
         retry: { retries: 2, initialRetryTime: 100, multiplier: 1 },
       })
       async handle(msg: any) {
@@ -128,12 +132,17 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class SourceConsumer {
       @Consumer('e2e-dlq-src', {
-        groupId: 'e2e-dlq-g', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-dlq-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
         retry: { retries: 2, initialRetryTime: 100 },
         dlq: { topic: 'e2e-dlq-dead', maxRetries: 2, retryDelay: 100 },
       })
       async handle(msg: any) {
-        if (msg.value?.fail) { attempts++; throw new Error('permanent'); }
+        if (msg.value?.fail) {
+          attempts++;
+          throw new Error('permanent');
+        }
         successes.push(msg.value?.id);
       }
     }
@@ -141,10 +150,14 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class DlqSpyConsumer {
       @Consumer('e2e-dlq-dead', {
-        groupId: 'e2e-dlq-spy', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-dlq-spy',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
         deserialize: false,
       })
-      async handle(msg: any) { dlqReceived.push(msg); }
+      async handle(msg: any) {
+        dlqReceived.push(msg);
+      }
     }
 
     const app = await createApp([SourceConsumer, DlqSpyConsumer]);
@@ -154,7 +167,9 @@ describe('Kafka e2e (testcontainers)', () => {
 
     await waitFor(() => dlqReceived.length >= 1);
     await waitFor(() => successes.includes('good'));
-    expect(dlqReceived[0].headers['x-dlq-original-topic']?.toString()).toBe('e2e-dlq-src');
+    expect(dlqReceived[0].headers['x-dlq-original-topic']?.toString()).toBe(
+      'e2e-dlq-src',
+    );
     expect(attempts).toBe(3); // 1 initial + 2 DLQ retries
 
     await app.close();
@@ -166,10 +181,16 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class BatchConsumer {
       @Consumer('e2e-batch', {
-        groupId: 'e2e-batch-g', fromBeginning: true, allowAutoTopicCreation: true,
-        batch: true, batchSize: 3, batchTimeout: 300,
+        groupId: 'e2e-batch-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+        batch: true,
+        batchSize: 3,
+        batchTimeout: 300,
       })
-      async handle(msgs: any[]) { batches.push(msgs); }
+      async handle(msgs: any[]) {
+        batches.push(msgs);
+      }
     }
 
     const app = await createApp([BatchConsumer]);
@@ -179,7 +200,12 @@ describe('Kafka e2e (testcontainers)', () => {
     }
 
     await waitFor(() => batches.flat().length >= 5);
-    expect(batches.flat().map((m: any) => m.value.i).sort()).toEqual([0, 1, 2, 3, 4]);
+    expect(
+      batches
+        .flat()
+        .map((m: any) => m.value.i)
+        .sort(),
+    ).toEqual([0, 1, 2, 3, 4]);
 
     await app.close();
   });
@@ -190,17 +216,30 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class IdemConsumer {
       @Consumer('e2e-idem', {
-        groupId: 'e2e-idem-g', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-idem-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
         idempotencyKey: (m: any) => m.headers?.['idempotency-key']?.toString(),
       })
-      async handle(msg: any) { handled.push(msg.value.id); }
+      async handle(msg: any) {
+        handled.push(msg.value.id);
+      }
     }
 
     const app = await createApp([IdemConsumer]);
     const client = app.get(KafkaClient);
-    await client.send('e2e-idem', { value: { id: 'a' }, headers: { 'idempotency-key': 'dup' } });
-    await client.send('e2e-idem', { value: { id: 'b' }, headers: { 'idempotency-key': 'dup' } });
-    await client.send('e2e-idem', { value: { id: 'c' }, headers: { 'idempotency-key': 'uniq' } });
+    await client.send('e2e-idem', {
+      value: { id: 'a' },
+      headers: { 'idempotency-key': 'dup' },
+    });
+    await client.send('e2e-idem', {
+      value: { id: 'b' },
+      headers: { 'idempotency-key': 'dup' },
+    });
+    await client.send('e2e-idem', {
+      value: { id: 'c' },
+      headers: { 'idempotency-key': 'uniq' },
+    });
 
     await waitFor(() => handled.length >= 2);
     expect(handled.sort()).toEqual(['a', 'c']); // 'b' deduped
@@ -214,10 +253,15 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class SlowRetryConsumer {
       @Consumer('e2e-slow-retry', {
-        groupId: 'e2e-slow-g', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-slow-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
         retry: { retries: 50, initialRetryTime: 60_000 },
       })
-      async handle() { attempts++; throw new Error('slow poison'); }
+      async handle() {
+        attempts++;
+        throw new Error('slow poison');
+      }
     }
 
     const app = await createApp([SlowRetryConsumer]);
@@ -237,13 +281,18 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class MidRetryConsumer {
       @Consumer('e2e-midretry', {
-        groupId: 'e2e-mr-g', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-mr-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
         retry: { retries: 50, initialRetryTime: 60_000 },
         // skip=false → infinite in-process retry; shutdown aborts with a
         // one-shot rethrow so the offset is never committed.
       })
       async handle(msg: any) {
-        if (msg.value?.id === 'poison') { attempts++; throw new Error('slow poison'); }
+        if (msg.value?.id === 'poison') {
+          attempts++;
+          throw new Error('slow poison');
+        }
         app1Successes.push(msg.value?.id);
       }
     }
@@ -253,9 +302,9 @@ describe('Kafka e2e (testcontainers)', () => {
     await client.send('e2e-midretry', { value: { id: 'poison' } });
     await client.send('e2e-midretry', { value: { id: 'good' } });
 
-    await waitFor(() => attempts >= 1);  // poison is inside the retry sleep
-    expect(app1Successes).toEqual([]);   // 'good' not reached yet (partition order)
-    await app1.close();                  // aborts the 60s retry sleep
+    await waitFor(() => attempts >= 1); // poison is inside the retry sleep
+    expect(app1Successes).toEqual([]); // 'good' not reached yet (partition order)
+    await app1.close(); // aborts the 60s retry sleep
 
     // Next boot, same groupId: committed offset never advanced past 'poison'
     const redelivered: string[] = [];
@@ -263,9 +312,12 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class RecoveryConsumer {
       @Consumer('e2e-midretry', {
-        groupId: 'e2e-mr-g', allowAutoTopicCreation: true,
+        groupId: 'e2e-mr-g',
+        allowAutoTopicCreation: true,
       })
-      async handle(msg: any) { redelivered.push(msg.value?.id); }
+      async handle(msg: any) {
+        redelivered.push(msg.value?.id);
+      }
     }
 
     const app2 = await createApp([RecoveryConsumer]);
@@ -281,12 +333,17 @@ describe('Kafka e2e (testcontainers)', () => {
     @Injectable()
     class InfiniteRetryConsumer {
       @Consumer('e2e-infinite', {
-        groupId: 'e2e-inf-g', fromBeginning: true, allowAutoTopicCreation: true,
+        groupId: 'e2e-inf-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
         retry: { retries: 2, initialRetryTime: 100, multiplier: 1 },
         // skip=false (default): retry continues PAST maxRetries=2 until success
       })
       async handle(msg: any) {
-        if (msg.value?.id === 'poison' && attempts < 5) { attempts++; throw new Error('flaky'); }
+        if (msg.value?.id === 'poison' && attempts < 5) {
+          attempts++;
+          throw new Error('flaky');
+        }
         successes.push(msg.value?.id);
       }
     }

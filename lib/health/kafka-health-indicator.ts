@@ -154,7 +154,9 @@ export class KafkaHealthIndicator {
             const latest = latestPartition
               ? parseInt(latestPartition.offset, 10)
               : committed;
-            const lag = Number.isNaN(latest) ? 0 : Math.max(0, latest - committed);
+            const lag = Number.isNaN(latest)
+              ? 0
+              : Math.max(0, latest - committed);
             totalLag += lag;
           }
         } catch {

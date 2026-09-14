@@ -426,9 +426,10 @@ export class TracingService {
 
     // Parse tracestate if present
     const tracestate = this.getHeaderValue(headers, TRACESTATE_HEADER);
-    const finalSpanContext: import('@opentelemetry/api').SpanContext = tracestate
-      ? { ...spanContext, traceState: this.otel.createTraceState(tracestate) }
-      : spanContext;
+    const finalSpanContext: import('@opentelemetry/api').SpanContext =
+      tracestate
+        ? { ...spanContext, traceState: this.otel.createTraceState(tracestate) }
+        : spanContext;
 
     return this.otel.trace.setSpanContext(
       this.otel.context.active(),

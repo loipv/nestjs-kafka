@@ -4,11 +4,7 @@ import { KafkaClient } from './kafka-client.service';
 
 type KafkaMessage = KafkaJS.KafkaMessage;
 type IHeaders = KafkaJS.IHeaders;
-import {
-  DlqOptions,
-  RetryVerdict,
-  MAX_RETRY_DELAY_MS,
-} from '../interfaces';
+import { DlqOptions, RetryVerdict, MAX_RETRY_DELAY_MS } from '../interfaces';
 import { DlqMetricsService } from './dlq-metrics.service';
 import { CircuitBreakerService, CircuitState } from './circuit-breaker.service';
 

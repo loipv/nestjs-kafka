@@ -4,7 +4,7 @@ describe('IdempotencyService cleanup', () => {
   it('sweeps ALL expired entries in one cycle regardless of count', () => {
     jest.useFakeTimers();
     const svc = new IdempotencyService();
-    const keyOf = (m: any) => m.headers!.k as any;
+    const keyOf = (m: any) => m.headers!.k;
 
     for (let i = 0; i < 2000; i++) {
       svc.markProcessed({ headers: { k: `key-${i}` } } as any, keyOf, 1000);
@@ -25,7 +25,9 @@ describe('dedupe semantics', () => {
     expect(svc.isProcessed(msg)).toBe(false);
     svc.markProcessed(msg);
     expect(svc.isProcessed(msg)).toBe(true);
-    expect(svc.isProcessed({ headers: { 'idempotency-key': 'k1' } } as any)).toBe(true);
+    expect(
+      svc.isProcessed({ headers: { 'idempotency-key': 'k1' } } as any),
+    ).toBe(true);
   });
 
   it('expires after TTL', () => {

@@ -1,9 +1,16 @@
 import { DlqRetryService, DLQ_RETRY_HEADERS } from './dlq-retry.service';
 
 function makeService() {
-  const consumerMock = { connect: jest.fn(), subscribe: jest.fn(), run: jest.fn(), disconnect: jest.fn() };
+  const consumerMock = {
+    connect: jest.fn(),
+    subscribe: jest.fn(),
+    run: jest.fn(),
+    disconnect: jest.fn(),
+  };
   const kafkaCore = {
-    getKafka: jest.fn().mockReturnValue({ consumer: jest.fn().mockReturnValue(consumerMock) }),
+    getKafka: jest
+      .fn()
+      .mockReturnValue({ consumer: jest.fn().mockReturnValue(consumerMock) }),
   };
   const kafkaClient = { send: jest.fn().mockResolvedValue(undefined) };
   const metrics = {
@@ -11,15 +18,26 @@ function makeService() {
     recordReprocessSuccess: jest.fn(),
     recordFinalFailure: jest.fn(),
   };
-  const svc = new DlqRetryService(kafkaCore as any, kafkaClient as any, metrics as any);
+  const svc = new DlqRetryService(
+    kafkaCore as any,
+    kafkaClient as any,
+    metrics as any,
+  );
   return { svc, kafkaClient, metrics };
 }
 
 const mkMetadata = (dlqTopic: string, retryOpts: any = {}) =>
   ({
-    topic: 'src', connection: 'default',
-    options: { dlq: { topic: dlqTopic, retry: { enabled: true, delay: 10, ...retryOpts } } },
-    target: {}, methodName: 'h',
+    topic: 'src',
+    connection: 'default',
+    options: {
+      dlq: {
+        topic: dlqTopic,
+        retry: { enabled: true, delay: 10, ...retryOpts },
+      },
+    },
+    target: {},
+    methodName: 'h',
   }) as any;
 
 describe('DlqRetryService', () => {
@@ -42,14 +60,19 @@ describe('DlqRetryService', () => {
       originalOptions: {},
     };
     const msg = {
-      offset: '1', key: null, value: Buffer.from('{}'), timestamp: '',
+      offset: '1',
+      key: null,
+      value: Buffer.from('{}'),
+      timestamp: '',
       headers: { [DLQ_RETRY_HEADERS.REPROCESS_COUNT]: '1' },
     } as any;
     await (svc as any).handleDlqMessage(msg, 0, handler, 'default', 't-dlq');
     expect(kafkaClient.send).toHaveBeenCalledWith(
       't-dlq',
       expect.objectContaining({
-        headers: expect.objectContaining({ [DLQ_RETRY_HEADERS.REPROCESS_COUNT]: '2' }),
+        headers: expect.objectContaining({
+          [DLQ_RETRY_HEADERS.REPROCESS_COUNT]: '2',
+        }),
       }),
       { connection: 'default' },
     );
@@ -65,14 +88,19 @@ describe('DlqRetryService', () => {
       originalOptions: {},
     };
     const msg = {
-      offset: '1', key: null, value: Buffer.from('{}'), timestamp: '',
+      offset: '1',
+      key: null,
+      value: Buffer.from('{}'),
+      timestamp: '',
       headers: { [DLQ_RETRY_HEADERS.REPROCESS_COUNT]: '2' },
     } as any;
     await (svc as any).handleDlqMessage(msg, 0, handler, 'default', 't-dlq');
     expect(kafkaClient.send).toHaveBeenCalledWith(
       't-final',
       expect.objectContaining({
-        headers: expect.objectContaining({ 'x-final-dlq-reason': 'max-reprocess-exceeded' }),
+        headers: expect.objectContaining({
+          'x-final-dlq-reason': 'max-reprocess-exceeded',
+        }),
       }),
       { connection: 'default' },
     );

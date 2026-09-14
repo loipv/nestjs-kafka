@@ -155,11 +155,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     let group = this.consumerGroups.get(groupKey);
 
     if (!group) {
-      const consumer = this.kafkaCore
-        .getKafka(connectionName)
-        .consumer({
-          kafkaJS: this.buildConsumerConfig(groupId, options),
-        });
+      const consumer = this.kafkaCore.getKafka(connectionName).consumer({
+        kafkaJS: this.buildConsumerConfig(groupId, options),
+      });
 
       group = {
         groupId,
@@ -316,9 +314,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       // Determine if we should use batch or message processing
       // If any consumer in the group uses batch, we need special handling
       if (group.hasBatchConsumer) {
-        await this.startBatchGroupConsumer(group);
+        this.startBatchGroupConsumer(group);
       } else {
-        await this.startMessageGroupConsumer(group);
+        this.startMessageGroupConsumer(group);
       }
 
       group.isRunning = true;
@@ -329,7 +327,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     }
   }
 
-  private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
+  private startMessageGroupConsumer(group: ConsumerGroup): void {
     const { groupId, consumer, topics, options } = group;
 
     // Build run config with only defined values
@@ -416,7 +414,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     });
   }
 
-  private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
+  private startBatchGroupConsumer(group: ConsumerGroup): void {
     const { groupId, consumer, topics, options } = group;
 
     // Build run config with only defined values
@@ -754,11 +752,9 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           }
 
           // Fresh consumer instance, same groupId → rebalance picks up uncommitted offsets
-          group.consumer = this.kafkaCore
-            .getKafka(group.connection)
-            .consumer({
-              kafkaJS: this.buildConsumerConfig(group.groupId, group.options),
-            });
+          group.consumer = this.kafkaCore.getKafka(group.connection).consumer({
+            kafkaJS: this.buildConsumerConfig(group.groupId, group.options),
+          });
           group.isRunning = false;
           await this.startConsumerGroup(group); // connect + subscribe + run
 
@@ -799,7 +795,10 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   ): number {
     const baseDelay = retry?.initialRetryTime ?? 1000;
     const multiplier = retry?.multiplier ?? 2;
-    return Math.min(baseDelay * multiplier ** (attempt - 1), MAX_RETRY_DELAY_MS);
+    return Math.min(
+      baseDelay * multiplier ** (attempt - 1),
+      MAX_RETRY_DELAY_MS,
+    );
   }
 
   /** Verdict for the non-DLQ path (pure). */

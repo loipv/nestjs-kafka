@@ -5,7 +5,9 @@ describe('PressureManagerService', () => {
     const pmp = new PressureManagerService();
     const consumer = { pause: jest.fn(), resume: jest.fn() };
     pmp.register('g', consumer as any, {
-      backPressureThreshold: 80, resumeThreshold: 60, maxQueueSize: 100,
+      backPressureThreshold: 80,
+      resumeThreshold: 60,
+      maxQueueSize: 100,
     });
     pmp.setTopics('g', ['t1']);
 

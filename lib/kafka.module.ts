@@ -1,9 +1,4 @@
-import {
-  DynamicModule,
-  Global,
-  Module,
-  Provider,
-} from '@nestjs/common';
+import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
 import {
   KafkaModuleOptions,
   KafkaModuleAsyncOptions,

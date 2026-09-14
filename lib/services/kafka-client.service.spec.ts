@@ -27,13 +27,17 @@ describe('KafkaClient', () => {
 
   describe('isHealthy', () => {
     it('reports producer connection state, not registration', () => {
-      const core = { isProducerConnected: jest.fn().mockReturnValue(true) } as any;
+      const core = {
+        isProducerConnected: jest.fn().mockReturnValue(true),
+      } as any;
       expect(new KafkaClient(core).isHealthy()).toBe(true);
       expect(core.isProducerConnected).toHaveBeenCalledWith(undefined);
     });
 
     it('returns false when producer never connected (lazy connect)', () => {
-      const core = { isProducerConnected: jest.fn().mockReturnValue(false) } as any;
+      const core = {
+        isProducerConnected: jest.fn().mockReturnValue(false),
+      } as any;
       expect(new KafkaClient(core).isHealthy()).toBe(false);
     });
   });
@@ -60,7 +64,8 @@ describe('KafkaClient', () => {
 
   describe('send paths', () => {
     const mkCore = (producer: any) => ({
-      connectProducer: jest.fn(), getProducer: jest.fn().mockReturnValue(producer),
+      connectProducer: jest.fn(),
+      getProducer: jest.fn().mockReturnValue(producer),
       isProducerConnected: jest.fn().mockReturnValue(false),
       disconnectAll: jest.fn(),
     });
@@ -72,8 +77,20 @@ describe('KafkaClient', () => {
       expect(producer.send).toHaveBeenCalledWith({
         topic: 't',
         messages: [
-          { key: null, value: '{"a":1}', headers: {}, partition: undefined, timestamp: undefined },
-          { key: null, value: 'x', headers: {}, partition: undefined, timestamp: undefined },
+          {
+            key: null,
+            value: '{"a":1}',
+            headers: {},
+            partition: undefined,
+            timestamp: undefined,
+          },
+          {
+            key: null,
+            value: 'x',
+            headers: {},
+            partition: undefined,
+            timestamp: undefined,
+          },
         ],
       });
     });
@@ -85,14 +102,16 @@ describe('KafkaClient', () => {
       expect(producer.send).not.toHaveBeenCalled();
       await new Promise((r) => setTimeout(r, 150));
       expect(producer.send).toHaveBeenCalledWith({
-        topic: 't', messages: [expect.objectContaining({ value: 'a' })],
+        topic: 't',
+        messages: [expect.objectContaining({ value: 'a' })],
       });
     });
 
     it('sendQueued flushes immediately at 100 messages', async () => {
       const producer = { send: jest.fn().mockResolvedValue(undefined) };
       const client = new KafkaClient(mkCore(producer) as any);
-      for (let i = 0; i < 100; i++) await client.sendQueued('t', { value: `m${i}` });
+      for (let i = 0; i < 100; i++)
+        await client.sendQueued('t', { value: `m${i}` });
       expect(producer.send).toHaveBeenCalledTimes(1);
       expect(producer.send.mock.calls[0][0].messages).toHaveLength(100);
     });

@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
 import {
   Module,
   DynamicModule,
@@ -170,10 +173,7 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
             if (name === 'constructor') return false;
             // Use property descriptor to safely check if it's a method
             // without triggering getter side effects (e.g. HttpAdapterHost.listen$)
-            const descriptor = Object.getOwnPropertyDescriptor(
-              prototype,
-              name,
-            );
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
             return (
               descriptor &&
               typeof descriptor.value === 'function' &&

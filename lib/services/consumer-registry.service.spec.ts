@@ -4,8 +4,14 @@ import { BatchProcessorService } from './batch-processor.service';
 describe('ConsumerRegistryService.mergeWithDefaults', () => {
   const makeRegistry = (moduleOptions?: any) =>
     new ConsumerRegistryService(
-      {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
-      undefined, moduleOptions,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      undefined,
+      moduleOptions,
     );
 
   it('field-merges retry: decorator retries + default skip flag survive', () => {
@@ -14,13 +20,13 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
     });
     const merged = (registry as any).mergeWithDefaults({
       retry: { retries: 5 },
-    }) as any;
+    });
     expect(merged.retry).toEqual({ retries: 5, skipMessageOnMaxRetries: true });
   });
 
   it('uses module default retry when decorator has none', () => {
     const registry = makeRegistry({ retry: { retries: 7 } });
-    const merged = (registry as any).mergeWithDefaults({}) as any;
+    const merged = (registry as any).mergeWithDefaults({});
     expect(merged.retry).toEqual({ retries: 7 });
   });
 
@@ -29,7 +35,7 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
       autoCreateTopicPartitions: 3,
       autoCreateTopicReplicationFactor: 3,
     });
-    const merged = (registry as any).mergeWithDefaults({}) as any;
+    const merged = (registry as any).mergeWithDefaults({});
     expect(merged.autoCreateTopicPartitions).toBe(3);
     expect(merged.autoCreateTopicReplicationFactor).toBe(3);
   });
@@ -39,37 +45,56 @@ describe('retry logic', () => {
   const mkMsg = () => ({ offset: '1' }) as any;
   const makeRegistry = () =>
     new ConsumerRegistryService(
-      {} as any, {} as any,
+      {} as any,
+      {} as any,
       { stopCleanup: jest.fn() } as any,
       { register: jest.fn(), setTopics: jest.fn() } as any,
       { handleFailure: jest.fn() } as any,
-      { registerOriginalGroupId: jest.fn(), gracefulShutdown: jest.fn().mockResolvedValue(undefined) } as any,
-      undefined, undefined,
+      {
+        registerOriginalGroupId: jest.fn(),
+        gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+      } as any,
+      undefined,
+      undefined,
     );
 
   it('evaluateRetry: retry with capped delay', () => {
     const r = makeRegistry();
-    expect((r as any).evaluateRetry(1, {})).toEqual({ action: 'retry', delayMs: 1000 });
-    expect((r as any).evaluateRetry(1, { retry: { initialRetryTime: 60000 } }))
-      .toEqual({ action: 'retry', delayMs: 30000 });
+    expect((r as any).evaluateRetry(1, {})).toEqual({
+      action: 'retry',
+      delayMs: 1000,
+    });
+    expect(
+      (r as any).evaluateRetry(1, { retry: { initialRetryTime: 60000 } }),
+    ).toEqual({ action: 'retry', delayMs: 30000 });
   });
 
   it('evaluateRetry: default (skip=false) retries forever past maxRetries; skip=true completes', () => {
     const r = makeRegistry();
-    expect((r as any).evaluateRetry(4, {})).toEqual({ action: 'retry', delayMs: 8000 }); // past maxRetries=3, still retrying
-    expect((r as any).evaluateRetry(4, { retry: { skipMessageOnMaxRetries: true } }))
-      .toEqual({ action: 'complete' });
+    expect((r as any).evaluateRetry(4, {})).toEqual({
+      action: 'retry',
+      delayMs: 8000,
+    }); // past maxRetries=3, still retrying
+    expect(
+      (r as any).evaluateRetry(4, { retry: { skipMessageOnMaxRetries: true } }),
+    ).toEqual({ action: 'complete' });
   });
 
   it('runWithRetry re-invokes in-process until success', async () => {
     const r = makeRegistry();
-    const attempts = jest.fn()
+    const attempts = jest
+      .fn()
       .mockRejectedValueOnce(new Error('1'))
       .mockRejectedValueOnce(new Error('2'))
       .mockResolvedValue(undefined);
     await (r as any).runWithRetry(
-      attempts, mkMsg(),
-      { topic: 't', connection: 'default', options: { retry: { retries: 3, initialRetryTime: 1 } } } as any,
+      attempts,
+      mkMsg(),
+      {
+        topic: 't',
+        connection: 'default',
+        options: { retry: { retries: 3, initialRetryTime: 1 } },
+      } as any,
       0,
     );
     expect(attempts).toHaveBeenCalledTimes(3);
@@ -77,15 +102,21 @@ describe('retry logic', () => {
 
   it('runWithRetry succeeds after retries are exceeded (infinite retry, no crash)', async () => {
     const r = makeRegistry();
-    const attempts = jest.fn()
+    const attempts = jest
+      .fn()
       .mockRejectedValueOnce(new Error('1'))
       .mockRejectedValueOnce(new Error('2'))
       .mockRejectedValueOnce(new Error('3'))
       .mockRejectedValueOnce(new Error('4'))
       .mockResolvedValue(undefined);
     await (r as any).runWithRetry(
-      attempts, mkMsg(),
-      { topic: 't', connection: 'default', options: { retry: { retries: 2, initialRetryTime: 1 } } } as any,
+      attempts,
+      mkMsg(),
+      {
+        topic: 't',
+        connection: 'default',
+        options: { retry: { retries: 2, initialRetryTime: 1 } },
+      } as any,
       0,
     );
     expect(attempts).toHaveBeenCalledTimes(5); // succeeded 2 attempts PAST maxRetries=2
@@ -93,21 +124,38 @@ describe('retry logic', () => {
 
   it('DLQ send failure propagates (infra crash path → auto-restart)', async () => {
     const r = makeRegistry();
-    (r as any).dlqService = { handleFailure: jest.fn().mockRejectedValue(new Error('dlq down')) };
+    (r as any).dlqService = {
+      handleFailure: jest.fn().mockRejectedValue(new Error('dlq down')),
+    };
     const attempts = jest.fn().mockRejectedValue(new Error('x'));
-    await expect((r as any).runWithRetry(
-      attempts, mkMsg(),
-      { topic: 't', connection: 'default', options: { dlq: { topic: 'd' }, retry: { retries: 0, initialRetryTime: 1 } } } as any,
-      0,
-    )).rejects.toThrow('dlq down');
+    await expect(
+      (r as any).runWithRetry(
+        attempts,
+        mkMsg(),
+        {
+          topic: 't',
+          connection: 'default',
+          options: {
+            dlq: { topic: 'd' },
+            retry: { retries: 0, initialRetryTime: 1 },
+          },
+        } as any,
+        0,
+      ),
+    ).rejects.toThrow('dlq down');
   });
 
   it('shutdown aborts the retry loop — rethrows once, no hot-loop, offset not committed', async () => {
     const r = makeRegistry();
     const attempts = jest.fn().mockRejectedValue(new Error('x'));
     const p = (r as any).runWithRetry(
-      attempts, mkMsg(),
-      { topic: 't', connection: 'default', options: { retry: { retries: 50, initialRetryTime: 60_000 } } } as any,
+      attempts,
+      mkMsg(),
+      {
+        topic: 't',
+        connection: 'default',
+        options: { retry: { retries: 50, initialRetryTime: 60_000 } },
+      } as any,
       0,
     );
     await (r as any).gracefulShutdown(); // resolves pending sleep
@@ -119,7 +167,8 @@ describe('retry logic', () => {
 describe('consumer auto-restart', () => {
   const makeRegistry = () =>
     new ConsumerRegistryService(
-      {} as any, {} as any,
+      {} as any,
+      {} as any,
       { stopCleanup: jest.fn() } as any,
       { register: jest.fn(), setTopics: jest.fn() } as any,
       { handleFailure: jest.fn() } as any,
@@ -128,13 +177,16 @@ describe('consumer auto-restart', () => {
         startAll: jest.fn().mockResolvedValue(undefined),
         gracefulShutdown: jest.fn().mockResolvedValue(undefined),
       } as any,
-      undefined, undefined,
+      undefined,
+      undefined,
     );
 
   it('computeRestartDelay grows exponentially and caps at maxRetryTime', () => {
     const r = makeRegistry();
     const group = {
-      options: { retry: { initialRetryTime: 1000, multiplier: 2, maxRetryTime: 5000 } },
+      options: {
+        retry: { initialRetryTime: 1000, multiplier: 2, maxRetryTime: 5000 },
+      },
       restartAttempts: 0,
     } as any;
     expect((r as any).computeRestartDelay(group)).toBe(1000);
@@ -147,15 +199,19 @@ describe('consumer auto-restart', () => {
   it('run() rejection (connection crash) schedules a consumer restart', async () => {
     const restart = jest.fn().mockResolvedValue(undefined);
     const consumer = {
-      connect: jest.fn(), subscribe: jest.fn(),
+      connect: jest.fn(),
+      subscribe: jest.fn(),
       run: jest.fn().mockRejectedValue(new Error('connection reset')),
-      disconnect: jest.fn(), pause: jest.fn(), resume: jest.fn(),
+      disconnect: jest.fn(),
+      pause: jest.fn(),
+      resume: jest.fn(),
     };
     const core = {
       getKafka: jest.fn().mockReturnValue({
         consumer: jest.fn().mockReturnValue(consumer),
         admin: jest.fn().mockReturnValue({
-          connect: jest.fn(), disconnect: jest.fn(),
+          connect: jest.fn(),
+          disconnect: jest.fn(),
           listTopics: jest.fn().mockResolvedValue([]),
         }),
       }),
@@ -163,10 +219,15 @@ describe('consumer auto-restart', () => {
     const r = makeRegistry();
     (r as any).kafkaCore = core;
     (r as any).scheduleConsumerRestart = restart;
-    r.registerConsumers([{
-      topic: 't', connection: 'default', options: {},
-      target: { h: async () => {} }, methodName: 'h',
-    } as any]);
+    r.registerConsumers([
+      {
+        topic: 't',
+        connection: 'default',
+        options: {},
+        target: { h: async () => {} },
+        methodName: 'h',
+      } as any,
+    ]);
     await (r as any).startAll();
     await new Promise((resolve) => setImmediate(resolve)); // let the .catch microtask run
     expect(restart).toHaveBeenCalledWith(
@@ -178,7 +239,9 @@ describe('consumer auto-restart', () => {
   it('does not restart while shutting down', async () => {
     const r = makeRegistry();
     const group = {
-      groupId: 'g', isRestarting: false, restartAttempts: 0,
+      groupId: 'g',
+      isRestarting: false,
+      restartAttempts: 0,
       consumer: { disconnect: jest.fn() },
     } as any;
     await (r as any).gracefulShutdown();
@@ -191,13 +254,21 @@ describe('batch offset semantics', () => {
   it('resolves offsets only after successful flush (at-least-once)', async () => {
     let captured: any;
     const consumer = {
-      connect: jest.fn(), subscribe: jest.fn(),
-      run: jest.fn().mockImplementation((cfg) => { captured = cfg; return Promise.resolve(undefined); }),
-      disconnect: jest.fn(), pause: jest.fn(), resume: jest.fn(),
+      connect: jest.fn(),
+      subscribe: jest.fn(),
+      run: jest.fn().mockImplementation((cfg) => {
+        captured = cfg;
+        return Promise.resolve(undefined);
+      }),
+      disconnect: jest.fn(),
+      pause: jest.fn(),
+      resume: jest.fn(),
     };
     const admin = {
-      connect: jest.fn(), disconnect: jest.fn(),
-      listTopics: jest.fn().mockResolvedValue([]), createTopics: jest.fn(),
+      connect: jest.fn(),
+      disconnect: jest.fn(),
+      listTopics: jest.fn().mockResolvedValue([]),
+      createTopics: jest.fn(),
     };
     const core = {
       getKafka: jest.fn().mockReturnValue({
@@ -207,37 +278,58 @@ describe('batch offset semantics', () => {
     };
     const handler = jest.fn().mockResolvedValue(undefined);
     const registry = new ConsumerRegistryService(
-      core as any, new BatchProcessorService(), { filterDuplicates: (m: any[]) => m } as any,
+      core as any,
+      new BatchProcessorService(),
+      { filterDuplicates: (m: any[]) => m } as any,
       { register: jest.fn(), setTopics: jest.fn() } as any,
       {} as any, // dlqService — not used in this path
       {} as any, // dlqRetryService — replaced below
-      undefined, undefined,
+      undefined,
+      undefined,
     );
     (registry as any).dlqRetryService = {
       registerOriginalGroupId: jest.fn(),
       startAll: jest.fn().mockResolvedValue(undefined),
       gracefulShutdown: jest.fn().mockResolvedValue(undefined),
     };
-    registry.registerConsumers([{
-      topic: 't', connection: 'default',
-      options: { batch: true, batchSize: 2, batchTimeout: 5000 },
-      target: { h: handler }, methodName: 'h',
-    } as any]);
+    registry.registerConsumers([
+      {
+        topic: 't',
+        connection: 'default',
+        options: { batch: true, batchSize: 2, batchTimeout: 5000 },
+        target: { h: handler },
+        methodName: 'h',
+      } as any,
+    ]);
     await (registry as any).startAll();
 
     const msgs = [
-      { offset: '1', value: Buffer.from('a'), key: null, headers: {}, timestamp: '' },
-      { offset: '2', value: Buffer.from('b'), key: null, headers: {}, timestamp: '' },
+      {
+        offset: '1',
+        value: Buffer.from('a'),
+        key: null,
+        headers: {},
+        timestamp: '',
+      },
+      {
+        offset: '2',
+        value: Buffer.from('b'),
+        key: null,
+        headers: {},
+        timestamp: '',
+      },
     ];
     const resolveOffset = jest.fn();
     await captured.eachBatch({
       batch: { topic: 't', partition: 0, messages: msgs },
-      isRunning: () => true, isStale: () => false,
-      resolveOffset, heartbeat: () => {},
+      isRunning: () => true,
+      isStale: () => false,
+      resolveOffset,
+      heartbeat: () => {},
     });
 
-    expect(handler).toHaveBeenCalledTimes(1);        // flushed as one batch
-    expect(resolveOffset).toHaveBeenCalledTimes(1);   // once, not per-add
+    expect(handler).toHaveBeenCalledTimes(1); // flushed as one batch
+    expect(resolveOffset).toHaveBeenCalledTimes(1); // once, not per-add
     expect(resolveOffset).toHaveBeenCalledWith('2'); // last offset, AFTER flush
   });
 });
