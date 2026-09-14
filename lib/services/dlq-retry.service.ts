@@ -394,6 +394,10 @@ export class DlqRetryService implements OnApplicationShutdown {
   private shutdownResolvers = new Set<() => void>();
 
   private sleep(ms: number): Promise<void> {
+    // Shutdown may have been signalled before this sleep registered its
+    // canceller — resolve immediately so callers re-check isShuttingDown.
+    if (this.isShuttingDown) return Promise.resolve();
+
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.shutdownResolvers.delete(cancelFn);

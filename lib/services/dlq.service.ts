@@ -4,7 +4,11 @@ import { KafkaClient } from './kafka-client.service';
 
 type KafkaMessage = KafkaJS.KafkaMessage;
 type IHeaders = KafkaJS.IHeaders;
-import { DlqOptions } from '../interfaces';
+import {
+  DlqOptions,
+  RetryVerdict,
+  MAX_RETRY_DELAY_MS,
+} from '../interfaces';
 import { DlqMetricsService } from './dlq-metrics.service';
 import { CircuitBreakerService, CircuitState } from './circuit-breaker.service';
 
@@ -17,15 +21,9 @@ export const DLQ_HEADERS = {
   ERROR_STACK: 'x-dlq-error-stack',
 } as const;
 
-interface RetryState {
-  retryCount: number;
-  lastError?: Error;
-}
-
 @Injectable()
 export class DlqService {
   private readonly logger = new Logger(DlqService.name);
-  private retryStates = new Map<string, RetryState>();
 
   constructor(
     private readonly kafkaClient: KafkaClient,
@@ -33,6 +31,15 @@ export class DlqService {
     private readonly circuitBreaker: CircuitBreakerService,
   ) {}
 
+  /**
+   * Decide what to do after a handler failure. Stateless: the caller supplies
+   * the current attempt number and owns the retry loop (and its delay/sleep).
+   *
+   * - attempt <= maxRetries → { action: 'retry', delayMs } (capped backoff)
+   * - circuit breaker open   → { action: 'complete' } (message dropped, logged)
+   * - otherwise              → sends to DLQ → { action: 'complete' }
+   * - DLQ send failure       → REJECTS (infra) → caller's run loop dies → auto-restart
+   */
   async handleFailure(
     message: KafkaMessage,
     error: Error,
@@ -40,34 +47,22 @@ export class DlqService {
     originalTopic: string,
     partition?: number,
     connection?: string,
-  ): Promise<boolean> {
-    const messageKey = this.getMessageKey(message, originalTopic, partition);
-    let state = this.retryStates.get(messageKey);
-
-    if (!state) {
-      state = { retryCount: 0 };
-      this.retryStates.set(messageKey, state);
-    }
-
-    state.retryCount++;
-    state.lastError = error;
-
+    attempt = 1,
+  ): Promise<RetryVerdict> {
     const maxRetries = options.maxRetries ?? 3;
-
-    // Record retry attempt
     this.metrics.recordHandlerRetry(originalTopic);
 
-    if (state.retryCount <= maxRetries) {
+    if (attempt <= maxRetries) {
       const baseDelay = options.retryDelay ?? 1000;
       const multiplier = options.retryBackoffMultiplier ?? 2;
-      const delay = baseDelay * Math.pow(multiplier, state.retryCount - 1);
-
-      this.logger.warn(
-        `Retry ${state.retryCount}/${maxRetries} for message from ${originalTopic}, waiting ${delay}ms`,
+      const delayMs = Math.min(
+        baseDelay * multiplier ** (attempt - 1),
+        MAX_RETRY_DELAY_MS,
       );
-
-      await this.sleep(delay);
-      return true;
+      this.logger.warn(
+        `Retry ${attempt}/${maxRetries} for message from ${originalTopic}, waiting ${delayMs}ms`,
+      );
+      return { action: 'retry', delayMs };
     }
 
     // Check circuit breaker before sending to DLQ
@@ -77,9 +72,8 @@ export class DlqService {
       this.logger.error(
         `Circuit breaker ${circuitState} for DLQ ${options.topic}, message dropped`,
       );
-      this.retryStates.delete(messageKey);
       this.metrics.recordFinalFailure(originalTopic, false);
-      return false;
+      return { action: 'complete' };
     }
 
     try {
@@ -88,20 +82,18 @@ export class DlqService {
         error,
         options,
         originalTopic,
-        state.retryCount,
+        attempt,
         connection,
       );
       this.circuitBreaker.recordSuccess(circuitKey);
+      return { action: 'complete' };
     } catch (dlqError) {
       this.circuitBreaker.recordFailure(circuitKey);
-      throw dlqError;
+      throw dlqError; // infra crash path — propagates out of the caller's retry loop
     }
-
-    this.retryStates.delete(messageKey);
-    return false;
   }
 
-  private async sendToDlq(
+  async sendToDlq(
     message: KafkaMessage,
     error: Error,
     options: DlqOptions,
@@ -164,26 +156,8 @@ export class DlqService {
     }
   }
 
-  private getMessageKey(
-    message: KafkaMessage,
-    topic: string,
-    partition?: number,
-  ): string {
-    return `${topic}:${partition ?? 0}:${message.offset}`;
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  clearRetryState(
-    message: KafkaMessage,
-    topic: string,
-    partition?: number,
-  ): void {
-    const key = this.getMessageKey(message, topic, partition);
-    this.retryStates.delete(key);
-  }
+  /** @deprecated Retry state is no longer held in memory; this is a no-op. */
+  clearRetryState(): void {}
 
   /**
    * Get circuit breaker state for a DLQ topic

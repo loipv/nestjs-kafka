@@ -230,3 +230,19 @@ export interface ConsumerModuleOptions {
 
 /** Injection token for ConsumerModule options */
 export const CONSUMER_MODULE_OPTIONS = Symbol('CONSUMER_MODULE_OPTIONS');
+
+/** Hard cap for every computed retry delay (message retry and restart backoff) */
+export const MAX_RETRY_DELAY_MS = 30000;
+
+/**
+ * What the retry engine should do after a handler failure.
+ *
+ * There is NO 'crash' verdict: handler errors retry in-process forever
+ * (skip=false) or terminate via skip/DLQ. Infra failures (e.g. DLQ send
+ * failure) REJECT instead of returning a verdict → run loop dies →
+ * auto-restart.
+ */
+export type RetryVerdict =
+  | { action: 'retry'; delayMs: number }
+  /** ack: commit offset, move on (DLQ-sent / skipped / circuit-dropped) */
+  | { action: 'complete' };

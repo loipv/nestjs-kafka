@@ -27,6 +27,8 @@ import {
   CONSUMER_MODULE_OPTIONS,
   DEFAULT_KAFKA_CONNECTION,
   deserializeMessage,
+  RetryVerdict,
+  MAX_RETRY_DELAY_MS,
 } from '../interfaces';
 
 interface TopicHandler {
@@ -44,20 +46,11 @@ interface ConsumerGroup {
   hasBatchConsumer: boolean;
 }
 
-interface MessageRetryState {
-  retryCount: number;
-  lastError?: Error;
-  lastAttemptAt: number;
-}
-
 @Injectable()
 export class ConsumerRegistryService implements OnApplicationShutdown {
   private readonly logger = new Logger(ConsumerRegistryService.name);
   private consumerGroups = new Map<string, ConsumerGroup>();
   private isShuttingDown = false;
-  private messageRetryStates = new Map<string, MessageRetryState>();
-  private retryStateCleanupInterval: NodeJS.Timeout | null = null;
-  private readonly RETRY_STATE_TTL = 300000; // 5 minutes
 
   constructor(
     private readonly kafkaCore: KafkaCoreService,
@@ -277,16 +270,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     // Start DLQ retry consumers
     await this.dlqRetryService.startAll();
-
-    // Start periodic cleanup of stale retry states
-    this.retryStateCleanupInterval = setInterval(() => {
-      const now = Date.now();
-      for (const [key, state] of this.messageRetryStates.entries()) {
-        if (now - state.lastAttemptAt > this.RETRY_STATE_TTL) {
-          this.messageRetryStates.delete(key);
-        }
-      }
-    }, 60000);
   }
 
   private async startConsumerGroup(group: ConsumerGroup): Promise<void> {
@@ -408,20 +391,18 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       const { metadata, handler } = topicHandler;
       const topicOptions = metadata.options;
 
-      if (topicOptions.idempotencyKey) {
-        if (
-          this.idempotencyService.isProcessed(
-            message,
-            topicOptions.idempotencyKey,
-          )
-        ) {
-          this.logger.debug(`Skipping duplicate message from ${topic}`);
-          return;
-        }
+      if (
+        topicOptions.idempotencyKey &&
+        this.idempotencyService.isProcessed(
+          message,
+          topicOptions.idempotencyKey,
+        )
+      ) {
+        this.logger.debug(`Skipping duplicate message from ${topic}`);
+        return;
       }
 
-      // Wrap message processing in a trace span
-      const processMessage = async () => {
+      const processOnce = async () => {
         const processedMessage =
           topicOptions.deserialize !== false
             ? deserializeMessage(message, topic, partition)
@@ -436,15 +417,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
             topicOptions.idempotencyTtl,
           );
         }
-
-        // Clear retry states for both DLQ and non-DLQ
-        this.dlqService.clearRetryState(message, topic, partition);
-        this.clearMessageRetryState(message, topic, partition);
       };
 
-      try {
+      // Per-attempt trace span (retry attempts each get their own span)
+      const invokeOnce = async () => {
         if (this.tracingService?.isEnabled()) {
-          await this.tracingService.withConsumeSpan(
+          return this.tracingService.withConsumeSpan(
             {
               topic,
               partition,
@@ -453,14 +431,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
               groupId,
               headers: message.headers,
             },
-            processMessage,
+            processOnce,
           );
-        } else {
-          await processMessage();
         }
-      } catch (error) {
-        await this.handleError(message, error as Error, metadata, partition);
-      }
+        return processOnce();
+      };
+
+      await this.runWithRetry(invokeOnce, message, metadata, partition);
     };
 
     await consumer.run(runConfig);
@@ -528,21 +505,19 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         for (const message of messages) {
           if (!payload.isRunning() || payload.isStale()) break;
 
-          if (topicOptions.idempotencyKey) {
-            if (
-              this.idempotencyService.isProcessed(
-                message,
-                topicOptions.idempotencyKey,
-              )
-            ) {
-              payload.resolveOffset(message.offset);
-              // Note: heartbeat() is automatic in confluent-kafka-javascript
-              continue;
-            }
+          if (
+            topicOptions.idempotencyKey &&
+            this.idempotencyService.isProcessed(
+              message,
+              topicOptions.idempotencyKey,
+            )
+          ) {
+            payload.resolveOffset(message.offset);
+            // Note: heartbeat() is automatic in confluent-kafka-javascript
+            continue;
           }
 
-          // Wrap message processing in a trace span
-          const processMessage = async () => {
+          const processOnce = async () => {
             const processedMessage =
               topicOptions.deserialize !== false
                 ? deserializeMessage(message, topic, partition)
@@ -557,15 +532,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
                 topicOptions.idempotencyTtl,
               );
             }
-
-            // Clear retry states for both DLQ and non-DLQ
-            this.dlqService.clearRetryState(message, topic, partition);
-            this.clearMessageRetryState(message, topic, partition);
           };
 
-          try {
+          // Per-attempt trace span (retry attempts each get their own span)
+          const invokeOnce = async () => {
             if (this.tracingService?.isEnabled()) {
-              await this.tracingService.withConsumeSpan(
+              return this.tracingService.withConsumeSpan(
                 {
                   topic,
                   partition,
@@ -574,19 +546,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
                   groupId,
                   headers: message.headers,
                 },
-                processMessage,
+                processOnce,
               );
-            } else {
-              await processMessage();
             }
-          } catch (error) {
-            await this.handleError(
-              message,
-              error as Error,
-              metadata,
-              partition,
-            );
-          }
+            return processOnce();
+          };
+
+          await this.runWithRetry(invokeOnce, message, metadata, partition);
 
           payload.resolveOffset(message.offset);
           // Note: heartbeat() is automatic in confluent-kafka-javascript
@@ -659,102 +625,95 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     }
   }
 
-  private async handleError(
+  private computeRetryDelay(
+    attempt: number,
+    retry?: ConsumerOptions['retry'],
+  ): number {
+    const baseDelay = retry?.initialRetryTime ?? 1000;
+    const multiplier = retry?.multiplier ?? 2;
+    return Math.min(baseDelay * multiplier ** (attempt - 1), MAX_RETRY_DELAY_MS);
+  }
+
+  /** Verdict for the non-DLQ path (pure). */
+  private evaluateRetry(
+    attempt: number,
+    options: ConsumerOptions,
+  ): RetryVerdict {
+    const maxRetries = options.retry?.retries ?? 3;
+    if (
+      attempt <= maxRetries ||
+      !(options.retry?.skipMessageOnMaxRetries ?? false)
+    ) {
+      // skip=false (default) → retry indefinitely: handler errors never crash
+      // the consumer and never lose the message. skip=true → bounded by maxRetries.
+      return {
+        action: 'retry',
+        delayMs: this.computeRetryDelay(attempt, options.retry),
+      };
+    }
+    return { action: 'complete' };
+  }
+
+  /**
+   * Re-invoke `invoke` in-process with capped exponential backoff until a
+   * terminal verdict. Handler errors NEVER crash the consumer here — only an
+   * infra rejection from dlqService.handleFailure (DLQ send failure) escapes.
+   */
+  private async runWithRetry(
+    invoke: () => Promise<void>,
     message: any,
-    error: Error,
     metadata: ConsumerMetadata,
     partition?: number,
   ): Promise<void> {
-    const { topic, options, connection } = metadata;
-
-    this.logger.error(`Error processing message from ${topic}`, error);
-
-    if (options.dlq) {
-      // With DLQ: Use DLQ service for retry and DLQ handling
-      const shouldRetry = await this.dlqService.handleFailure(
-        message,
-        error,
-        options.dlq,
-        topic,
-        partition,
-        connection,
-      );
-
-      if (shouldRetry) {
-        throw error;
-      }
-    } else {
-      // Without DLQ: Implement retry mechanism here
-      const messageKey = this.getMessageKey(message, topic, partition);
-      let state = this.messageRetryStates.get(messageKey);
-
-      if (!state) {
-        state = { retryCount: 0, lastAttemptAt: Date.now() };
-        this.messageRetryStates.set(messageKey, state);
-      }
-
-      state.retryCount++;
-      state.lastError = error;
-      state.lastAttemptAt = Date.now();
-
-      // Get max retries from retry options, default to 3
-      const maxRetries = options.retry?.retries ?? 3;
-
-      if (state.retryCount <= maxRetries) {
-        // Calculate exponential backoff delay
-        const baseDelay = options.retry?.initialRetryTime ?? 1000;
-        const multiplier = options.retry?.multiplier ?? 2;
-        const delay = baseDelay * Math.pow(multiplier, state.retryCount - 1);
-
-        const MAX_RETRY_DELAY = 30000; // Cap at 30s to avoid excessive consumer blocking
-        const cappedDelay = Math.min(delay, MAX_RETRY_DELAY);
-
-        this.logger.warn(
-          `Retry ${state.retryCount}/${maxRetries} for message from ${topic}, waiting ${cappedDelay}ms`,
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await invoke();
+        return;
+      } catch (error) {
+        const err = error as Error;
+        this.logger.error(
+          `Error processing message from ${metadata.topic} (attempt ${attempt})`,
+          err,
         );
+        const verdict = metadata.options.dlq
+          ? await this.dlqService.handleFailure(
+              message,
+              err,
+              metadata.options.dlq,
+              metadata.topic,
+              partition,
+              metadata.connection,
+              attempt,
+            ) // may itself REJECT (DLQ send failure — infra) → propagates → run loop dies → auto-restart
+          : this.evaluateRetry(attempt, metadata.options);
 
-        await this.sleep(cappedDelay);
-        throw error; // Retry: throw error to trigger consumer retry
-      } else {
-        // Exceeded max retries
-        const skipMessage = options.retry?.skipMessageOnMaxRetries ?? false;
-
-        this.messageRetryStates.delete(messageKey);
-
-        if (skipMessage) {
-          // Skip message to avoid blocking consumer
-          this.logger.error(
-            `Message from ${topic} failed after ${state.retryCount} retries. Skipping message to avoid blocking consumer. ` +
-              `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
-          );
-          this.logger.error(
-            `Dropped message details - Topic: ${topic}, Key: ${message.key?.toString()}, Error: ${error.message}`,
-          );
-          // DO NOT throw error - let consumer commit offset and skip this message
-          // This allows consumer to continue processing other messages
-        } else {
-          // Throw error to potentially restart consumer
-          this.logger.error(
-            `Message from ${topic} failed after ${state.retryCount} retries. Throwing error as configured. ` +
-              `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
-          );
-          throw error;
+        if (verdict.action === 'retry') {
+          await this.sleep(verdict.delayMs); // cancellable on shutdown
+          if (this.isShuttingDown) {
+            // Shutdown cancelled the sleep — rethrow ONCE so the offset is NOT
+            // committed (message redelivered next boot, at-least-once).
+            // Returning normally here would ack the message and LOSE it.
+            throw err;
+          }
+          continue;
         }
+        // 'complete': DLQ-sent / skipped / circuit-dropped — ack and move on
+        this.logger.error(
+          `Message from ${metadata.topic} skipped after ${attempt} attempts. ` +
+            `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
+        );
+        return;
       }
     }
-  }
-
-  private getMessageKey(
-    message: any,
-    topic: string,
-    partition?: number,
-  ): string {
-    return `${topic}:${partition ?? 0}:${message.offset}`;
   }
 
   private shutdownResolvers = new Set<() => void>();
 
   private sleep(ms: number): Promise<void> {
+    // Shutdown may have been signalled before this sleep registered its
+    // canceller — resolve immediately so callers re-check isShuttingDown.
+    if (this.isShuttingDown) return Promise.resolve();
+
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.shutdownResolvers.delete(cancelFn);
@@ -768,15 +727,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
       this.shutdownResolvers.add(cancelFn);
     });
-  }
-
-  private clearMessageRetryState(
-    message: any,
-    topic: string,
-    partition?: number,
-  ): void {
-    const key = this.getMessageKey(message, topic, partition);
-    this.messageRetryStates.delete(key);
   }
 
   async gracefulShutdown(): Promise<void> {
@@ -811,15 +761,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     // Shutdown DLQ retry consumers
     await this.dlqRetryService.gracefulShutdown();
-
-    // Clear retry state cleanup interval
-    if (this.retryStateCleanupInterval) {
-      clearInterval(this.retryStateCleanupInterval);
-      this.retryStateCleanupInterval = null;
-    }
-
-    // Clear retry states
-    this.messageRetryStates.clear();
 
     this.logger.log('All consumer groups shut down gracefully');
   }
