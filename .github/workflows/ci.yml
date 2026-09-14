@@ -47,3 +47,22 @@ jobs:
 
       - name: Kafka e2e suite
         run: npm run test:e2e
+
+  build-package:
+    name: Build & package (publish dry-run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Runs prepublishOnly (build) and packs the tarball — proves the lib
+      # builds and is publishable without uploading anything.
+      - name: Verify publishable package
+        run: npm publish --dry-run

@@ -12,7 +12,8 @@
     "url": "https://github.com/loipv/nestjs-kafka.git"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/*.tsbuildinfo"
   ],
   "keywords": [
     "nestjs",
