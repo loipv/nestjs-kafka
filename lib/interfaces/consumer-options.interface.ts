@@ -33,6 +33,11 @@ export interface DlqRetryOptions {
 export interface DlqOptions {
   /** DLQ topic to send failed messages */
   topic: string;
+  /**
+   * Connection name to produce/consume the DLQ on (must be registered via
+   * KafkaModule.forRootMultiple). Default: the consumer's connection
+   */
+  connection?: string;
   /** Max retries before sending to DLQ. Default: 3 */
   maxRetries?: number;
   /** Delay between retries in ms. Default: 1000 */

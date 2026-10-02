@@ -86,7 +86,8 @@ export class DlqRetryService implements OnApplicationShutdown {
 
     const dlqTopic = dlqOptions.topic;
     const retryOptions = dlqOptions.retry;
-    const connection = options.connection || DEFAULT_KAFKA_CONNECTION;
+    const connection =
+      dlqOptions.connection || options.connection || DEFAULT_KAFKA_CONNECTION;
 
     // Generate groupId
     let groupId = retryOptions.groupId || `${dlqTopic}-retry-consumer`;

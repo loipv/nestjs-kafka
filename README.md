@@ -395,9 +395,25 @@ async handlePayment(message: KafkaMessage) {
 }
 ```
 
+### DLQ on a Separate Cluster
+
+By default the DLQ topic lives on the consumer's own connection. Set `dlq.connection` to any connection registered via `KafkaModule.forRootMultiple()` to produce (and, with auto-retry, consume) the DLQ there instead:
+
+```typescript
+@Consumer('payments', {
+  connection: 'main',
+  dlq: {
+    topic: 'payments-dlq',
+    connection: 'dlq-cluster', // DLQ, DLQ auto-retry and finalDlqTopic all use this connection
+  },
+})
+```
+
+An unknown `dlq.connection` fails at startup. With `allowAutoTopicCreation`, the DLQ and `finalDlqTopic` are auto-created on the DLQ connection.
+
 ### DLQ with Auto-Retry
 
-Automatically consume messages from DLQ and re-publish them to the original topic after a delay:
+Automatically consume messages from the DLQ and re-invoke the original handler after a delay:
 
 ```typescript
 @Consumer('payments', {

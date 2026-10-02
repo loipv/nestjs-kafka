@@ -148,6 +148,11 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const groupId = options.groupId || `${topic}-group`;
     const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
 
+    // Fail fast on a mistyped DLQ connection instead of at the first failure
+    if (options.dlq?.connection) {
+      this.kafkaCore.getKafka(options.dlq.connection);
+    }
+
     // Key includes both connection and groupId to support same groupId on different connections
     const groupKey = `${connectionName}:${groupId}`;
 
@@ -238,6 +243,65 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     await this.dlqRetryService.startAll();
   }
 
+  /**
+   * Create missing topics on one connection (sizing from the owning consumer's
+   * options), then wait for the subscribed ones to become visible. Failures are
+   * logged, not thrown — subscribing still proceeds.
+   */
+  private async autoCreateTopics(
+    connection: string,
+    topicsToCreate: Map<string, ConsumerOptions>,
+    isSubscribed: (topic: string) => boolean,
+  ): Promise<void> {
+    const admin = this.kafkaCore.getKafka(connection).admin();
+    try {
+      await admin.connect();
+      const existingTopics = await admin.listTopics();
+
+      // Create topics ONE BY ONE: when multiple consumer groups start
+      // concurrently (e.g. a topic and its DLQ spy), they can share a
+      // topic in their creation lists — a single atomic createTopics call
+      // would fail wholesale on "already exists" and skip the rest.
+      for (const [topic, opts] of topicsToCreate) {
+        if (existingTopics.includes(topic)) continue;
+        try {
+          await admin.createTopics({
+            topics: [
+              {
+                topic,
+                numPartitions: opts.autoCreateTopicPartitions ?? 1,
+                replicationFactor: opts.autoCreateTopicReplicationFactor ?? 1,
+              },
+            ],
+          });
+          this.logger.log(`Auto-created topic: ${topic} (${connection})`);
+        } catch (error) {
+          // Concurrent creation by another group is fine — verify it exists
+          if (!(await admin.listTopics()).includes(topic)) {
+            throw error;
+          }
+        }
+      }
+
+      // Wait for topic metadata to propagate before subscribing —
+      // subscribing to a topic whose metadata isn't visible yet leaves
+      // the consumer with zero assignments (silent no-consumption).
+      const waitFor = [...topicsToCreate.keys()].filter(isSubscribed);
+      const deadline = Date.now() + 10_000;
+      let visible = new Set(await admin.listTopics());
+      while (waitFor.some((t) => !visible.has(t)) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        visible = new Set(await admin.listTopics());
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Failed to auto-create topics (${connection}): ${error}`,
+      );
+    } finally {
+      await admin.disconnect();
+    }
+  }
+
   private async startConsumerGroup(group: ConsumerGroup): Promise<void> {
     const { groupId, consumer, topics, connection } = group;
     const groupKey = `${connection}:${groupId}`;
@@ -248,80 +312,29 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       // Subscribe to all topics in this group
       const topicList = Array.from(topics.keys());
 
-      // Check if any topic needs auto-creation (including DLQ topics)
-      const topicsToCreate: Set<string> = new Set();
+      // Topics to auto-create, grouped by connection — DLQ topics may live on
+      // a different cluster (dlq.connection) than the consumer itself
+      const topicsToCreate = new Map<string, Map<string, ConsumerOptions>>();
+      const addTopic = (conn: string, t: string, opts: ConsumerOptions) => {
+        if (!topicsToCreate.has(conn)) topicsToCreate.set(conn, new Map());
+        topicsToCreate.get(conn)!.set(t, opts);
+      };
       for (const topic of topicList) {
-        const topicHandler = topics.get(topic)!;
-        const opts = topicHandler.metadata.options;
+        const opts = topics.get(topic)!.metadata.options;
+        if (!opts.allowAutoTopicCreation) continue;
 
-        if (opts.allowAutoTopicCreation) {
-          topicsToCreate.add(topic);
-
-          // Also auto-create DLQ topic if configured
-          if (opts.dlq?.topic) {
-            topicsToCreate.add(opts.dlq.topic);
-          }
-
-          // Also auto-create final DLQ topic if configured
-          if (opts.dlq?.retry?.finalDlqTopic) {
-            topicsToCreate.add(opts.dlq.retry.finalDlqTopic);
-          }
+        addTopic(connection, topic, opts);
+        const dlqConnection = opts.dlq?.connection || connection;
+        if (opts.dlq?.topic) {
+          addTopic(dlqConnection, opts.dlq.topic, opts);
+        }
+        if (opts.dlq?.retry?.finalDlqTopic) {
+          addTopic(dlqConnection, opts.dlq.retry.finalDlqTopic, opts);
         }
       }
 
-      // Auto-create topics if needed
-      if (topicsToCreate.size > 0) {
-        const admin = this.kafkaCore.getKafka(group.connection).admin();
-        try {
-          await admin.connect();
-          const existingTopics = await admin.listTopics();
-          const newTopics = Array.from(topicsToCreate).filter(
-            (t) => !existingTopics.includes(t),
-          );
-
-          // Create topics ONE BY ONE: when multiple consumer groups start
-          // concurrently (e.g. a topic and its DLQ spy), they can share a
-          // topic in their creation lists — a single atomic createTopics call
-          // would fail wholesale on "already exists" and skip the rest.
-          for (const topic of newTopics) {
-            const opts = topics.get(topic)!.metadata.options;
-            try {
-              await admin.createTopics({
-                topics: [
-                  {
-                    topic,
-                    numPartitions: opts.autoCreateTopicPartitions ?? 1,
-                    replicationFactor:
-                      opts.autoCreateTopicReplicationFactor ?? 1,
-                  },
-                ],
-              });
-              this.logger.log(`Auto-created topic: ${topic}`);
-            } catch (error) {
-              // Concurrent creation by another group is fine — verify it exists
-              if (!(await admin.listTopics()).includes(topic)) {
-                throw error;
-              }
-            }
-          }
-
-          // Wait for topic metadata to propagate before subscribing —
-          // subscribing to a topic whose metadata isn't visible yet leaves
-          // the consumer with zero assignments (silent no-consumption).
-          const deadline = Date.now() + 10_000;
-          let visible = new Set(await admin.listTopics());
-          while (
-            topicList.some((t) => !visible.has(t)) &&
-            Date.now() < deadline
-          ) {
-            await new Promise((resolve) => setTimeout(resolve, 200));
-            visible = new Set(await admin.listTopics());
-          }
-        } catch (error) {
-          this.logger.warn(`Failed to auto-create topics: ${error}`);
-        } finally {
-          await admin.disconnect();
-        }
+      for (const [conn, connTopics] of topicsToCreate) {
+        await this.autoCreateTopics(conn, connTopics, (t) => topics.has(t));
       }
 
       for (const topic of topicList) {

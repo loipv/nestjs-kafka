@@ -130,6 +130,7 @@ export class DlqService {
           : message.key
         : null;
 
+      const target = options.connection || connection;
       await this.kafkaClient.send(
         options.topic,
         {
@@ -137,7 +138,7 @@ export class DlqService {
           value: messageValue,
           headers,
         },
-        connection ? { connection } : undefined,
+        target ? { connection: target } : undefined,
       );
 
       // Record metrics

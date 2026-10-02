@@ -1,24 +1,25 @@
 import { GenericContainer, Wait } from 'testcontainers';
 import { Test } from '@nestjs/testing';
 import { Injectable } from '@nestjs/common';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { KafkaModule, ConsumerModule, Consumer, KafkaClient } from '../lib';
 
 let kafka: Awaited<ReturnType<GenericContainer['start']>>;
 let bootstrap: string;
 
-beforeAll(async () => {
-  // Self-contained single-node KRaft Kafka with a FIXED host port and the
-  // advertised listener pointing at 127.0.0.1:9092 — no mapped/advertised
-  // port mismatch possible. 127.0.0.1 (not "localhost") because librdkafka
-  // resolves localhost to IPv6 ::1, where Docker's published ports don't listen.
-  kafka = await new GenericContainer('confluentinc/cp-kafka:7.6.0')
+// Self-contained single-node KRaft Kafka with a FIXED host port and the
+// advertised listener pointing at 127.0.0.1:<port> — no mapped/advertised
+// port mismatch possible. 127.0.0.1 (not "localhost") because librdkafka
+// resolves localhost to IPv6 ::1, where Docker's published ports don't listen.
+function startKafka(port: number, autoCreateTopics = true) {
+  return new GenericContainer('confluentinc/cp-kafka:7.6.0')
     .withEnvironment({
       CLUSTER_ID: '5L6g3nShT-eMCtK--X86sw',
       KAFKA_NODE_ID: '1',
       KAFKA_PROCESS_ROLES: 'broker,controller',
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9093',
-      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093',
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://127.0.0.1:9092',
+      KAFKA_LISTENERS: `PLAINTEXT://0.0.0.0:${port},CONTROLLER://0.0.0.0:9093`,
+      KAFKA_ADVERTISED_LISTENERS: `PLAINTEXT://127.0.0.1:${port}`,
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER',
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:
         'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT',
@@ -26,11 +27,15 @@ beforeAll(async () => {
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1',
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1',
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0',
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true',
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: String(autoCreateTopics),
     })
-    .withExposedPorts({ container: 9092, host: 9092 })
+    .withExposedPorts({ container: port, host: port })
     .withWaitStrategy(Wait.forLogMessage('Kafka Server started'))
     .start();
+}
+
+beforeAll(async () => {
+  kafka = await startKafka(9092);
   bootstrap = '127.0.0.1:9092';
 }, 180_000);
 
@@ -385,6 +390,148 @@ describe('Kafka e2e (testcontainers)', () => {
       expect(attempts).toBe(5);
     } finally {
       await app.close();
+    }
+  });
+});
+
+describe('DLQ on a separate cluster (dlq.connection)', () => {
+  let dlqKafka: Awaited<ReturnType<GenericContainer['start']>>;
+  const dlqBootstrap = '127.0.0.1:9094';
+
+  beforeAll(async () => {
+    // Broker auto-create OFF: the DLQ topics can only exist on this cluster if
+    // the library's allowAutoTopicCreation created them on dlq.connection.
+    dlqKafka = await startKafka(9094, false);
+  }, 180_000);
+
+  afterAll(async () => {
+    await dlqKafka?.stop();
+  });
+
+  async function withAdmin<T>(
+    brokers: string,
+    fn: (admin: KafkaJS.Admin) => Promise<T>,
+  ): Promise<T> {
+    const admin = new KafkaJS.Kafka({
+      kafkaJS: { brokers: [brokers] },
+    }).admin();
+    await admin.connect();
+    try {
+      return await fn(admin);
+    } finally {
+      await admin.disconnect();
+    }
+  }
+
+  const messageCount = (brokers: string, topic: string) =>
+    withAdmin(brokers, async (admin) => {
+      if (!(await admin.listTopics()).includes(topic)) return 0;
+      const offsets = await admin.fetchTopicOffsets(topic);
+      return offsets.reduce((n, p) => n + Number(p.high), 0);
+    });
+
+  it('dead-letters, auto-retries and final-DLQs on the DLQ cluster only', async () => {
+    let sourceAttempts = 0;
+    let reprocessAttempts = 0;
+    const successes: string[] = [];
+
+    @Injectable()
+    class CrossClusterConsumer {
+      @Consumer('e2e-xdlq-src', {
+        groupId: 'e2e-xdlq-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+        dlq: {
+          topic: 'e2e-xdlq-dead',
+          connection: 'dlq',
+          maxRetries: 1,
+          retryDelay: 100,
+          retry: {
+            enabled: true,
+            maxRetries: 1,
+            delay: 100,
+            fromBeginning: true,
+            finalDlqTopic: 'e2e-xdlq-final',
+          },
+        },
+      })
+      async handle(msg: any) {
+        if (msg.value?.fail) {
+          if (msg.headers?.['x-dlq-original-topic']) reprocessAttempts++;
+          else sourceAttempts++;
+          throw new Error('permanent');
+        }
+        successes.push(msg.value?.id);
+      }
+    }
+
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRootMultiple([
+          { clientId: 'e2e', brokers: [bootstrap] },
+          { name: 'dlq', clientId: 'e2e-dlq', brokers: [dlqBootstrap] },
+        ]),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [CrossClusterConsumer],
+    }).compile();
+    await moduleRef.init();
+
+    try {
+      const client = moduleRef.get(KafkaClient);
+      await client.send('e2e-xdlq-src', { value: { id: 'x', fail: true } });
+      await client.send('e2e-xdlq-src', { value: { id: 'good' } });
+
+      await waitFor(() => successes.includes('good'));
+      // DLQ retry consumer (on the DLQ cluster) re-invoked the handler,
+      // which failed again → back to DLQ → max reprocesses → final DLQ
+      await waitFor(() => reprocessAttempts >= 1);
+
+      const deadline = Date.now() + 45_000;
+      while (
+        (await messageCount(dlqBootstrap, 'e2e-xdlq-final')) < 1 &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      expect(sourceAttempts).toBe(2); // 1 initial + 1 retry before DLQ
+      expect(reprocessAttempts).toBe(1);
+      expect(await messageCount(dlqBootstrap, 'e2e-xdlq-dead')).toBe(2); // first DLQ + re-send
+      expect(await messageCount(dlqBootstrap, 'e2e-xdlq-final')).toBe(1);
+
+      const mainTopics = await withAdmin(bootstrap, (a) => a.listTopics());
+      expect(mainTopics).toContain('e2e-xdlq-src');
+      expect(mainTopics).not.toContain('e2e-xdlq-dead');
+      expect(mainTopics).not.toContain('e2e-xdlq-final');
+    } finally {
+      await moduleRef.close();
+    }
+  });
+
+  it('fails at startup when dlq.connection is not registered', async () => {
+    @Injectable()
+    class BadDlqConsumer {
+      @Consumer('e2e-xdlq-bad', {
+        groupId: 'e2e-xdlq-bad-g',
+        dlq: { topic: 'e2e-xdlq-bad-dead', connection: 'missing' },
+      })
+      async handle() {}
+    }
+
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'e2e', brokers: [bootstrap] }),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [BadDlqConsumer],
+    }).compile();
+    try {
+      await expect(moduleRef.init()).rejects.toThrow(
+        'Kafka connection "missing" not found',
+      );
+    } finally {
+      await moduleRef.close().catch(() => undefined);
     }
   });
 });

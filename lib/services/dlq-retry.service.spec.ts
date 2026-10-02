@@ -23,7 +23,7 @@ function makeService() {
     kafkaClient as any,
     metrics as any,
   );
-  return { svc, kafkaClient, metrics };
+  return { svc, kafkaClient, metrics, kafkaCore };
 }
 
 const mkMetadata = (dlqTopic: string, retryOpts: any = {}) =>
@@ -48,6 +48,19 @@ describe('DlqRetryService', () => {
     expect(
       (svc as any).dlqConsumerGroups.has('default:t-dlq-retry-consumer-dlq'),
     ).toBe(true);
+  });
+
+  it('consumes the DLQ from dlq.connection when configured', () => {
+    const { svc, kafkaCore } = makeService();
+    const md = mkMetadata('t-dlq');
+    md.options.connection = 'clusterA';
+    md.options.dlq.connection = 'dlqCluster';
+    svc.registerDlqRetryConsumer(md, async () => {});
+    expect(kafkaCore.getKafka).toHaveBeenCalledWith('dlqCluster');
+    expect(
+      (svc as any).dlqConsumerGroups.get('dlqCluster:t-dlq-retry-consumer')
+        ?.connection,
+    ).toBe('dlqCluster');
   });
 
   it('reprocess failure sends message back to DLQ with incremented count', async () => {

@@ -81,6 +81,24 @@ describe('DlqService.handleFailure (verdict API)', () => {
     );
   });
 
+  it('sends to dlq.connection when configured (separate DLQ cluster)', async () => {
+    const { svc, kafkaClient } = makeService();
+    await svc.handleFailure(
+      mkMsg(),
+      new Error('boom'),
+      { topic: 'orders-dlq', maxRetries: 0, connection: 'dlqCluster' },
+      'orders',
+      0,
+      'clusterA',
+      1,
+    );
+    expect(kafkaClient.send).toHaveBeenCalledWith(
+      'orders-dlq',
+      expect.anything(),
+      { connection: 'dlqCluster' },
+    );
+  });
+
   it('completes with drop when circuit breaker is open', async () => {
     const { svc, metrics } = makeService(true);
     const v = await svc.handleFailure(

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **feat:** `dlq.connection` — send the DLQ (and run DLQ auto-retry / `finalDlqTopic`) on a different named connection than the consumer. Unknown connection names fail at startup
+
+### Tests
+- **test:** e2e for `dlq.connection` against a second Kafka container (DLQ, auto-retry and final DLQ land only on the DLQ cluster; unknown connection fails startup)
+
+### Fixes
+- **fix:** idempotency cleanup timer is `unref()`'d — a failed app init no longer leaves the process hanging
+- **fix:** `allowAutoTopicCreation` now actually creates the DLQ / `finalDlqTopic` topics (previously a lookup error silently aborted creation after the main topic)
+
 ## 1.2.0 (2026-09-14)
 
 ### Fixes

@@ -333,3 +333,93 @@ describe('batch offset semantics', () => {
     expect(resolveOffset).toHaveBeenCalledWith('2'); // last offset, AFTER flush
   });
 });
+
+describe('DLQ on a separate connection', () => {
+  const mkAdmin = () => {
+    const existing: string[] = [];
+    return {
+      connect: jest.fn(),
+      disconnect: jest.fn(),
+      listTopics: jest.fn(() => Promise.resolve([...existing])),
+      createTopics: jest.fn(({ topics }: any) => {
+        existing.push(topics[0].topic);
+        return Promise.resolve();
+      }),
+    };
+  };
+  const makeRegistry = (connections: string[]) => {
+    const admins: Record<string, ReturnType<typeof mkAdmin>> = {};
+    const core = {
+      getKafka: jest.fn((name: string) => {
+        if (!connections.includes(name)) {
+          throw new Error(`Kafka connection "${name}" not found`);
+        }
+        admins[name] ??= mkAdmin();
+        return {
+          consumer: jest.fn().mockReturnValue({
+            connect: jest.fn(),
+            subscribe: jest.fn(),
+            run: jest.fn().mockResolvedValue(undefined),
+            disconnect: jest.fn(),
+          }),
+          admin: jest.fn().mockReturnValue(admins[name]),
+        };
+      }),
+    };
+    const registry = new ConsumerRegistryService(
+      core as any,
+      {} as any,
+      { stopCleanup: jest.fn() } as any,
+      { register: jest.fn(), setTopics: jest.fn() } as any,
+      {} as any,
+      {
+        registerOriginalGroupId: jest.fn(),
+        registerDlqRetryConsumer: jest.fn(),
+        startAll: jest.fn().mockResolvedValue(undefined),
+      } as any,
+      undefined,
+      undefined,
+    );
+    return { registry, admins };
+  };
+  const mkConsumer = (dlq: any) =>
+    ({
+      topic: 'orders',
+      connection: 'clusterA',
+      options: { allowAutoTopicCreation: true, dlq },
+      target: { h: async () => {} },
+      methodName: 'h',
+    }) as any;
+  const created = (admin?: ReturnType<typeof mkAdmin>) =>
+    (admin?.createTopics.mock.calls ?? []).map((c) => c[0].topics[0].topic);
+
+  it('fails fast at registration when dlq.connection is unknown', () => {
+    const { registry } = makeRegistry(['clusterA']);
+    expect(() =>
+      registry.registerConsumers([
+        mkConsumer({ topic: 'orders-dlq', connection: 'missing' }),
+      ]),
+    ).toThrow('Kafka connection "missing" not found');
+  });
+
+  it('auto-creates DLQ + final DLQ topics on the DLQ connection', async () => {
+    const { registry, admins } = makeRegistry(['clusterA', 'dlqCluster']);
+    registry.registerConsumers([
+      mkConsumer({
+        topic: 'orders-dlq',
+        connection: 'dlqCluster',
+        retry: { enabled: true, finalDlqTopic: 'orders-final' },
+      }),
+    ]);
+    await (registry as any).startAll();
+    expect(created(admins.clusterA)).toEqual(['orders']);
+    expect(created(admins.dlqCluster)).toEqual(['orders-dlq', 'orders-final']);
+  });
+
+  it('auto-creates the DLQ topic on the consumer connection by default', async () => {
+    const { registry, admins } = makeRegistry(['clusterA']);
+    registry.registerConsumers([mkConsumer({ topic: 'orders-dlq' })]);
+    await (registry as any).startAll();
+    expect(created(admins.clusterA)).toEqual(['orders', 'orders-dlq']);
+  });
+});
