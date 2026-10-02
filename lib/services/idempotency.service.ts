@@ -85,6 +85,9 @@ export class IdempotencyService implements OnModuleDestroy {
     this.cleanupInterval = setInterval(() => {
       this.runCleanupBatch();
     }, this.CLEANUP_INTERVAL);
+    // Housekeeping only — must not keep the process alive if shutdown hooks
+    // never run (e.g. app init failed before close()).
+    this.cleanupInterval.unref();
   }
 
   private runCleanupBatch(): void {

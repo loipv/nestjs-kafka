@@ -49,3 +49,14 @@ describe('dedupe semantics', () => {
     expect(svc.filterDuplicates([a, b])).toEqual([b]);
   });
 });
+
+describe('IdempotencyService timer', () => {
+  it('cleanup interval does not keep the process alive (e.g. after a failed app init)', () => {
+    const svc = new IdempotencyService();
+    try {
+      expect((svc as any).cleanupInterval.hasRef()).toBe(false);
+    } finally {
+      svc.stopCleanup();
+    }
+  });
+});
