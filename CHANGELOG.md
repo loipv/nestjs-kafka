@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 (2026-10-02)
 
 ### Features
 - **feat:** `dlq.connection` — send the DLQ (and run DLQ auto-retry / `finalDlqTopic`) on a different named connection than the consumer. Unknown connection names fail at startup
