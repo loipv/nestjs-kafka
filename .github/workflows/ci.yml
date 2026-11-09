@@ -44,11 +44,19 @@ jobs:
         node: [20, 22, 24]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # Install the root devDependencies with Node 24 (some, such as @changesets/cli and undici,
+      # declare a newer Node than 20), then run the tests on the matrix Node.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Switch to Node ${{ matrix.node }}
+        if: matrix.node != 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
       - run: npm test
 
   e2e:
@@ -77,11 +85,19 @@ jobs:
         node: [20, 24]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # Install the root devDependencies with Node 24, as in `test`, then build, pack and run the
+      # smoke fixtures on the matrix Node.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Switch to Node ${{ matrix.node }}
+        if: matrix.node != 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
       # The fixtures install the packed tarball with install scripts, so each one fetches the
       # librdkafka binary for the matrix Node.
       - run: node scripts/smoke.mjs
