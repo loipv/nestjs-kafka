@@ -13,22 +13,34 @@ This is `@loipv/nestjs-kafka`, a production-ready NestJS module for Kafka client
 npm run build
 
 # Testing
-npm test               # Run unit tests
+npm test               # Run unit tests (librdkafka is mocked; no native binary needed)
 npm run test:watch     # Watch mode
 npm run test:cov       # With coverage
+npm run test:e2e       # Kafka e2e via testcontainers (Docker; needs `npm rebuild @confluentinc/kafka-javascript` after an --ignore-scripts install)
+npm run test:smoke     # Install the packed tarball into test/smoke/* fixture apps and run them
 
 # Run a single test file
 npx jest lib/services/<file>.spec.ts
 
-# Linting & Formatting
+# Linting, formatting, types
 npm run lint           # ESLint with auto-fix
+npm run lint:check     # ESLint without --fix (CI)
 npm run format         # Prettier
+npm run typecheck      # tsc --noEmit
 
-# Publish to npm
-npm publish --access public
+# Package and workflow checks
+npm run check:pack       # Tarball contents, entry points, inlined sourcemaps
+npm run check:pkg        # publint + attw
+npm run check:workflows  # Security shape of .github/workflows (SHA pins, ci-ok gate, release rules)
+npm run lint:workflows   # actionlint via Docker
+
+# Releases
+npm run changeset      # Add a changeset to every PR that changes the published package
 ```
 
-Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir: lib`). `test/jest-e2e.json` exists for future e2e tests but none are written yet. This is a published npm library (`files: ["dist"]`, `prepublishOnly` builds).
+Releases go through Changesets and the `Release` workflow (npm trusted publishing with provenance) — never `npm publish` by hand. See RELEASING.md.
+
+Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir: lib`). The Kafka e2e suite lives in `test/kafka.e2e-spec.ts` (`test/jest-e2e.json`). This is a published npm library (`files: ["dist", "CHANGELOG.md"]`; `prepublishOnly` runs build, `check:pack`, `check:pkg`, typecheck and unit tests). Every unit spec that imports `@confluentinc/kafka-javascript` (directly or through a service) must `jest.mock` it: CI and the release job install with `--ignore-scripts`, so the native binding is absent.
 
 ## Architecture
 
