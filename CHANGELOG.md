@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+### Minor Changes
+
+- [`cfdf91e`](https://github.com/loipv/nestjs-kafka/commit/cfdf91e4a042aa1357d59a1ee98bed47d741bbfb) Thanks [@loipv](https://github.com/loipv)! - Declare Node.js `>=20` in `engines`. The package now ships `LICENSE` and `CHANGELOG.md`, its sourcemaps embed their sources, and releases are published from GitHub Actions with npm provenance.
+
 ## 1.2.1 (2026-10-02)
 
 ### Features
