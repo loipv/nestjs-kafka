@@ -85,7 +85,29 @@ for (const file of files) {
     violations.push(`${file}: must not reference NPM_TOKEN (use trusted publishing)`);
   }
 
+  // No dependency lifecycle scripts in any workflow: release.yml holds id-token and write
+  // permissions, and CI must install the same way so it proves the release job's
+  // `prepublishOnly` works without them (no librdkafka binding).
+  for (const [cmd] of body.matchAll(/\bnpm\s+(?:ci|install|i)\b.*$/gm)) {
+    if (!/\s--ignore-scripts\b/.test(cmd)) {
+      violations.push(`${file}: \`${cmd.trim()}\` must pass --ignore-scripts`);
+    }
+  }
+
   if (file === 'ci.yml') {
+    // The only install script CI may run is librdkafka's, and only for the e2e suite.
+    for (const [job, lines] of Object.entries(jobsBlock(body) ?? {})) {
+      for (const line of lines) {
+        const rebuild = /\bnpm\s+rebuild\b.*$/.exec(line);
+        if (!rebuild) continue;
+        if (job !== 'e2e' || rebuild[0].trim() !== 'npm rebuild @confluentinc/kafka-javascript') {
+          violations.push(
+            `ci.yml: \`${rebuild[0].trim()}\` in job \`${job}\`: only \`npm rebuild @confluentinc/kafka-javascript\` in \`e2e\` is allowed`,
+          );
+        }
+      }
+    }
+
     // `ci-ok` is the single required check. It must never be skipped (a skipped required check
     // counts as passing), so `if: always()`, and it must need every other job.
     const jobs = jobsBlock(body) ?? {};
@@ -154,12 +176,6 @@ for (const file of files) {
         "release.yml: release job needs `if: github.repository == 'loipv/nestjs-kafka' && github.ref == 'refs/heads/main'`",
       );
     }
-    // No dependency lifecycle scripts while the job holds id-token and write permissions.
-    for (const [cmd] of body.matchAll(/\bnpm\s+(?:ci|install|i)\b.*$/gm)) {
-      if (!/\s--ignore-scripts\b/.test(cmd)) {
-        violations.push(`release.yml: \`${cmd.trim()}\` must pass --ignore-scripts`);
-      }
-    }
     // `npm rebuild` runs install scripts (librdkafka's node-pre-gyp download) and the release
     // job never loads the native binding, so it must not rebuild while holding the OIDC token.
     if (/\bnpm\s+rebuild\b/.test(body)) {
@@ -196,5 +212,5 @@ if (violations.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; ci.yml ci-ok always runs and needs every job; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, --ignore-scripts, no npm rebuild, no NPM_TOKEN; others read-only)`,
+  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; ci.yml ci-ok always runs and needs every job; --ignore-scripts everywhere, npm rebuild only for librdkafka in e2e; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, no npm rebuild, no NPM_TOKEN; others read-only)`,
 );

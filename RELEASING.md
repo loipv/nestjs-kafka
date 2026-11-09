@@ -4,7 +4,7 @@ This document is for maintainers of `@loipv/nestjs-kafka`. Releases use [Changes
 
 ## 1. One-time bootstrap
 
-The package already exists on npm (up to `1.2.1`, published by hand), so no manual first publish is needed. Do these steps once, before the first release goes through the workflow:
+The package already exists on npm (up to `1.2.1`, published by hand), so no manual first publish is needed. Do these steps once, **before the pull request that adds this pipeline is merged into `main`**:
 
 1. Tag the commits that `1.2.0` and `1.2.1` were published from (their npm `gitHead`) and push the tags. The workflow creates tags and GitHub Releases only for the versions it publishes:
 
@@ -34,7 +34,10 @@ The package already exists on npm (up to `1.2.1`, published by hand), so no manu
 
 5. The first release through the workflow is `1.3.0`, produced by the changeset that introduced this pipeline. Treat it as the end-to-end rehearsal: after merging its **chore: version packages** PR, confirm that `1.3.0` appears on npm with a provenance badge and that the `v1.3.0` tag and GitHub Release were created.
 
-If the `Release` workflow runs before the bootstrap is done (for example because the pipeline reached `main` before trusted publishing was configured), it is expected to fail at the publish step without publishing anything. After the bootstrap, run it again from the **Actions** tab (**Release**, **Run workflow** on `main`).
+If the pipeline reaches `main` before the bootstrap is done, the first `Release` run is a version run (the pipeline's own changeset is pending), not a publish:
+
+- Without step 3, it fails while opening the version PR ("GitHub Actions is not permitted to create or approve pull requests"). Enable the setting, then run the workflow again from the **Actions** tab (**Release**, **Run workflow** on `main`).
+- Without step 2, the version PR opens normally, but merging it makes the publish fail with an authentication error, without publishing anything. Configure the trusted publisher, then run the workflow again by hand; it publishes the bumped version.
 
 ## 2. Regular release flow
 
@@ -50,7 +53,7 @@ If the `Release` workflow runs before the bootstrap is done (for example because
 
 3. Review the **chore: version packages** PR, close and reopen it so CI runs on it (see [CI gating](#ci-gating)), and merge it once `ci-ok` passes. The `Release` workflow runs again, finds no pending changesets and publishes the new version to npm with provenance. It also pushes the `vX.Y.Z` git tag and creates a GitHub Release with the changelog entry.
 
-The workflow runs on pushes to `main` and can also be started by hand from the **Actions** tab (**Run workflow**). It only runs for `loipv/nestjs-kafka` on `main` (forks and other branches skip it), is serialized by a `release` concurrency group, and has `id-token: write` so npm can verify the run through OIDC. Because the job holds that token and write access to the repository, it installs with `npm ci --ignore-scripts`: no dependency install script runs. The package's own `prepublishOnly` still runs on publish. CI installs the same way, so a dependency that starts to need an install script fails CI first; `npm run check:workflows` guards the flag in `release.yml`. See [Native binary and `--ignore-scripts`](#native-binary-and---ignore-scripts) for how this works with librdkafka.
+The workflow runs on pushes to `main` and can also be started by hand from the **Actions** tab (**Run workflow**). It only runs for `loipv/nestjs-kafka` on `main` (forks and other branches skip it), is serialized by a `release` concurrency group, and has `id-token: write` so npm can verify the run through OIDC. Because the job holds that token and write access to the repository, it installs with `npm ci --ignore-scripts`: no dependency install script runs. The package's own `prepublishOnly` still runs on publish. CI installs the same way, so a dependency that starts to need an install script fails CI first; `npm run check:workflows` guards the flag in every workflow. See [Native binary and `--ignore-scripts`](#native-binary-and---ignore-scripts) for how this works with librdkafka.
 
 Every action in `.github/workflows/` is pinned by full commit SHA with a `# vX.Y.Z` comment, because tags are mutable and the release job holds write permissions; `npm run check:workflows` rejects an unpinned `uses:`. Dependabot (`.github/dependabot.yml`) proposes SHA bumps weekly; review the upstream release notes before merging one. `changesets/action` is on v2: action v2 requires `@changesets/cli` v3 and refuses to run with CLI v2 (action v1 is the line for CLI v2), so upgrade the two together.
 
