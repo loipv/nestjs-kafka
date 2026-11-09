@@ -56,8 +56,11 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "prepublishOnly": "npm run build",
-    "check:pack": "node scripts/check-pack.mjs"
+    "prepublishOnly": "npm run build && npm run check:pack && npm run check:pkg && npm run typecheck && npm test",
+    "check:pack": "node scripts/check-pack.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint:check": "eslint \"{lib,test}/**/*.ts\"",
+    "check:pkg": "publint && attw --pack . --profile node16"
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.10.1"
@@ -79,6 +82,7 @@
     }
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@eslint/eslintrc": "^3.2.0",
     "@eslint/js": "^9.18.0",
     "@nestjs/cli": "^11.0.0",
@@ -99,6 +103,7 @@
     "globals": "^16.0.0",
     "jest": "^29.7.0",
     "prettier": "^3.4.2",
+    "publint": "^0.3.25",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "source-map-support": "^0.5.21",

@@ -3,6 +3,14 @@ import { KafkaHealthIndicator } from './kafka-health-indicator';
 import { KafkaClient } from '../services/kafka-client.service';
 import { KafkaCoreService } from '../services/kafka-core.service';
 
+// The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
+jest.mock('@confluentinc/kafka-javascript', () => ({
+  KafkaJS: {
+    Kafka: jest.fn(),
+    logLevel: { NOTHING: 0, ERROR: 1, WARN: 2, INFO: 4, DEBUG: 5 },
+  },
+}));
+
 describe('KafkaHealthIndicator', () => {
   let healthIndicator: KafkaHealthIndicator;
   let kafkaClient: jest.Mocked<KafkaClient>;

@@ -1,5 +1,13 @@
 import { KafkaClient } from './kafka-client.service';
 
+// The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
+jest.mock('@confluentinc/kafka-javascript', () => ({
+  KafkaJS: {
+    Kafka: jest.fn(),
+    logLevel: { NOTHING: 0, ERROR: 1, WARN: 2, INFO: 4, DEBUG: 5 },
+  },
+}));
+
 describe('KafkaClient', () => {
   const client = new KafkaClient({} as any, undefined);
   const serialize = (msg: any) => (client as any).serializeMessage(msg);
