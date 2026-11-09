@@ -58,6 +58,42 @@ function jobsBlock(text) {
   return jobs;
 }
 
+// npm commands that install packages, and so run their lifecycle scripts unless told not to,
+// with every alias (and accepted misspelling) the npm CLI knows for them.
+const INSTALL =
+  /\bnpm\s+(?:install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|add|ci|clean-install|ic|install-clean|isntall-clean|install-test|it|install-ci-test|cit|clean-install-test|sit)(?=\s|$)/;
+const REBUILD = /\bnpm\s+(?:rebuild|rb)(?=\s|$)/;
+// `--ignore-scripts` or `--ignore-scripts=true`; `--ignore-scripts=false` turns scripts back on.
+const ignoresScripts = (cmd) => /\s--ignore-scripts(?:=true)?(?=\s|$)/.test(cmd);
+// Shell commands of a `run:` line or an npm script, split on `&&`, `||`, `;` and newlines.
+const commands = (text) =>
+  text
+    .split(/&&|\|\||;|\n/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+// package.json scripts release.yml reaches: every `npm run <name>` (and `npm test`) in it, the
+// lifecycle scripts `npm publish` runs, their pre/post hooks, and whatever those call in turn.
+const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, '..', 'package.json'), 'utf8'));
+const PUBLISH_LIFECYCLE = ['prepublishOnly', 'prepack', 'prepare', 'postpack', 'publish', 'postpublish'];
+function reachableScripts(text) {
+  const seen = new Set();
+  const visit = (name) => {
+    for (const n of [`pre${name}`, name, `post${name}`]) {
+      if (seen.has(n) || pkg.scripts?.[n] === undefined) continue;
+      seen.add(n);
+      follow(pkg.scripts[n]);
+    }
+  };
+  const follow = (t) => {
+    for (const [, name] of t.matchAll(/\bnpm\s+(?:run|run-script|rum|urn)\s+([\w:.-]+)/g)) visit(name);
+    for (const _ of t.matchAll(/\bnpm\s+(?:test|t|tst)(?=\s|$)/g)) visit('test');
+  };
+  follow(text);
+  for (const name of PUBLISH_LIFECYCLE) visit(name);
+  return [...seen];
+}
+
 const violations = [];
 const files = readdirSync(dir)
   .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
@@ -88,21 +124,21 @@ for (const file of files) {
   // No dependency lifecycle scripts in any workflow: release.yml holds id-token and write
   // permissions, and CI must install the same way so it proves the release job's
   // `prepublishOnly` works without them (no librdkafka binding).
-  for (const [cmd] of body.matchAll(/\bnpm\s+(?:ci|install|i)\b.*$/gm)) {
-    if (!/\s--ignore-scripts\b/.test(cmd)) {
-      violations.push(`${file}: \`${cmd.trim()}\` must pass --ignore-scripts`);
+  for (const cmd of commands(body)) {
+    if (INSTALL.test(cmd) && !ignoresScripts(cmd)) {
+      violations.push(`${file}: \`${cmd.replace(/^-?\s*run:\s*/, '')}\` must pass --ignore-scripts`);
     }
   }
 
   if (file === 'ci.yml') {
     // The only install script CI may run is librdkafka's, and only for the e2e suite.
     for (const [job, lines] of Object.entries(jobsBlock(body) ?? {})) {
-      for (const line of lines) {
-        const rebuild = /\bnpm\s+rebuild\b.*$/.exec(line);
-        if (!rebuild) continue;
-        if (job !== 'e2e' || rebuild[0].trim() !== 'npm rebuild @confluentinc/kafka-javascript') {
+      for (const cmd of commands(lines.join('\n'))) {
+        if (!REBUILD.test(cmd)) continue;
+        const rebuild = cmd.replace(/^-?\s*run:\s*/, '');
+        if (job !== 'e2e' || rebuild !== 'npm rebuild @confluentinc/kafka-javascript') {
           violations.push(
-            `ci.yml: \`${rebuild[0].trim()}\` in job \`${job}\`: only \`npm rebuild @confluentinc/kafka-javascript\` in \`e2e\` is allowed`,
+            `ci.yml: \`${rebuild}\` in job \`${job}\`: only \`npm rebuild @confluentinc/kafka-javascript\` in \`e2e\` is allowed`,
           );
         }
       }
@@ -167,8 +203,9 @@ for (const file of files) {
       );
     }
     // Only runs in the canonical repository, and only on main (a manual run can pick any ref).
+    // Job level (4-space indent): a step-level `if:` would leave the job's other steps unguarded.
     if (
-      !/^\s*if:\s*github\.repository\s*==\s*'loipv\/nestjs-kafka'\s*&&\s*github\.ref\s*==\s*'refs\/heads\/main'\s*$/m.test(
+      !/^ {4}if:\s*github\.repository\s*==\s*'loipv\/nestjs-kafka'\s*&&\s*github\.ref\s*==\s*'refs\/heads\/main'\s*$/m.test(
         body,
       )
     ) {
@@ -178,10 +215,25 @@ for (const file of files) {
     }
     // `npm rebuild` runs install scripts (librdkafka's node-pre-gyp download) and the release
     // job never loads the native binding, so it must not rebuild while holding the OIDC token.
-    if (/\bnpm\s+rebuild\b/.test(body)) {
+    if (commands(body).some((c) => REBUILD.test(c))) {
       violations.push(
         'release.yml: must not run `npm rebuild` (install scripts while holding id-token)',
       );
+    }
+    // The package.json scripts it runs hold the same token: same install and rebuild rules.
+    for (const name of reachableScripts(body)) {
+      for (const cmd of commands(pkg.scripts[name])) {
+        if (INSTALL.test(cmd) && !ignoresScripts(cmd)) {
+          violations.push(
+            `package.json scripts["${name}"] (run by release.yml): \`${cmd}\` must pass --ignore-scripts`,
+          );
+        }
+        if (REBUILD.test(cmd)) {
+          violations.push(
+            `package.json scripts["${name}"] (run by release.yml): must not run \`${cmd}\``,
+          );
+        }
+      }
     }
     // The only secret it may use is the built-in GITHUB_TOKEN.
     for (const [, name] of body.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) {
@@ -212,5 +264,5 @@ if (violations.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; ci.yml ci-ok always runs and needs every job; --ignore-scripts everywhere, npm rebuild only for librdkafka in e2e; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, no npm rebuild, no NPM_TOKEN; others read-only)`,
+  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; ci.yml ci-ok always runs and needs every job; --ignore-scripts everywhere (all npm install aliases), npm rebuild only for librdkafka in e2e; release.yml push-to-main (+ workflow_dispatch) only, job-level repo/ref guard, id-token: write, no npm rebuild in it or the package scripts it reaches, no NPM_TOKEN; others read-only)`,
 );
