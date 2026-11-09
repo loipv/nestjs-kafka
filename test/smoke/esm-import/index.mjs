@@ -1,6 +1,7 @@
 // Smoke test: an ESM app imports the CommonJS library by name (Node's CJS named-export
 // detection must see every runtime export). No broker is needed.
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import 'reflect-metadata';
 import { Injectable, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
@@ -52,6 +53,15 @@ for (const [name, value] of Object.entries({
 })) {
   assert.equal(typeof value, 'function', `${name} is not exported as a function`);
 }
+
+// Every CommonJS export, not only the ones named above, must be importable by name from ESM.
+const cjsExports = Object.keys(createRequire(import.meta.url)('@loipv/nestjs-kafka'));
+const esmExports = new Set(Object.keys(await import('@loipv/nestjs-kafka')));
+assert.deepEqual(
+  cjsExports.filter((name) => !esmExports.has(name)),
+  [],
+  'CommonJS exports not visible as named ESM exports',
+);
 
 const app = await NestFactory.createApplicationContext(AppModule, { logger: false });
 let failure;
