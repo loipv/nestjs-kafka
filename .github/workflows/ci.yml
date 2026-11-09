@@ -1,68 +1,112 @@
 name: CI
 
-on: push
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its previous run. Pushes to main are never cancelled or
+# dropped: each commit gets its own group (a shared group would still replace a pending run), so
+# every main commit keeps a CI result (RELEASING.md relies on it before merging the version PR).
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint-and-unit:
-    name: Lint + Unit tests
+  checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
+      # Dependency install scripts are skipped in every job, as in release.yml, so CI also proves
+      # that build, package checks and unit tests work without them (no librdkafka binary).
+      - run: npm ci --ignore-scripts
+      - run: npm run lint:check
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run check:pkg
+      - run: npm run check:pack
+      - run: npm run check:workflows
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Lint
-        # no --fix in CI: report, don't rewrite
-        run: npx eslint "{lib,test}/**/*.ts"
-
-      - name: Unit tests
-        run: npm test
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
 
   e2e:
-    name: E2E (testcontainers)
     runs-on: ubuntu-latest
-    # ubuntu runners ship Docker — testcontainers works out of the box
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
+      - run: npm ci --ignore-scripts
+      # The e2e suite talks to a real broker, so it needs the native binding: run only this
+      # package's install script (node-pre-gyp downloads the prebuilt librdkafka binary).
+      - run: npm rebuild @confluentinc/kafka-javascript
+      - run: npm run build
+      # ubuntu runners ship Docker, so testcontainers works out of the box.
+      - run: npm run test:e2e
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Kafka e2e suite
-        run: npm run test:e2e
-
-  build-package:
-    name: Build & package (publish dry-run)
+  smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 24]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
+      - run: npm ci --ignore-scripts
+      # The fixtures install the packed tarball with install scripts, so each one fetches the
+      # librdkafka binary for the matrix Node.
+      - run: node scripts/smoke.mjs
 
-      - name: Install dependencies
-        run: npm ci
-
-      # Runs prepublishOnly (build) and packs the tarball — proves the lib
-      # builds and is publishable without uploading anything.
-      - name: Verify publishable package
-        run: npm publish --dry-run
+  # Single required status check for branch protection: fails unless every job above succeeded.
+  # Branch protection counts a skipped required check as passing, so this job must never be
+  # skipped: without an `if` a failed need would skip it, and with `!cancelled()` a cancelled run
+  # would. `always()` makes it run (and fail) whenever a need failed, was skipped, timed out or
+  # was cancelled. A pull request run superseded by a newer push therefore shows a red `ci-ok` on
+  # its old commit; that is harmless, because branch protection checks the head commit, whose own
+  # run reports `ci-ok`. `npm run check:workflows` guards the `if` and the `needs` list.
+  ci-ok:
+    if: always()
+    needs: [checks, test, e2e, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required CI job did not succeed (result: $r)"
+              exit 1
+            fi
+          done

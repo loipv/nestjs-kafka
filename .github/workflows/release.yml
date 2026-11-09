@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Canonical repository only, and only from main (workflow_dispatch can pick any ref).
+    if: github.repository == 'loipv/nestjs-kafka' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC) needs npm CLI 11.5.1 or newer.
+      - run: npm install -g --ignore-scripts npm@^11.5.1
+      # No dependency lifecycle scripts while this job holds id-token/contents/pull-requests write:
+      # a compromised dependency's install script could otherwise mint the OIDC token and publish.
+      # Nothing the job runs needs them: build, package checks and unit tests never load the
+      # librdkafka binding (the specs mock it), so it is not fetched. The package's own scripts
+      # (prepublishOnly on publish) still run.
+      - run: npm ci --ignore-scripts
+      # changesets/action v2 is the line that supports @changesets/cli v3 (v1 is for CLI v2).
+      # It uses the job's GITHUB_TOKEN through its `github-token` input default.
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          version-script: npm run version-packages
+          publish-script: npm run release
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"

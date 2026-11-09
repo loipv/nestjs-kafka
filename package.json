@@ -61,7 +61,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint:check": "eslint \"{lib,test}/**/*.ts\"",
     "check:pkg": "publint && attw --pack . --profile node16",
-    "test:smoke": "node scripts/smoke.mjs"
+    "test:smoke": "node scripts/smoke.mjs",
+    "check:workflows": "node scripts/check-workflows.mjs",
+    "lint:workflows": "node scripts/lint-workflows.mjs"
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.10.1"
