@@ -60,7 +60,8 @@
     "check:pack": "node scripts/check-pack.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint:check": "eslint \"{lib,test}/**/*.ts\"",
-    "check:pkg": "publint && attw --pack . --profile node16"
+    "check:pkg": "publint && attw --pack . --profile node16",
+    "test:smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.10.1"

@@ -1,0 +1,11 @@
+{
+  "name": "smoke-no-peers",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@nestjs/common": "^11",
+    "@nestjs/core": "^11",
+    "reflect-metadata": "^0.2",
+    "rxjs": "^7"
+  }
+}
