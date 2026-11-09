@@ -118,7 +118,7 @@ The workflow only opens it when `main` contains changesets that are not yet rele
 - **The `smoke` job** installs the packed tarball into the fixture apps under `test/smoke/` with install scripts, exactly as a consumer would, so each fixture fetches the binding for the matrix Node.
 - **The release job must never rebuild.** It holds the OIDC token and write permissions, and nothing it runs needs the binding. `npm run check:workflows` rejects `npm rebuild` in `release.yml`.
 
-To reproduce the release job's environment locally: `rm -rf node_modules && npm ci --ignore-scripts && npm run prepublishOnly`.
+To reproduce the release job's environment locally: `rm -rf node_modules && npm ci --ignore-scripts && npm run prepublishOnly`. Do not rehearse with `npm publish --dry-run`: npm passes `dry-run` down to the nested `npm pack` that `attw --pack` runs, which then writes no tarball, so `check:pkg` fails with `ENOENT … .tgz` even though a real publish works.
 
 ### A dependency needs its install script
 
