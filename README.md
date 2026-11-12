@@ -6,15 +6,15 @@ A production-ready NestJS module for Kafka client and consumer functionality bui
 
 ## Features
 
-- **Producer (KafkaClient)**: High-performance Kafka producer with `send()`, `sendBatch()`, `sendQueued()` methods
+- **Producer (KafkaClient)**: `send()`, `sendBatch()`, `sendMultiTopicBatch()`, on any registered connection
 - **Consumer**: Method decorator-based consumer with auto-discovery
 - **Batch Processing**: Intelligent batching with configurable size and timeout
 - **Key-Based Grouping**: Group messages by key within batches for ordered processing
-- **Back Pressure**: Automatic pause/resume when consumers are overwhelmed
 - **Idempotency**: In-memory duplicate prevention with TTL
-- **Dead Letter Queue (DLQ)**: Automatic retry with exponential backoff
+- **Retry and Dead Letter Queue (DLQ)**: In-process retry with exponential backoff, then an optional DLQ topic
 - **OpenTelemetry Tracing**: Distributed tracing across produce → consume with same trace ID
 - **Health Checks**: Integration with `@nestjs/terminus`
+- **Multi-connection**: Several Kafka clusters in one app
 - **Graceful Shutdown**: Proper cleanup on application shutdown
 
 ## Installation
@@ -92,15 +92,14 @@ export class OrderModule {}
 
 ```typescript
 import { Injectable } from '@nestjs/common';
-import { Consumer } from '@loipv/nestjs-kafka';
-import { KafkaMessage } from '@confluentinc/kafka-javascript/kafkajs';
+import { Consumer, KafkaMessagePayload } from '@loipv/nestjs-kafka';
 
 @Injectable()
 export class OrderConsumer {
   @Consumer('orders')
-  async handleOrder(message: KafkaMessage) {
-    const order = JSON.parse(message.value.toString());
-    console.log('Processing order:', order);
+  async handleOrder(message: KafkaMessagePayload<Order>) {
+    // Values are deserialized by default: JSON becomes an object, anything else a string
+    console.log('Processing order:', message.value.orderId);
   }
 }
 ```
@@ -213,11 +212,11 @@ ConsumerModule.forRoot({
 
 // This consumer uses module defaults (cooperative-sticky, 30s timeout)
 @Consumer('orders')
-async handleOrder(message: KafkaMessage) {}
+async handleOrder(message: KafkaMessagePayload) {}
 
 // This consumer overrides partitionAssigners but keeps sessionTimeout from defaults
 @Consumer('events', { partitionAssigners: ['roundrobin'] })
-async handleEvent(message: KafkaMessage) {}
+async handleEvent(message: KafkaMessagePayload) {}
 ```
 
 **ConsumerModuleOptions:**
@@ -239,7 +238,7 @@ async handleEvent(message: KafkaMessage) {}
 Connect to multiple Kafka clusters simultaneously:
 
 ```typescript
-// Option 1: Multiple forRoot() calls
+// Option 1: Multiple forRoot() (or forRootAsync()) calls, each with its own name
 @Module({
   imports: [
     // Primary cluster (default connection)
@@ -280,6 +279,8 @@ export class AppModule {}
 export class AppModule {}
 ```
 
+All connections share one `KafkaClient` and one consumer registry, so a consumer or a send can target any of them by name. Inject per-connection options with `@Inject(getKafkaOptionsToken('analytics'))`; the `KAFKA_MODULE_OPTIONS` token is ambiguous once there are several connections.
+
 **Using named connections in Consumer:**
 
 ```typescript
@@ -319,19 +320,13 @@ export class EventService {
   }
 }
 
-// Method 2: Use forConnection() fluent API
+// Method 2: Pass the connection per send
 @Injectable()
 export class AnotherService {
   constructor(private readonly kafka: KafkaClient) {}
 
   async sendToAnalytics() {
-    const analyticsClient = this.kafka.forConnection('analytics');
-    await analyticsClient.send('events', { value: data });
-  }
-
-  async sendWithOptions() {
-    // Or specify connection in options
-    await this.kafka.send('orders', { value: data }, { connection: 'analytics' });
+    await this.kafka.send('events', { value: data }, { connection: 'analytics' });
   }
 }
 ```
@@ -342,7 +337,7 @@ export class AnotherService {
 
 ```typescript
 @Consumer('topic-name')
-async handleMessage(message: KafkaMessage) {
+async handleMessage(message: KafkaMessagePayload) {
   // Process single message
 }
 ```
@@ -352,13 +347,16 @@ async handleMessage(message: KafkaMessage) {
 ```typescript
 @Consumer('orders', {
   batch: true,
-  batchSize: 100,        // Max messages per batch (default: 100)
-  batchTimeout: 5000,    // Max wait time in ms (default: 5000)
+  batchSize: 100, // Max messages per handler call (default: 100)
 })
-async handleBatch(messages: KafkaMessage[]) {
+async handleBatch(messages: KafkaMessagePayload[]) {
   // Process batch of messages
 }
 ```
+
+The handler receives the messages the client fetched for one partition, split into chunks of at most `batchSize`. The client fetches at most 32 messages per partition at a time, so a handler call never holds more than 32 messages.
+
+All consumers sharing a `groupId` must be either batch or non-batch; mixing them fails at startup.
 
 **Delivery semantics (at-least-once):** offsets are committed only after a batch is processed successfully. If the process crashes mid-batch (or the handler keeps failing with `skipMessageOnMaxRetries: false`), the whole batch is redelivered — make your batch handler idempotent (see [Idempotency](#idempotency)). Batch handlers get the same retry/DLQ wiring as single-message handlers.
 
@@ -390,134 +388,40 @@ async handleBatch(groupedMessages: GroupedBatch[]) {
     includeErrorInfo: true,  // Include error in DLQ headers
   },
 })
-async handlePayment(message: KafkaMessage) {
+async handlePayment(message: KafkaMessagePayload) {
   // If this throws, message will be retried then sent to DLQ
 }
 ```
 
-### DLQ on a Separate Cluster
-
-By default the DLQ topic lives on the consumer's own connection. Set `dlq.connection` to any connection registered via `KafkaModule.forRootMultiple()` to produce (and, with auto-retry, consume) the DLQ there instead:
-
-```typescript
-@Consumer('payments', {
-  connection: 'main',
-  dlq: {
-    topic: 'payments-dlq',
-    connection: 'dlq-cluster', // DLQ, DLQ auto-retry and finalDlqTopic all use this connection
-  },
-})
-```
-
-An unknown `dlq.connection` fails at startup. With `allowAutoTopicCreation`, the DLQ and `finalDlqTopic` are auto-created on the DLQ connection.
-
-### DLQ with Auto-Retry
-
-Automatically consume messages from the DLQ and re-invoke the original handler after a delay:
-
-```typescript
-@Consumer('payments', {
-  dlq: {
-    topic: 'payments-dlq',
-    maxRetries: 3,
-    retry: {
-      enabled: true,           // Enable auto DLQ consumption
-      maxRetries: 5,           // Max retries from DLQ
-      delay: 60000,            // Wait 1 minute before re-publishing
-      backoffMultiplier: 2,    // Exponential backoff
-      finalDlqTopic: 'payments-dlq-final', // Optional: final dead letter
-      fromBeginning: false,    // Start from latest (default)
-      groupId: 'custom-dlq-group', // Optional: custom consumer group
-    },
-  },
-})
-async handlePayment(message: KafkaMessagePayload) {
-  // Process payment...
-}
-```
-
-**DLQ Retry Options:**
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable auto DLQ consumption |
-| `maxRetries` | number | `3` | Max retries from DLQ before final dead letter |
-| `delay` | number | `60000` | Delay before re-publishing (ms) |
-| `backoffMultiplier` | number | `2` | Exponential backoff multiplier |
-| `finalDlqTopic` | string | - | Topic for messages that exceed max retries |
-| `fromBeginning` | boolean | `false` | Start consuming from beginning of DLQ |
-| `groupId` | string | `${dlqTopic}-retry-consumer` | Consumer group ID |
-
-**DLQ Retry Flow:**
-1. Message fails in handler → sent to DLQ topic
-2. DLQ retry consumer picks up message
-3. Waits with exponential backoff delay (immediately cancelled on graceful shutdown)
-4. Calls original handler again
-5. If still fails after max DLQ retries → sent to `finalDlqTopic` or dropped
+If sending to the DLQ fails, the message is not acknowledged: the client redelivers it and the retries start again. Nothing is dropped.
 
 **DLQ Headers:**
 
 | Header | Description |
 |--------|-------------|
 | `x-dlq-original-topic` | Original topic name |
-| `x-dlq-handler-retry-count` | Retries before sent to DLQ |
+| `x-dlq-handler-retry-count` | Attempts before the message was dead-lettered |
 | `x-dlq-timestamp` | Timestamp when sent to DLQ |
-| `x-dlq-error-message` | Error message |
-| `x-dlq-reprocess-count` | Reprocess attempts from DLQ |
-| `x-dlq-reprocess-timestamp` | Timestamp of reprocess |
-| `x-final-dlq-reason` | Reason sent to final DLQ |
+| `x-dlq-error-message` | Error message (first 1000 characters) |
+| `x-dlq-error-stack` | Error stack (first 1000 characters) |
 
-### Circuit Breaker
+To reprocess dead-lettered messages, add an ordinary `@Consumer` on the DLQ topic.
 
-The DLQ system includes a circuit breaker to prevent flooding DLQ when the system is unhealthy:
+### DLQ on a Separate Cluster
 
-```typescript
-import { CircuitBreakerService, DlqService } from '@loipv/nestjs-kafka';
-
-@Injectable()
-export class MonitoringService {
-  constructor(
-    private readonly circuitBreaker: CircuitBreakerService,
-    private readonly dlqService: DlqService,
-  ) {}
-
-  getCircuitStates() {
-    return this.circuitBreaker.getAllStates();
-  }
-
-  resetCircuit(dlqTopic: string) {
-    this.dlqService.resetCircuit(dlqTopic);
-  }
-}
-```
-
-**Circuit States:**
-- `CLOSED`: Normal operation
-- `OPEN`: DLQ blocked (failure threshold exceeded)
-- `HALF_OPEN`: Testing recovery
-
-### DLQ Metrics
-
-Track DLQ operations with the metrics service:
+By default the DLQ topic lives on the consumer's own connection. Set `dlq.connection` to any registered connection to produce the DLQ there instead:
 
 ```typescript
-import { DlqMetricsService } from '@loipv/nestjs-kafka';
-
-@Injectable()
-export class MonitoringService {
-  constructor(private readonly dlqMetrics: DlqMetricsService) {}
-
-  @Get('metrics/dlq')
-  getMetrics() {
-    return this.dlqMetrics.getMetrics();
-    // Returns:
-    // {
-    //   global: { handlerRetries, messagesSentToDlq, reprocessAttempts, ... },
-    //   byTopic: { 'orders': { handlerRetries, sentToDlq, ... } }
-    // }
-  }
-}
+@Consumer('payments', {
+  connection: 'main',
+  dlq: {
+    topic: 'payments-dlq',
+    connection: 'dlq-cluster', // the DLQ is produced on this connection
+  },
+})
 ```
+
+An unknown `dlq.connection` fails at startup. With `allowAutoTopicCreation`, the DLQ topic is auto-created on the DLQ connection.
 
 ### Consumer with Idempotency
 
@@ -526,21 +430,8 @@ export class MonitoringService {
   idempotencyKey: (msg) => msg.headers?.['event-id']?.toString(),
   idempotencyTtl: 3600000, // 1 hour
 })
-async handleEvent(message: KafkaMessage) {
+async handleEvent(message: KafkaMessagePayload) {
   // Duplicate messages (same event-id) will be skipped
-}
-```
-
-### Consumer with Back Pressure
-
-```typescript
-@Consumer('high-volume', {
-  batch: true,
-  backPressureThreshold: 80, // Pause at 80% capacity
-  maxQueueSize: 1000,
-})
-async handleHighVolume(messages: KafkaMessage[]) {
-  // Consumer will auto-pause when overwhelmed
 }
 ```
 
@@ -550,7 +441,7 @@ async handleHighVolume(messages: KafkaMessage[]) {
 @Consumer('orders', {
   disabled: true, // Consumer will be skipped during registration
 })
-async handleOrder(message: KafkaMessage) {
+async handleOrder(message: KafkaMessagePayload) {
   // This handler will not be registered
 }
 ```
@@ -567,7 +458,7 @@ Control how partitions are assigned to consumers in a consumer group:
   // Use cooperative-sticky for minimal rebalancing disruption
   partitionAssigners: ['cooperative-sticky'],
 })
-async handleOrder(message: KafkaMessage) {
+async handleOrder(message: KafkaMessagePayload) {
   // Process order
 }
 
@@ -575,7 +466,7 @@ async handleOrder(message: KafkaMessage) {
 @Consumer('events', {
   partitionAssigners: ['roundrobin', 'range'],
 })
-async handleEvent(message: KafkaMessage) {
+async handleEvent(message: KafkaMessagePayload) {
   // Process event
 }
 ```
@@ -604,7 +495,7 @@ async handleOrder(message: KafkaMessagePayload<Order>) {
 
 // Disable auto-deserialization for raw Buffer access
 @Consumer('binary-data', { deserialize: false })
-async handleBinary(message: KafkaMessage) {
+async handleBinary(message: KafkaJS.KafkaMessage) { // import { KafkaJS } from '@confluentinc/kafka-javascript'
   // message.value is Buffer
   const raw = message.value.toString('hex');
 }
@@ -644,10 +535,10 @@ async handleLogs(message: KafkaMessagePayload) {
 **Split-error policy:**
 - **Handler errors never crash the consumer.** With `skipMessageOnMaxRetries: false` (default) the message is retried **indefinitely** — never silently dropped, never lost. `retries` only marks when the skip/DLQ decision happens; it is NOT a hard limit in the default mode.
 - **Skip mode** (`skipMessageOnMaxRetries: true`): message is skipped after `retries` attempts (offset committed).
-- **Infra failures only** (Kafka connection loss, fatal client errors, DLQ send failure) kill the consumer run loop — and those **auto-restart** with the same capped exponential backoff (`retry.initialRetryTime`/`multiplier`/`maxRetryTime`), unlimited attempts. A healthy Kafka connection means a running app.
+- **Infra failures** (lost broker connection, DLQ send failure) never stop the consumer either: the client logs the error, redelivers the message and keeps reconnecting. An error while starting a consumer (connect, subscribe) fails application startup.
 - **With DLQ**: messages are sent to DLQ topic after `dlq.maxRetries` (recommended for long-retry workloads — see warning below).
 
-> **Long-retry warning:** indefinite in-process retry (`skipMessageOnMaxRetries: false`, no DLQ) blocks the partition and can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) — the consumer is then evicted from the group and rebalances every cycle while the poison message persists. No data is lost (redelivery resumes the retry; the crash is absorbed by auto-restart), but for workloads that need retries spanning minutes, configure a DLQ instead.
+> **Long-retry warning:** indefinite in-process retry (`skipMessageOnMaxRetries: false`, no DLQ) blocks the partition and can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) — the consumer is then evicted from the group and rebalances every cycle while the poison message persists. No data is lost (the consumer rejoins on its next poll and redelivery resumes the retry), but for workloads that need retries spanning minutes, configure a DLQ instead.
 
 **When to use skip mode:**
 - Multi-topic consumers where one failing topic shouldn't block others
@@ -668,42 +559,34 @@ interface ConsumerOptions {
   deserialize?: boolean;         // Default: true (auto JSON parse/string)
 
   // Consumer group settings
-  groupId?: string;
-  sessionTimeout?: number;      // Default: 30000
-  heartbeatInterval?: number;   // Default: 3000
+  groupId?: string;              // Default: `${topic}-group`
+  sessionTimeout?: number;
+  heartbeatInterval?: number;
   rebalanceTimeout?: number;
+  partitionsConsumedConcurrently?: number;
 
-  // Batch processing
+  // Batch processing (every consumer in a group must agree on `batch`)
   batch?: boolean;
-  batchSize?: number;           // Default: 100
-  batchTimeout?: number;        // Default: 5000
+  batchSize?: number;            // Default: 100 (the client fetches at most 32 per partition)
   groupByKey?: boolean;
 
   // Auto-created topic sizing (when allowAutoTopicCreation: true)
   autoCreateTopicPartitions?: number;        // Default: 1
   autoCreateTopicReplicationFactor?: number; // Default: 1
 
-  // Pressure management
-  backPressureThreshold?: number; // Default: 80
-  maxQueueSize?: number;          // Default: 1000
-
   // Idempotency
-  idempotencyKey?: (message: KafkaMessage) => string | undefined;
+  idempotencyKey?: (message: KafkaJS.KafkaMessage) => string | undefined;
   idempotencyTtl?: number;        // Default: 3600000 (1 hour)
 
   // Dead Letter Queue
   dlq?: {
     topic: string;
+    connection?: string;          // Default: the consumer's connection
     maxRetries?: number;          // Default: 3
     retryDelay?: number;          // Default: 1000
     retryBackoffMultiplier?: number; // Default: 2
-    retry?: {                     // DLQ auto-retry options
-      enabled?: boolean;
-      maxRetries?: number;
-      delay?: number;
-      backoffMultiplier?: number;
-      finalDlqTopic?: string;
-    };
+    includeOriginalHeaders?: boolean; // Default: true
+    includeErrorInfo?: boolean;   // Default: true
   };
 
   // Commit settings
@@ -711,16 +594,19 @@ interface ConsumerOptions {
   autoCommitInterval?: number;
   fromBeginning?: boolean;        // Default: false
 
+  // Topic creation
+  allowAutoTopicCreation?: boolean; // Default: false
+
   // Partition assignment strategy
   partitionAssigners?: PartitionAssigner[];  // 'roundrobin' | 'range' | 'cooperative-sticky'
 
-  // Retry options
+  // In-process retry of a failing handler
   retry?: {
-    retries?: number;             // Default: 5
+    retries?: number;             // Default: 3 (skip/DLQ milestone, see above)
+    initialRetryTime?: number;    // Default: 1000
+    multiplier?: number;          // Default: 2
     maxRetryTime?: number;        // Default: 30000
-    initialRetryTime?: number;    // Default: 300
-    multiplier?: number;          // Default: 2 (exponential backoff)
-    skipMessageOnMaxRetries?: boolean; // Default: false (throw error after max retries)
+    skipMessageOnMaxRetries?: boolean; // Default: false (retry indefinitely)
   };
 }
 ```
@@ -748,14 +634,11 @@ await kafka.sendMultiTopicBatch([
   { topic: 'topic1', messages: [{ value: 'msg1' }] },
   { topic: 'topic2', messages: [{ value: 'msg2' }] },
 ]);
-
-// Queue message for auto-batching
-await kafka.sendQueued('topic', { value: 'message' });
 ```
 
 ### Producer Options
 
-> **Note:** In v1.0.0+, `acks`, `timeout`, and `compression` are configured at the producer level in `KafkaModule.forRoot()`, not per-send call.
+> **Note:** `acks`, `timeout`, `compression` and the other producer settings are configured per connection in `KafkaModule.forRoot()`, not per send. librdkafka batches sends internally, so there is no separate queued-send API.
 
 ```typescript
 // Configure producer options at module level
@@ -763,9 +646,10 @@ KafkaModule.forRoot({
   clientId: 'my-app',
   brokers: ['localhost:9092'],
   producer: {
-    acks: -1,        // -1 (all), 0 (none), 1 (leader only)
+    acks: -1,          // -1 (all), 0 (none), 1 (leader only)
     timeout: 30000,
-    compression: 1,  // 0=None, 1=GZIP, 2=Snappy, 3=LZ4, 4=ZSTD
+    compression: 'gzip', // 'none' | 'gzip' | 'snappy' | 'lz4' | 'zstd', or 0-4
+    idempotent: true,
   },
 });
 
@@ -1053,35 +937,84 @@ The library uses W3C Trace Context format for propagation via Kafka headers:
 
 ```typescript
 // Modules
-export { KafkaModule } from './kafka.module';
-export { ConsumerModule } from './consumer.module';
+export { KafkaModule, ConsumerModule } from '@loipv/nestjs-kafka';
 
 // Decorators
-export { Consumer } from './decorators';
+export { Consumer, InjectKafkaClient } from '@loipv/nestjs-kafka';
 
 // Services
-export { KafkaClient } from './services/kafka-client.service';
-export { TracingService } from './services/tracing.service';
-export { DlqMetricsService } from './services/dlq-metrics.service';
-export { CircuitBreakerService } from './services/circuit-breaker.service';
-
-// Health
-export { KafkaHealthIndicator } from './health/kafka-health-indicator';
-
-// Interfaces
 export {
+  KafkaClient,
+  ConnectionBoundClient, // what @InjectKafkaClient('<name>') injects
+  TracingService,
+  KafkaHealthIndicator,
+} from '@loipv/nestjs-kafka';
+
+// Tokens and constants
+export {
+  DEFAULT_KAFKA_CONNECTION,
+  KAFKA_MODULE_OPTIONS,
+  CONSUMER_MODULE_OPTIONS,
+  MAX_RETRY_DELAY_MS,
+  getKafkaOptionsToken,
+  getKafkaClientToken,
+} from '@loipv/nestjs-kafka';
+
+// Deserialization helpers
+export {
+  deserializeMessage,
+  deserializeMessageValue,
+  deserializeMessageKey,
+  deserializeHeaders,
+} from '@loipv/nestjs-kafka';
+
+// Types
+export type {
   KafkaModuleOptions,
   KafkaModuleAsyncOptions,
+  KafkaOptionsFactory,
+  ProducerConfig,
+  CompressionCodec,
   TracingOptions,
   ConsumerModuleOptions,
   ConsumerOptions,
+  ConsumerRetryOptions,
   DlqOptions,
-  DlqRetryOptions,
+  PartitionAssigner,
   ProducerMessage,
   SendOptions,
+  KafkaMessagePayload,
   GroupedBatch,
-} from './interfaces';
+} from '@loipv/nestjs-kafka';
 ```
+
+## Migration Guide (from v1.x to v2.x)
+
+v2.0.0 removes features that did not work as documented or added risk without benefit, and fixes two configurations that failed at startup.
+
+### Fixed
+
+- `KafkaModule.forRoot({ producer: { ... } })` no longer crashes at startup. `compression` accepts a codec name (`'gzip'`) or the old number (`1`).
+- Several `KafkaModule.forRoot()` / `forRootAsync()` calls now share one connection registry, so a `@Consumer({ connection: 'analytics' })` finds a connection registered by a second `forRoot()`.
+
+### Removed
+
+| Removed | Replacement |
+|---|---|
+| `dlq.retry` (DLQ auto-retry consumer), `finalDlqTopic`, `DlqRetryOptions` | Add a normal `@Consumer` on the DLQ topic |
+| Circuit breaker on DLQ sends (`DlqService.getCircuitState()`, `resetCircuit()`) | None. A failed DLQ send is redelivered and retried; nothing is dropped |
+| DLQ metrics (`getMetrics()`) | None |
+| `KafkaClient.sendQueued()` | `send()` / `sendBatch()`; librdkafka batches internally (`linger.ms`) |
+| `KafkaClient.forConnection(name)` | `send(topic, message, { connection: name })` or `@InjectKafkaClient(name)` |
+| `SendOptionsWithConnection` | `SendOptions` (now `{ connection?: string }`); `ConnectionBoundClient` methods take no options |
+| `backPressureThreshold`, `maxQueueSize`, `maxConcurrency` | None (they had no effect) |
+| `batchTimeout` | None. A batch is the fetched messages, split by `batchSize` |
+| Consumer groups mixing batch and non-batch consumers | Use separate `groupId`s; mixing now fails at startup |
+| Consumer auto-restart | None needed: the client never stops on handler or broker errors. Start errors now fail application startup |
+| `ConsumerModule.clearConsumers()`, `DlqService.clearRetryState()` | None (they were no-ops) |
+| `ConsumerDiscoveryService.registerHandler()` / `clearConsumers()` | Decorate a provider method with `@Consumer()` |
+| `getKafkaCoreToken()`, `KafkaModuleOptions.defaultConsumerGroupId`, function-valued `brokers`, `ConsumerOptions.topic` | None (unused or rejected by the client) |
+| Fallback to the `idempotency-key` header when `idempotencyKey` is not set | Pass `idempotencyKey: (m) => m.headers?.['idempotency-key']?.toString()` |
 
 ## Migration Guide (from v0.x to v1.x)
 
@@ -1110,7 +1043,8 @@ npm install @confluentinc/kafka-javascript
 import { KafkaMessage } from 'kafkajs';
 
 // After (v1.x)
-import { KafkaMessage } from '@confluentinc/kafka-javascript/kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
+type KafkaMessage = KafkaJS.KafkaMessage;
 ```
 
 #### 3. Producer Options Moved to Module Level
@@ -1193,13 +1127,13 @@ confluent-kafka-javascript only supports:
 
 The following features work the same way:
 - `@Consumer()` decorator syntax
-- `KafkaClient.send()`, `sendBatch()`, `sendMultiTopicBatch()`, `sendQueued()`
+- `KafkaClient.send()`, `sendBatch()`, `sendMultiTopicBatch()`
 - DLQ configuration and retry
 - OpenTelemetry tracing
 - Health checks
 - Multi-connection support
 - Batch processing and key grouping
-- Idempotency and back pressure
+- Idempotency
 
 ## License
 

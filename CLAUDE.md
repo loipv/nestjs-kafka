@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is `@loipv/nestjs-kafka`, a production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript (librdkafka). The library provides enterprise-grade features including intelligent batch processing, idempotency guarantees, key-based grouping, and automatic pressure management.
+This is `@loipv/nestjs-kafka`, a production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript (librdkafka). The library provides batch processing, in-process retry with a DLQ, idempotency, key-based grouping, multi-connection support and OpenTelemetry tracing.
 
 ## Commands
 
@@ -47,7 +47,8 @@ Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir:
 ```
 lib/
 ├── index.ts                         # Main barrel export
-├── kafka.module.ts                  # KafkaModule - Infrastructure only
+├── kafka.module.ts                  # KafkaModule - forRoot/forRootAsync/forRootMultiple (per-connection providers)
+├── kafka-core.module.ts             # KafkaCoreModule - static global module with the shared services
 ├── consumer.module.ts               # ConsumerModule - Consumer logic
 ├── interfaces/
 │   ├── kafka-module-options.interface.ts
@@ -58,42 +59,38 @@ lib/
 │   ├── inject-kafka-client.decorator.ts # @InjectKafkaClient() for named connections
 │   └── constants.ts
 ├── services/
-│   ├── kafka-core.service.ts        # [KafkaModule] Connection management
-│   ├── kafka-client.service.ts      # [KafkaModule] Producer (send/sendBatch)
-│   ├── tracing.service.ts           # [KafkaModule] OpenTelemetry tracing
-│   ├── consumer-registry.service.ts # [ConsumerModule] Consumer lifecycle
-│   ├── batch-processor.service.ts   # [ConsumerModule] Batch accumulation
+│   ├── kafka-core.service.ts        # [KafkaCoreModule] Connection management
+│   ├── kafka-client.service.ts      # [KafkaCoreModule] Producer (send/sendBatch/sendMultiTopicBatch)
+│   ├── tracing.service.ts           # [KafkaCoreModule] OpenTelemetry tracing
+│   ├── consumer-registry.service.ts # [ConsumerModule] Consumer lifecycle and retry
+│   ├── batch-processor.service.ts   # [ConsumerModule] Batch splitting and key grouping
 │   ├── idempotency.service.ts       # [ConsumerModule] Duplicate prevention
-│   ├── pressure-manager.service.ts  # [ConsumerModule] Back pressure
-│   ├── dlq.service.ts               # [ConsumerModule] Dead Letter Queue
-│   ├── dlq-retry.service.ts         # [ConsumerModule] DLQ auto-retry
-│   ├── dlq-metrics.service.ts       # [ConsumerModule] DLQ metrics tracking
-│   └── circuit-breaker.service.ts   # [ConsumerModule] Circuit breaker for DLQ
+│   └── dlq.service.ts               # [ConsumerModule] Dead Letter Queue
 ├── discovery/
 │   └── consumer-discovery.service.ts # [ConsumerModule] Auto-discover @Consumer
 └── health/
-    └── kafka-health-indicator.ts    # [KafkaModule] Health checks
+    └── kafka-health-indicator.ts    # [KafkaCoreModule] Health checks
 ```
 
 ### Module Separation
 
-- **KafkaModule**: Infrastructure (connections, producer, health check)
+- **KafkaModule**: Infrastructure (connections, producer, health check). Every `forRoot*()` call imports the static `KafkaCoreModule`, so all connections share one `KafkaCoreService`/`KafkaClient`; each call only adds its own options token, `KAFKA_INIT_<name>` registration provider and client token.
 - **ConsumerModule**: Consumer logic (discovery, registry, batch, DLQ, etc.)
 
 ### Key Components
 
 - **KafkaModule**: Root module with `forRoot()`, `forRootAsync()`, and `forRootMultiple()` for configuration
-  - Supports multi-connection setup with named connections
+  - Supports multi-connection setup with named connections; `forRoot()`/`forRootAsync()` may be called several times
+  - Producer options are passed to the client inside its `kafkaJS` block; numeric `compression` is mapped to a codec name
 - **ConsumerModule**: Auto-discovers and registers consumer methods on app startup
   - Use `forRoot(options?)` in app module with optional default options
   - All `@Consumer()` decorated methods are automatically discovered via NestJS DiscoveryService
   - Default options are merged with `@Consumer` decorator options (decorator takes precedence)
-- **KafkaClient**: Producer service with `send()`, `sendBatch()`, `sendQueued()`, `sendMultiTopicBatch()` methods
-  - `sendQueued()`: Buffers messages and auto-flushes at 100 messages or 100ms timeout
-  - `forConnection(name)`: Returns a `ConnectionBoundClient` for fluent named-connection usage
-- **@Consumer() decorator**: Method decorator to define topic consumers with batch/pressure/DLQ options
+- **KafkaClient**: Producer service with `send()`, `sendBatch()`, `sendMultiTopicBatch()`; pass `{ connection }` to target a named connection
+  - `ConnectionBoundClient`: what `@InjectKafkaClient(name)` injects for a non-default connection
+- **@Consumer() decorator**: Method decorator to define topic consumers with batch/retry/DLQ options
   - Default `groupId`: `${topic}-group` if not specified
-  - Multiple topics with the same `groupId` share one consumer group (multi-topic consumer)
+  - Multiple topics with the same `groupId` share one consumer group (multi-topic consumer); they must all be batch or all non-batch (mixing throws at registration)
   - `disabled: true`: Skip this consumer at startup without removing the decorator
   - `deserialize: false`: Receive raw `KafkaMessage` without JSON/string deserialization (default: true)
 - **@InjectKafkaClient() decorator**: Inject named connection clients in services
@@ -102,13 +99,10 @@ lib/
 ### Features
 
 - Multi-connection support (connect to multiple Kafka clusters simultaneously)
-- Intelligent batch processing with configurable size and timeout
+- Batch processing: fetched messages split into handler calls of at most `batchSize` (the client fetches at most 32 per partition)
 - Key-based message grouping for ordered processing within batches
-- Back pressure management (pause/resume consumption)
-- In-memory idempotency with TTL
-- Dead Letter Queue with exponential backoff retry and auto-retry from DLQ
-- Circuit breaker for DLQ operations
-- DLQ metrics tracking
+- In-memory idempotency with TTL (requires an `idempotencyKey` extractor)
+- In-process retry with capped exponential backoff, then an optional Dead Letter Queue (optionally on another connection)
 - **OpenTelemetry tracing** (distributed tracing across produce → consume)
 - Graceful shutdown with proper cleanup
 
@@ -121,9 +115,9 @@ Handler failures are retried **in-process** with capped exponential backoff (`in
 1. **Default** (`skipMessageOnMaxRetries: false`): the message is retried **indefinitely** — never dropped, never lost. `retry.retries` is only a milestone for the skip/DLQ decision, NOT a hard limit in this mode.
 2. **Skip mode** (`skipMessageOnMaxRetries: true`): message is skipped after `retries` attempts and the offset commits.
 
-**Auto-restart (infra crashes only):** only infra failures (Kafka connection loss, fatal client errors, DLQ send failure) kill the consumer run loop (surfaced via `consumer.run()` rejection). `scheduleConsumerRestart` rebuilds the consumer (new instance, same groupId) with the same capped exponential backoff, **unlimited attempts** — when the Kafka connection is healthy again, the app recovers on its own.
+**Infra failures:** `consumer.run()` in confluent-kafka-javascript returns as soon as the fetch loop starts and never rejects for handler or broker errors: the client logs them, seeks back and redelivers the message, and keeps reconnecting on its own. There is no library-level restart. The registry awaits `run()`, so an error while starting a consumer (connect, subscribe, run) fails application startup. A DLQ send failure rejects out of the handler, so the client redelivers the message and the retry ladder starts again.
 
-**Known limitation:** indefinite in-process retry can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) → the consumer is evicted and rebalances periodically while a poison message persists (no data loss; the crash is absorbed by auto-restart). For retries spanning minutes, configure a DLQ.
+**Known limitation:** indefinite in-process retry can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) → the consumer is evicted and rejoins on its next poll while a poison message persists (no data loss). For retries spanning minutes, configure a DLQ.
 
 **Batch consumers** share the same policy and resolve offsets only after a successful flush (at-least-once) — batch handlers must be idempotent.
 
@@ -156,11 +150,11 @@ async handleLogs(message: KafkaMessage) {
 
 ### Retry Mechanism With DLQ
 
-When **using DLQ**, failed messages are sent to the DLQ topic after max retries. The message is NOT skipped or dropped.
+When **using DLQ**, failed messages are sent to the DLQ topic after `dlq.maxRetries`. The message is NOT skipped or dropped: if the DLQ send fails, it is redelivered. Reprocessing the DLQ is the application's job (an ordinary `@Consumer` on the DLQ topic).
 
 ### Graceful Shutdown & In-Flight Delays
 
-`consumer-registry.service.ts` (the single retry/restart `sleep()`) and `dlq-retry.service.ts` (DLQ reprocess delays) use a `shutdownResolvers: Set<() => void>` pattern with a cancellable `sleep()` helper. On shutdown, all pending delays are immediately resolved so the process does not block waiting for delays that can be up to several minutes; `sleep()` also resolves immediately if shutdown was signalled before it registered. A retry aborted by shutdown rethrows **once** so the offset is never committed (message redelivered next boot). Any new code that adds sleep-based retry loops must follow this same pattern.
+`consumer-registry.service.ts` (the retry `sleep()`) uses a `shutdownResolvers: Set<() => void>` pattern with a cancellable `sleep()` helper. On shutdown, all pending delays are immediately resolved so the process does not block waiting for delays that can be up to several minutes; `sleep()` also resolves immediately if shutdown was signalled before it registered. A retry aborted by shutdown rethrows **once** so the offset is never committed (message redelivered next boot). Any new code that adds sleep-based retry loops must follow this same pattern.
 
 ### OpenTelemetry Tracing
 
