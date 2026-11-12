@@ -10,11 +10,13 @@ const DEFAULT_BATCH_SIZE = 100;
 export class BatchProcessorService {
   /**
    * Split fetched messages into handler batches of at most `batchSize`.
-   * A missing, zero or negative `batchSize` means 100.
+   * Anything but a positive integer (missing, 0, negative, fractional) means 100.
    */
   splitIntoBatches<T>(messages: T[], batchSize?: number): T[][] {
     const size =
-      batchSize !== undefined && batchSize > 0 ? batchSize : DEFAULT_BATCH_SIZE;
+      Number.isInteger(batchSize) && batchSize! > 0
+        ? batchSize!
+        : DEFAULT_BATCH_SIZE;
     const batches: T[][] = [];
     for (let i = 0; i < messages.length; i += size) {
       batches.push(messages.slice(i, i + size));

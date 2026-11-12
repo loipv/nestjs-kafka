@@ -18,10 +18,13 @@ const COMPRESSION_CODECS: readonly CompressionCodec[] = [
 
 type Kafka = InstanceType<typeof KafkaJS.Kafka>;
 type Producer = KafkaJS.Producer;
+type ProducerConstructorConfig = Parameters<Kafka['producer']>[0];
 
 interface KafkaConnection {
   kafka: Kafka;
   producer: Producer;
+  /** Kept so a producer whose connect failed can be rebuilt identically */
+  producerConfig: ProducerConstructorConfig;
   options: KafkaModuleOptions;
   isProducerConnected: boolean;
   connectingPromise: Promise<void> | null;
@@ -89,15 +92,15 @@ export class KafkaCoreService {
 
     const kafka = new KafkaJS.Kafka({ kafkaJS: kafkaConfig });
 
-    const producer = kafka.producer(
-      options.producer
-        ? { kafkaJS: this.toProducerConfig(name, options.producer) }
-        : undefined,
-    );
+    const producerConfig: ProducerConstructorConfig = options.producer
+      ? { kafkaJS: this.toProducerConfig(name, options.producer) }
+      : undefined;
+    const producer = kafka.producer(producerConfig);
 
     this.connections.set(name, {
       kafka,
       producer,
+      producerConfig,
       options,
       isProducerConnected: false,
       connectingPromise: null,
@@ -161,6 +164,15 @@ export class KafkaCoreService {
         connection.isProducerConnected = true;
         this.logger.log(`Producer connected for "${connectionName}"`);
       })
+      .catch((error: unknown) => {
+        // The client allows connect() once per producer: after a failure it
+        // only answers "Connect has already been called elsewhere". Swap in a
+        // fresh producer so the next send (e.g. a DLQ redelivery) reconnects.
+        connection.producer = connection.kafka.producer(
+          connection.producerConfig,
+        );
+        throw error;
+      })
       .finally(() => {
         connection.connectingPromise = null;
       });
@@ -217,7 +229,14 @@ export class KafkaCoreService {
     connectionName: string,
     producer: ProducerConfig,
   ): KafkaJS.ProducerConfig {
-    const { compression, ...rest } = producer;
+    // An explicit `undefined` (e.g. an unset env var in forRootAsync) must not
+    // reach the client: it checks key presence and hands the value to librdkafka.
+    const rest = Object.fromEntries(
+      Object.entries(producer).filter(
+        ([key, value]) => key !== 'compression' && value !== undefined,
+      ),
+    );
+    const { compression } = producer;
     if (compression === undefined) {
       return rest as KafkaJS.ProducerConfig;
     }

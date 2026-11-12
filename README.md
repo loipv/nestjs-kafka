@@ -1,6 +1,6 @@
 # @loipv/nestjs-kafka
 
-A production-ready NestJS module for Kafka client and consumer functionality built on top of [confluent-kafka-javascript](https://github.com/confluentinc/confluent-kafka-javascript). This library provides enterprise-grade features including intelligent batch processing, idempotency guarantees, key-based grouping, and automatic pressure management.
+A production-ready NestJS module for Kafka client and consumer functionality built on top of [confluent-kafka-javascript](https://github.com/confluentinc/confluent-kafka-javascript). It provides batch processing, in-process retry with a Dead Letter Queue, idempotency, key-based grouping, multi-connection support and OpenTelemetry tracing.
 
 > **Note:** Starting from v1.0.0, this library uses `@confluentinc/kafka-javascript` instead of `kafkajs` for better performance and official Confluent support. See [Migration Guide](#migration-guide-from-v0x-to-v1x) for upgrade instructions.
 
@@ -8,7 +8,7 @@ A production-ready NestJS module for Kafka client and consumer functionality bui
 
 - **Producer (KafkaClient)**: `send()`, `sendBatch()`, `sendMultiTopicBatch()`, on any registered connection
 - **Consumer**: Method decorator-based consumer with auto-discovery
-- **Batch Processing**: Intelligent batching with configurable size and timeout
+- **Batch Processing**: Batch handlers with a configurable maximum batch size
 - **Key-Based Grouping**: Group messages by key within batches for ordered processing
 - **Idempotency**: In-memory duplicate prevention with TTL
 - **Retry and Dead Letter Queue (DLQ)**: In-process retry with exponential backoff, then an optional DLQ topic
@@ -358,7 +358,7 @@ The handler receives the messages the client fetched for one partition, split in
 
 All consumers sharing a `groupId` must be either batch or non-batch; mixing them fails at startup.
 
-**Delivery semantics (at-least-once):** offsets are committed only after a batch is processed successfully. If the process crashes mid-batch (or the handler keeps failing with `skipMessageOnMaxRetries: false`), the whole batch is redelivered — make your batch handler idempotent (see [Idempotency](#idempotency)). Batch handlers get the same retry/DLQ wiring as single-message handlers.
+**Delivery semantics (at-least-once):** offsets are committed only after a batch is processed successfully. If the process crashes mid-batch (or the handler keeps failing with `skipMessageOnMaxRetries: false`), the whole batch is redelivered — make your batch handler idempotent (see [Consumer with Idempotency](#consumer-with-idempotency)). Batch handlers get the same retry/DLQ wiring as single-message handlers.
 
 ### Batch with Key Grouping
 
@@ -995,6 +995,8 @@ v2.0.0 removes features that did not work as documented or added risk without be
 ### Fixed
 
 - `KafkaModule.forRoot({ producer: { ... } })` no longer crashes at startup. `compression` accepts a codec name (`'gzip'`) or the old number (`1`).
+- Producer options left `undefined` (for example an unset environment variable in `forRootAsync`) are ignored instead of making every send fail.
+- A producer whose first connect fails (for example a DLQ cluster that is down) is rebuilt, so the next send reconnects once the broker is back.
 - Several `KafkaModule.forRoot()` / `forRootAsync()` calls now share one connection registry, so a `@Consumer({ connection: 'analytics' })` finds a connection registered by a second `forRoot()`.
 
 ### Removed
@@ -1007,14 +1009,14 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | `KafkaClient.sendQueued()` | `send()` / `sendBatch()`; librdkafka batches internally (`linger.ms`) |
 | `KafkaClient.forConnection(name)` | `send(topic, message, { connection: name })` or `@InjectKafkaClient(name)` |
 | `SendOptionsWithConnection` | `SendOptions` (now `{ connection?: string }`); `ConnectionBoundClient` methods take no options |
-| `backPressureThreshold`, `maxQueueSize`, `maxConcurrency` | None (they had no effect) |
+| `backPressureThreshold`, `maxQueueSize`, `maxConcurrency`, and the `PressureState` / `PressureManagerOptions` types | None (they had no effect) |
 | `batchTimeout` | None. A batch is the fetched messages, split by `batchSize` |
 | Consumer groups mixing batch and non-batch consumers | Use separate `groupId`s; mixing now fails at startup |
-| Consumer auto-restart | None needed: the client never stops on handler or broker errors. Start errors now fail application startup |
+| Consumer auto-restart | None needed: the client never stops on handler or broker errors. An error from `consumer.run()` at startup now fails application startup, like connect and subscribe errors already did |
 | `ConsumerModule.clearConsumers()`, `DlqService.clearRetryState()` | None (they were no-ops) |
 | `ConsumerDiscoveryService.registerHandler()` / `clearConsumers()` | Decorate a provider method with `@Consumer()` |
 | `getKafkaCoreToken()`, `KafkaModuleOptions.defaultConsumerGroupId`, function-valued `brokers`, `ConsumerOptions.topic` | None (unused or rejected by the client) |
-| Fallback to the `idempotency-key` header when `idempotencyKey` is not set | Pass `idempotencyKey: (m) => m.headers?.['idempotency-key']?.toString()` |
+| `new TracingService(options)` | `new TracingService()` then `configure(options.tracing)`; only matters if you construct it yourself (Nest does this for you) |
 
 ## Migration Guide (from v0.x to v1.x)
 

@@ -302,8 +302,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         `Consumer group "${groupId}" subscribed to topics: ${topicList.join(', ')}`,
       );
 
-      // Determine if we should use batch or message processing
-      // If any consumer in the group uses batch, we need special handling
+      // Every consumer in a group is batch or every one is not (enforced at registration)
       if (group.isBatch) {
         await this.startBatchGroupConsumer(group);
       } else {

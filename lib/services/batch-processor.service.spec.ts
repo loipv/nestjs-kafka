@@ -12,7 +12,7 @@ describe('BatchProcessorService', () => {
       expect(svc.splitIntoBatches([], 2)).toEqual([]);
     });
 
-    it.each([undefined, 0, -3])(
+    it.each([undefined, 0, -3, 0.5, 2.5])(
       'falls back to 100 for batchSize %p',
       (size) => {
         const items = Array.from({ length: 150 }, (_, i) => i);

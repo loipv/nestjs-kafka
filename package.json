@@ -39,7 +39,6 @@
     "dlq",
     "dead-letter-queue",
     "idempotency",
-    "back-pressure",
     "microservices",
     "message-queue",
     "event-driven",

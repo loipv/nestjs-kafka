@@ -192,7 +192,7 @@ export interface ConsumerModuleOptions {
 /** Injection token for ConsumerModule options */
 export const CONSUMER_MODULE_OPTIONS = Symbol('CONSUMER_MODULE_OPTIONS');
 
-/** Hard cap for every computed retry delay (message retry and restart backoff) */
+/** Hard cap for every computed message retry delay */
 export const MAX_RETRY_DELAY_MS = 30000;
 
 /**

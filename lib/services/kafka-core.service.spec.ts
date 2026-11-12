@@ -68,6 +68,44 @@ describe('KafkaCoreService', () => {
       expect(lastProducerFactory().mock.calls[0][0]).toBeUndefined();
     });
 
+    it('drops producer options set to undefined', () => {
+      core.registerConnection({
+        ...opts,
+        producer: { acks: -1, timeout: undefined, idempotent: undefined },
+      });
+      const config = lastProducerFactory().mock.calls[0][0];
+      expect(Object.keys(config.kafkaJS)).toEqual(['acks']);
+    });
+
+    it('replaces a producer whose connect failed so the next connect retries', async () => {
+      const failed = {
+        connect: jest
+          .fn()
+          .mockRejectedValue(new Error('broker transport failure')),
+      };
+      const fresh = { connect: jest.fn().mockResolvedValue(undefined) };
+      const producerFactory = jest
+        .fn()
+        .mockReturnValueOnce(failed)
+        .mockReturnValueOnce(fresh);
+      (KafkaJS.Kafka as unknown as jest.Mock).mockImplementationOnce(() => ({
+        producer: producerFactory,
+      }));
+
+      core.registerConnection({ ...opts, producer: { acks: -1 } });
+      await expect(core.connectProducer()).rejects.toThrow(
+        'broker transport failure',
+      );
+      await core.connectProducer();
+
+      expect(fresh.connect).toHaveBeenCalledTimes(1);
+      expect(core.getProducer()).toBe(fresh);
+      expect(core.isProducerConnected()).toBe(true);
+      expect(producerFactory).toHaveBeenNthCalledWith(2, {
+        kafkaJS: { acks: -1 },
+      });
+    });
+
     it('rejects an unknown compression value at registration', () => {
       expect(() =>
         core.registerConnection({
