@@ -126,6 +126,38 @@ describe('ConsumerModule', () => {
     expect(registry.gracefulShutdown).not.toHaveBeenCalled();
   });
 
+  it("starts consumers after every provider's onModuleInit", async () => {
+    let ready = false;
+    @Injectable()
+    class WarmUp {
+      onModuleInit() {
+        ready = true;
+      }
+    }
+    const seen: boolean[] = [];
+    const startAll = jest
+      .spyOn(ConsumerRegistryService.prototype, 'startAll')
+      .mockImplementation(() => {
+        seen.push(ready);
+        return Promise.resolve();
+      });
+    const mod = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [TestDependencyService, TestConsumer, WarmUp],
+    }).compile();
+    try {
+      await mod.init();
+      expect(seen).toEqual([true]);
+      expect((mod.get(ConsumerModule) as any).onModuleInit).toBeUndefined();
+    } finally {
+      startAll.mockRestore();
+      await mod.close();
+    }
+  });
+
   it('no longer exposes the static clearConsumers()', () => {
     expect((ConsumerModule as any).clearConsumers).toBeUndefined();
   });

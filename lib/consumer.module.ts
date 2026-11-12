@@ -4,7 +4,7 @@
 import {
   Module,
   DynamicModule,
-  OnModuleInit,
+  OnApplicationBootstrap,
   OnApplicationShutdown,
   Global,
   Provider,
@@ -63,7 +63,9 @@ const CONSUMER_PROVIDERS: Provider[] = [
  */
 @Global()
 @Module({})
-export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
+export class ConsumerModule
+  implements OnApplicationBootstrap, OnApplicationShutdown
+{
   private isStarted = false;
 
   constructor(
@@ -108,7 +110,11 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
     };
   }
 
-  async onModuleInit(): Promise<void> {
+  /**
+   * Consumers start after every provider's onModuleInit (database pools,
+   * caches...), so the first message never reaches a half-initialised app.
+   */
+  async onApplicationBootstrap(): Promise<void> {
     // Only start once per instance
     if (this.isStarted) {
       return;
