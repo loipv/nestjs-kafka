@@ -55,7 +55,7 @@ export interface KafkaModuleOptions {
   /** Connection name for multi-connection support. Default: 'default' */
   name?: string;
   clientId: string;
-  brokers: string[] | (() => string[] | Promise<string[]>);
+  brokers: string[];
 
   ssl?: boolean | object;
   sasl?: SASLOptions;
@@ -67,8 +67,6 @@ export interface KafkaModuleOptions {
   retry?: RetryOptions;
 
   producer?: ProducerConfig;
-
-  defaultConsumerGroupId?: string;
 
   logLevel?: 'NOTHING' | 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
 
@@ -100,11 +98,6 @@ export const KAFKA_MODULE_OPTIONS = Symbol('KAFKA_MODULE_OPTIONS');
 /** Get the injection token for a specific Kafka connection */
 export function getKafkaOptionsToken(name?: string): string {
   return `KAFKA_OPTIONS_${name || DEFAULT_KAFKA_CONNECTION}`;
-}
-
-/** Get the injection token for a specific Kafka core service */
-export function getKafkaCoreToken(name?: string): string {
-  return `KAFKA_CORE_${name || DEFAULT_KAFKA_CONNECTION}`;
 }
 
 /** Get the injection token for a specific Kafka client */

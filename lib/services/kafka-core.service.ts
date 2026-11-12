@@ -45,7 +45,7 @@ export class KafkaCoreService {
     }
 
     const brokers = options.brokers;
-    if (!brokers || (Array.isArray(brokers) && brokers.length === 0)) {
+    if (!brokers || brokers.length === 0) {
       throw new Error(
         `Kafka connection "${name}": brokers is required and cannot be empty`,
       );
@@ -61,7 +61,7 @@ export class KafkaCoreService {
     // Build Kafka config with only defined values to avoid undefined property issues
     const kafkaConfig: KafkaJS.KafkaConfig = {
       clientId: options.clientId,
-      brokers: options.brokers as string[],
+      brokers: options.brokers,
       logLevel: this.mapLogLevel(options.logLevel),
       // Use default library logger - custom logger can cause issues with internal log formatting
     };
@@ -166,20 +166,6 @@ export class KafkaCoreService {
       });
 
     await connection.connectingPromise;
-  }
-
-  /**
-   * Get options for a specific connection
-   */
-  getOptions(name?: string): KafkaModuleOptions {
-    const connectionName = name || DEFAULT_KAFKA_CONNECTION;
-    const connection = this.connections.get(connectionName);
-
-    if (!connection) {
-      throw new Error(`Kafka connection "${connectionName}" not found`);
-    }
-
-    return connection.options;
   }
 
   /**

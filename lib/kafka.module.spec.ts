@@ -1,7 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { KafkaModule } from './kafka.module';
 import { KafkaCoreService } from './services/kafka-core.service';
-import { KafkaClient } from './services/kafka-client.service';
+import {
+  ConnectionBoundClient,
+  KafkaClient,
+} from './services/kafka-client.service';
+import { TracingService } from './services/tracing.service';
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
 
 // Mock @confluentinc/kafka-javascript
@@ -84,6 +88,78 @@ describe('KafkaModule', () => {
     it('should register connection', () => {
       const coreService = module.get<KafkaCoreService>(KafkaCoreService);
       expect(coreService.hasConnection()).toBe(true);
+    });
+  });
+
+  describe('several connections share one core', () => {
+    const A = { clientId: 'a', brokers: ['localhost:9092'] };
+    const B = { name: 'analytics', clientId: 'b', brokers: ['localhost:9093'] };
+    const names = (m: TestingModule) =>
+      m.get(KafkaCoreService, { strict: false }).getConnectionNames().sort();
+    const tracingEnabled = (m: TestingModule) =>
+      m.get(TracingService, { strict: false }).isEnabled();
+    let m: TestingModule | undefined;
+
+    const compile = async (imports: any[]) => {
+      m = await Test.createTestingModule({ imports }).compile();
+      return m;
+    };
+
+    afterEach(async () => {
+      await m?.close();
+      m = undefined;
+    });
+
+    it('two forRoot() calls register into one KafkaCoreService', async () => {
+      const mod = await compile([
+        KafkaModule.forRoot(A),
+        KafkaModule.forRoot(B),
+      ]);
+      expect(names(mod)).toEqual(['analytics', 'default']);
+      expect(
+        mod.get('KAFKA_CLIENT_analytics', { strict: false }),
+      ).toBeInstanceOf(ConnectionBoundClient);
+      expect(mod.get('KAFKA_CLIENT_default', { strict: false })).toBe(
+        mod.get(KafkaClient, { strict: false }),
+      );
+    });
+
+    it('forRootMultiple registers every connection', async () => {
+      const mod = await compile([KafkaModule.forRootMultiple([A, B])]);
+      expect(names(mod)).toEqual(['analytics', 'default']);
+    });
+
+    it('two forRootAsync() calls register into one KafkaCoreService', async () => {
+      const mod = await compile([
+        KafkaModule.forRootAsync({ useFactory: () => A }),
+        KafkaModule.forRootAsync({ name: 'analytics', useFactory: () => B }),
+      ]);
+      expect(names(mod)).toEqual(['analytics', 'default']);
+    });
+
+    it('two unnamed forRoot() calls boot with one connection', async () => {
+      const mod = await compile([
+        KafkaModule.forRoot(A),
+        KafkaModule.forRoot({ ...A, clientId: 'a2' }),
+      ]);
+      expect(names(mod)).toEqual(['default']);
+    });
+
+    it('enables tracing when only the second connection asks for it', async () => {
+      const mod = await compile([
+        KafkaModule.forRoot(A),
+        KafkaModule.forRoot({ ...B, tracing: { enabled: true } }),
+      ]);
+      expect(tracingEnabled(mod)).toBe(true);
+    });
+
+    it('enables tracing configured through forRootAsync', async () => {
+      const mod = await compile([
+        KafkaModule.forRootAsync({
+          useFactory: () => ({ ...A, tracing: { enabled: true } }),
+        }),
+      ]);
+      expect(tracingEnabled(mod)).toBe(true);
     });
   });
 

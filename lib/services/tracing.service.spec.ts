@@ -9,7 +9,8 @@ beforeAll(() => {
 
 describe('TracingService', () => {
   it('is disabled by default and passes headers through', () => {
-    const svc = new TracingService(undefined);
+    const svc = new TracingService();
+    svc.configure(undefined);
     expect(svc.isEnabled()).toBe(false);
     const { span, headers } = svc.startProduceSpan({
       topic: 't',
@@ -20,7 +21,8 @@ describe('TracingService', () => {
   });
 
   it('injects W3C traceparent when enabled', () => {
-    const svc = new TracingService({ tracing: { enabled: true } } as any);
+    const svc = new TracingService();
+    svc.configure({ enabled: true });
     expect(svc.isEnabled()).toBe(true);
     const { span, headers } = svc.startProduceSpan({ topic: 't' });
     expect(span).not.toBeNull();
@@ -30,7 +32,8 @@ describe('TracingService', () => {
   });
 
   it('withConsumeSpan links the producer trace from headers and propagates errors', async () => {
-    const svc = new TracingService({ tracing: { enabled: true } } as any);
+    const svc = new TracingService();
+    svc.configure({ enabled: true });
     const traceparent = `00-${'a'.repeat(32)}-${'b'.repeat(16)}-01`;
 
     // Consumer span must inherit the producer's traceId from the header
@@ -51,5 +54,14 @@ describe('TracingService', () => {
         },
       ),
     ).rejects.toThrow('boom');
+  });
+
+  it('first enabling configure() wins; later calls are ignored', () => {
+    const svc = new TracingService();
+    svc.configure(undefined);
+    expect(svc.isEnabled()).toBe(false);
+    svc.configure({ enabled: true });
+    svc.configure({ enabled: false });
+    expect(svc.isEnabled()).toBe(true);
   });
 });

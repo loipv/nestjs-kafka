@@ -1,6 +1,6 @@
-import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
-import { KAFKA_MODULE_OPTIONS, KafkaModuleOptions } from '../interfaces';
+import { TracingOptions } from '../interfaces';
 
 type IHeaders = KafkaJS.IHeaders;
 
@@ -26,15 +26,6 @@ const SEMATTRS_MESSAGING_BATCH_MESSAGE_COUNT = 'messaging.batch.message_count';
 // W3C Trace Context header names
 const TRACEPARENT_HEADER = 'traceparent';
 const TRACESTATE_HEADER = 'tracestate';
-
-export interface TracingOptions {
-  /** Enable tracing. Default: false */
-  enabled?: boolean;
-  /** Custom tracer name. Default: '@loipv/nestjs-kafka' */
-  tracerName?: string;
-  /** Custom tracer version. Default: package version */
-  tracerVersion?: string;
-}
 
 interface ProduceSpanOptions {
   topic: string;
@@ -69,29 +60,27 @@ export class TracingService {
   private readonly logger = new Logger(TracingService.name);
   private otel: OtelApi | null = null;
   private tracer: Tracer | null = null;
-  private readonly enabled: boolean;
+  private enabled = false;
 
-  constructor(
-    @Optional()
-    @Inject(KAFKA_MODULE_OPTIONS)
-    private readonly options?: KafkaModuleOptions,
-  ) {
-    this.enabled = options?.tracing?.enabled ?? false;
-
-    if (this.enabled) {
-      this.initializeOpenTelemetry();
-    }
+  /**
+   * Called once per registered connection. The first call with
+   * `enabled: true` turns tracing on and supplies the tracer name/version;
+   * every other call is a no-op (one tracer per application).
+   */
+  configure(tracing?: TracingOptions): void {
+    if (this.enabled || !tracing?.enabled) return;
+    this.enabled = true;
+    this.initializeOpenTelemetry(tracing);
   }
 
-  private initializeOpenTelemetry(): void {
+  private initializeOpenTelemetry(tracing: TracingOptions): void {
     try {
       // Dynamic import to avoid errors when OpenTelemetry is not installed
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       this.otel = require('@opentelemetry/api') as OtelApi;
 
-      const tracerName =
-        this.options?.tracing?.tracerName ?? '@loipv/nestjs-kafka';
-      const tracerVersion = this.options?.tracing?.tracerVersion ?? '0.0.1';
+      const tracerName = tracing.tracerName ?? '@loipv/nestjs-kafka';
+      const tracerVersion = tracing.tracerVersion ?? '0.0.1';
 
       this.tracer = this.otel.trace.getTracer(tracerName, tracerVersion);
       this.logger.log('OpenTelemetry tracing initialized');

@@ -8,6 +8,7 @@ import {
   getKafkaOptionsToken,
   getKafkaClientToken,
 } from './interfaces';
+import { KafkaCoreModule } from './kafka-core.module';
 import { KafkaCoreService } from './services/kafka-core.service';
 import {
   KafkaClient,
@@ -15,202 +16,105 @@ import {
 } from './services/kafka-client.service';
 import { TracingService } from './services/tracing.service';
 
-import { KafkaHealthIndicator } from './health/kafka-health-indicator';
-
-// Core infrastructure providers - consumer services are now in ConsumerModule
-const CORE_PROVIDERS: Provider[] = [
-  KafkaCoreService,
-  KafkaClient,
-  KafkaHealthIndicator,
-  TracingService,
-];
-
 @Global()
 @Module({})
 export class KafkaModule {
   /**
-   * Register a single Kafka connection
+   * Register a single Kafka connection. Can be called several times with
+   * different `name`s; all connections share one KafkaCoreService.
    */
   static forRoot(options: KafkaModuleOptions): DynamicModule {
-    const connectionName = options.name || DEFAULT_KAFKA_CONNECTION;
-    const optionsToken = getKafkaOptionsToken(connectionName);
-    const clientToken = getKafkaClientToken(connectionName);
-
-    const providers: Provider[] = [
-      {
-        provide: KAFKA_MODULE_OPTIONS,
-        useValue: options,
-      },
-      {
-        provide: optionsToken,
-        useValue: options,
-      },
-      {
-        provide: `KAFKA_INIT_${connectionName}`,
-        useFactory: (kafkaCore: KafkaCoreService) => {
-          kafkaCore.registerConnection(options);
-          return true;
-        },
-        inject: [KafkaCoreService],
-      },
-      // Named client provider for @InjectKafkaClient(connectionName)
-      {
-        provide: clientToken,
-        useFactory: (
-          kafkaClient: KafkaClient,
-        ): KafkaClient | ConnectionBoundClient => {
-          if (connectionName === DEFAULT_KAFKA_CONNECTION) {
-            return kafkaClient;
-          }
-          return kafkaClient.forConnection(connectionName);
-        },
-        inject: [KafkaClient],
-      },
-      ...CORE_PROVIDERS,
-    ];
-
-    return {
-      module: KafkaModule,
-      global: true,
-      providers,
-      exports: [
-        KAFKA_MODULE_OPTIONS,
-        optionsToken,
-        clientToken,
-        KafkaCoreService,
-        KafkaClient,
-        KafkaHealthIndicator,
-        TracingService,
-      ],
-    };
+    const name = options.name || DEFAULT_KAFKA_CONNECTION;
+    return this.build(
+      [name],
+      [{ provide: getKafkaOptionsToken(name), useValue: options }],
+    );
   }
 
   /**
-   * Register multiple Kafka connections at once
+   * Register several Kafka connections at once
    */
   static forRootMultiple(optionsArray: KafkaModuleOptions[]): DynamicModule {
-    const providers: Provider[] = [];
-    const exports: (string | symbol | Provider)[] = [
-      KAFKA_MODULE_OPTIONS,
-      KafkaCoreService,
-      KafkaClient,
-      KafkaHealthIndicator,
-      TracingService,
-    ];
-
-    // Create providers for each connection
-    for (const options of optionsArray) {
-      const connectionName = options.name || DEFAULT_KAFKA_CONNECTION;
-      const optionsToken = getKafkaOptionsToken(connectionName);
-      const clientToken = getKafkaClientToken(connectionName);
-
-      providers.push(
-        {
-          provide: optionsToken,
-          useValue: options,
-        },
-        {
-          provide: `KAFKA_INIT_${connectionName}`,
-          useFactory: (kafkaCore: KafkaCoreService) => {
-            kafkaCore.registerConnection(options);
-            return true;
-          },
-          inject: [KafkaCoreService],
-        },
-        // Named client provider for @InjectKafkaClient(connectionName)
-        {
-          provide: clientToken,
-          useFactory: (
-            kafkaClient: KafkaClient,
-          ): KafkaClient | ConnectionBoundClient => {
-            if (connectionName === DEFAULT_KAFKA_CONNECTION) {
-              return kafkaClient;
-            }
-            return kafkaClient.forConnection(connectionName);
-          },
-          inject: [KafkaClient],
-        },
-      );
-
-      exports.push(optionsToken);
-      exports.push(clientToken);
-    }
-
-    // Use first connection as default
-    const defaultOptions = optionsArray[0];
-    providers.push(
-      {
-        provide: KAFKA_MODULE_OPTIONS,
-        useValue: defaultOptions,
-      },
-      ...CORE_PROVIDERS,
+    const names = optionsArray.map((o) => o.name || DEFAULT_KAFKA_CONNECTION);
+    return this.build(
+      names,
+      optionsArray.map((options, i) => ({
+        provide: getKafkaOptionsToken(names[i]),
+        useValue: options,
+      })),
     );
-
-    return {
-      module: KafkaModule,
-      providers,
-      exports,
-      global: true,
-    };
   }
 
   /**
    * Register a Kafka connection asynchronously
    */
   static forRootAsync(options: KafkaModuleAsyncOptions): DynamicModule {
-    const connectionName = options.name || DEFAULT_KAFKA_CONNECTION;
-    const optionsToken = getKafkaOptionsToken(connectionName);
-    const clientToken = getKafkaClientToken(connectionName);
+    const name = options.name || DEFAULT_KAFKA_CONNECTION;
+    const module = this.build(
+      [name],
+      this.createAsyncProviders(options, getKafkaOptionsToken(name)),
+    );
+    module.imports = [...(module.imports ?? []), ...(options.imports || [])];
+    module.global = options.global ?? true;
+    return module;
+  }
 
-    const asyncProviders = this.createAsyncProviders(options, optionsToken);
-
-    const providers: Provider[] = [
-      ...asyncProviders,
-      {
-        provide: `KAFKA_INIT_${connectionName}`,
-        useFactory: (
-          kafkaCore: KafkaCoreService,
-          kafkaOptions: KafkaModuleOptions,
-        ) => {
-          kafkaCore.registerConnection({
-            ...kafkaOptions,
-            name: connectionName,
-          });
-          return true;
-        },
-        inject: [KafkaCoreService, optionsToken],
-      },
-      // Named client provider for @InjectKafkaClient(connectionName)
-      {
-        provide: clientToken,
-        useFactory: (
-          kafkaClient: KafkaClient,
-        ): KafkaClient | ConnectionBoundClient => {
-          if (connectionName === DEFAULT_KAFKA_CONNECTION) {
-            return kafkaClient;
-          }
-          return kafkaClient.forConnection(connectionName);
-        },
-        inject: [KafkaClient],
-      },
-      ...CORE_PROVIDERS,
-    ];
+  /**
+   * Per-connection providers on top of the shared KafkaCoreModule.
+   * `names[0]` backs KAFKA_MODULE_OPTIONS.
+   */
+  private static build(
+    names: string[],
+    optionsProviders: Provider[],
+  ): DynamicModule {
+    const optionsTokens = names.map((n) => getKafkaOptionsToken(n));
+    const clientTokens = names.map((n) => getKafkaClientToken(n));
 
     return {
       module: KafkaModule,
-      imports: [...(options.imports || [])],
-      providers,
-      exports: [
-        KAFKA_MODULE_OPTIONS,
-        optionsToken,
-        clientToken,
-        KafkaCoreService,
-        KafkaClient,
-        KafkaHealthIndicator,
-        TracingService,
+      global: true,
+      imports: [KafkaCoreModule],
+      providers: [
+        ...optionsProviders,
+        { provide: KAFKA_MODULE_OPTIONS, useExisting: optionsTokens[0] },
+        ...names.flatMap((n) => this.connectionProviders(n)),
       ],
-      global: options.global ?? true,
+      exports: [
+        KafkaCoreModule,
+        KAFKA_MODULE_OPTIONS,
+        ...optionsTokens,
+        ...clientTokens,
+      ],
     };
+  }
+
+  /** Registers the connection and exposes its client token. */
+  private static connectionProviders(name: string): Provider[] {
+    return [
+      {
+        provide: `KAFKA_INIT_${name}`,
+        useFactory: (
+          kafkaCore: KafkaCoreService,
+          tracing: TracingService,
+          options: KafkaModuleOptions,
+        ) => {
+          kafkaCore.registerConnection({ ...options, name });
+          tracing.configure(options.tracing);
+          return true;
+        },
+        inject: [KafkaCoreService, TracingService, getKafkaOptionsToken(name)],
+      },
+      {
+        provide: getKafkaClientToken(name),
+        useFactory: (
+          kafkaClient: KafkaClient,
+        ): KafkaClient | ConnectionBoundClient =>
+          name === DEFAULT_KAFKA_CONNECTION
+            ? kafkaClient
+            : new ConnectionBoundClient(kafkaClient, name),
+        inject: [KafkaClient],
+      },
+    ];
   }
 
   private static createAsyncProviders(
@@ -221,11 +125,6 @@ export class KafkaModule {
       return [
         {
           provide: optionsToken,
-          useFactory: options.useFactory,
-          inject: options.inject || [],
-        },
-        {
-          provide: KAFKA_MODULE_OPTIONS,
           useFactory: options.useFactory,
           inject: options.inject || [],
         },
@@ -240,12 +139,6 @@ export class KafkaModule {
     return [
       {
         provide: optionsToken,
-        useFactory: async (optionsFactory: KafkaOptionsFactory) =>
-          await optionsFactory.createKafkaOptions(),
-        inject: [useClass],
-      },
-      {
-        provide: KAFKA_MODULE_OPTIONS,
         useFactory: async (optionsFactory: KafkaOptionsFactory) =>
           await optionsFactory.createKafkaOptions(),
         inject: [useClass],
