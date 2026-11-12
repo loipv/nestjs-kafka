@@ -1,4 +1,4 @@
-import { KafkaClient } from './kafka-client.service';
+import { ConnectionBoundClient, KafkaClient } from './kafka-client.service';
 
 // The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
 jest.mock('@confluentinc/kafka-javascript', () => ({
@@ -50,26 +50,6 @@ describe('KafkaClient', () => {
     });
   });
 
-  describe('onApplicationShutdown', () => {
-    it('still disconnects producers when final flush fails', async () => {
-      const core = {
-        isProducerConnected: jest.fn().mockReturnValue(false),
-        disconnectAll: jest.fn().mockResolvedValue(undefined),
-        getProducer: jest.fn().mockReturnValue({
-          send: jest.fn().mockRejectedValue(new Error('broker down')),
-        }),
-      } as any;
-      const client = new KafkaClient(core);
-      (client as any).batchBuffers.set(
-        'default',
-        new Map([['t', [{ value: 'x' }]]]),
-      );
-
-      await expect(client.onApplicationShutdown()).resolves.toBeUndefined();
-      expect(core.disconnectAll).toHaveBeenCalledTimes(1);
-    });
-  });
-
   describe('send paths', () => {
     const mkCore = (producer: any) => ({
       connectProducer: jest.fn(),
@@ -102,26 +82,47 @@ describe('KafkaClient', () => {
         ],
       });
     });
+  });
 
-    it('sendQueued buffers below threshold, timer flushes at ~100ms', async () => {
-      const producer = { send: jest.fn().mockResolvedValue(undefined) };
-      const client = new KafkaClient(mkCore(producer) as any);
-      await client.sendQueued('t', { value: 'a' });
-      expect(producer.send).not.toHaveBeenCalled();
-      await new Promise((r) => setTimeout(r, 150));
-      expect(producer.send).toHaveBeenCalledWith({
-        topic: 't',
-        messages: [expect.objectContaining({ value: 'a' })],
-      });
+  describe('connections and shutdown', () => {
+    const mkCore = () => ({
+      connectProducer: jest.fn().mockResolvedValue(undefined),
+      getProducer: jest
+        .fn()
+        .mockReturnValue({ send: jest.fn().mockResolvedValue(undefined) }),
+      disconnectAll: jest.fn().mockResolvedValue(undefined),
+    });
+    let kafkaCore: ReturnType<typeof mkCore>;
+    let client: KafkaClient;
+
+    beforeEach(() => {
+      kafkaCore = mkCore();
+      client = new KafkaClient(kafkaCore as any);
     });
 
-    it('sendQueued flushes immediately at 100 messages', async () => {
-      const producer = { send: jest.fn().mockResolvedValue(undefined) };
-      const client = new KafkaClient(mkCore(producer) as any);
-      for (let i = 0; i < 100; i++)
-        await client.sendQueued('t', { value: `m${i}` });
-      expect(producer.send).toHaveBeenCalledTimes(1);
-      expect(producer.send.mock.calls[0][0].messages).toHaveLength(100);
+    it('onApplicationShutdown disconnects producers', async () => {
+      await client.onApplicationShutdown();
+      expect(kafkaCore.disconnectAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('send uses options.connection', async () => {
+      await client.send('t', { value: 'v' }, { connection: 'analytics' });
+      expect(kafkaCore.connectProducer).toHaveBeenCalledWith('analytics');
+      expect(kafkaCore.getProducer).toHaveBeenCalledWith('analytics');
+    });
+
+    it('ConnectionBoundClient forwards its connection', async () => {
+      await new ConnectionBoundClient(client, 'analytics').sendBatch('t', [
+        { value: 'v' },
+      ]);
+      expect(kafkaCore.getProducer).toHaveBeenCalledWith('analytics');
+    });
+
+    it('no longer exposes sendQueued or forConnection', () => {
+      const bound = new ConnectionBoundClient(client, 'analytics');
+      expect((client as any).sendQueued).toBeUndefined();
+      expect((client as any).forConnection).toBeUndefined();
+      expect((bound as any).sendQueued).toBeUndefined();
     });
   });
 });

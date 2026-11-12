@@ -107,15 +107,12 @@ export interface ProducerMessage {
 }
 
 /**
- * Options for sending messages.
- *
- * BREAKING CHANGE (v1.0.0): acks, timeout, and compression have been moved to
- * producer-level configuration in KafkaModule.forRoot({ producer: { ... } }).
- * These options are no longer supported per-send call in confluent-kafka-javascript.
+ * Per-send options. `acks`, `timeout` and `compression` are producer-level
+ * settings: configure them in `KafkaModule.forRoot({ producer: { ... } })`.
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface SendOptions {
-  // Note: acks, timeout, compression removed - now configured at producer level
+  /** Connection name to send on. Default: 'default' */
+  connection?: string;
 }
 
 export interface GroupedBatch<T = any> {
