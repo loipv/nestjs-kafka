@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConsumerRegistryService } from './consumer-registry.service';
 import { BatchProcessorService } from './batch-processor.service';
 
@@ -119,6 +120,7 @@ describe('consumer groups', () => {
       run,
       disconnect: jest.fn(),
       resume: jest.fn(),
+      commitOffsets: jest.fn().mockResolvedValue(undefined),
     };
     const consumerFactory = jest.fn().mockReturnValue(consumer);
     const core = {
@@ -173,6 +175,7 @@ describe('consumer groups', () => {
     resolveOffset,
     pause,
     heartbeat: () => {},
+    commitOffsetsIfNecessary: jest.fn().mockResolvedValue(undefined),
   });
 
   const messagePayload = (
@@ -197,6 +200,157 @@ describe('consumer groups', () => {
     await h.registry.startAll();
     return h;
   };
+
+  describe('autoCommit: false', () => {
+    const commitOf = (offset: string, topic = 't') => [
+      [{ topic, partition: 0, offset }],
+    ];
+
+    it('eachMessage commits offset + 1 after success', async () => {
+      const { config, consumer } = await started(
+        { autoCommit: false },
+        jest.fn(),
+      );
+      await config().eachMessage(messagePayload('5'));
+      expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
+    });
+
+    it('eachMessage commits exactly above 2^53', async () => {
+      const { config, consumer } = await started(
+        { autoCommit: false },
+        jest.fn(),
+      );
+      await config().eachMessage(messagePayload('9007199254740993'));
+      expect(consumer.commitOffsets.mock.calls).toEqual([
+        commitOf('9007199254740994'),
+      ]);
+    });
+
+    it('eachMessage commits after a complete verdict (skip)', async () => {
+      jest.useFakeTimers();
+      try {
+        const { config, consumer } = await started(
+          {
+            autoCommit: false,
+            retry: { retries: 1, skipMessageOnMaxRetries: true },
+          },
+          jest.fn().mockRejectedValue(new Error('x')),
+        );
+        await expect(config().eachMessage(messagePayload())).rejects.toThrow(
+          'x',
+        );
+        expect(consumer.commitOffsets).not.toHaveBeenCalled();
+        await config().eachMessage(messagePayload());
+        expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('eachMessage commits a duplicate skipped by idempotency', async () => {
+      const handler = jest.fn();
+      const { config, consumer } = await started(
+        { autoCommit: false, idempotencyKey: () => 'k' },
+        handler,
+        {
+          idempotency: {
+            isProcessed: () => true,
+            markProcessed: jest.fn(),
+            stopCleanup: jest.fn(),
+          },
+        },
+      );
+      await config().eachMessage(messagePayload('5'));
+      expect(handler).not.toHaveBeenCalled();
+      expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
+    });
+
+    it('eachMessage commits a message for a topic without a handler', async () => {
+      const { config, consumer } = await started(
+        { autoCommit: false },
+        jest.fn(),
+      );
+      await config().eachMessage({ ...messagePayload('5'), topic: 'other' });
+      expect(consumer.commitOffsets.mock.calls).toEqual([
+        commitOf('6', 'other'),
+      ]);
+    });
+
+    it('eachMessage does not commit when the handler fails and is retried', async () => {
+      jest.useFakeTimers();
+      try {
+        const { config, consumer } = await started(
+          { autoCommit: false },
+          jest.fn().mockRejectedValue(new Error('x')),
+        );
+        await expect(config().eachMessage(messagePayload())).rejects.toThrow(
+          'x',
+        );
+        expect(consumer.commitOffsets).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('eachMessage does not commit under auto-commit', async () => {
+      const { config, consumer } = await started({}, jest.fn());
+      await config().eachMessage(messagePayload('5'));
+      expect(consumer.commitOffsets).not.toHaveBeenCalled();
+    });
+
+    it('eachMessage logs and does not throw when the commit fails', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      try {
+        const { config, consumer } = await started(
+          { autoCommit: false },
+          jest.fn(),
+        );
+        consumer.commitOffsets.mockRejectedValue(new Error('ERR__STATE'));
+        await expect(
+          config().eachMessage(messagePayload('5')),
+        ).resolves.toBeUndefined();
+        expect(warn).toHaveBeenCalledWith(
+          'Commit failed for t[0]@6: Error: ERR__STATE',
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('eachBatch commits after every resolved chunk', async () => {
+      const { config } = await started(
+        { batch: true, batchSize: 2, autoCommit: false },
+        jest.fn(),
+      );
+      const resolveOffset = jest.fn();
+      const payload = batchPayload(
+        ['1', '2', '3', '4'].map(mkMsg),
+        resolveOffset,
+      );
+      await config().eachBatch(payload);
+      expect(resolveOffset.mock.calls).toEqual([['2'], ['4']]);
+      const commit = payload.commitOffsetsIfNecessary;
+      expect(commit).toHaveBeenCalledTimes(2);
+      expect(commit.mock.invocationCallOrder[0]).toBeGreaterThan(
+        resolveOffset.mock.invocationCallOrder[0],
+      );
+      expect(commit.mock.invocationCallOrder[0]).toBeLessThan(
+        resolveOffset.mock.invocationCallOrder[1],
+      );
+    });
+
+    it('eachBatch does not commit under auto-commit', async () => {
+      const { config } = await started(
+        { batch: true, batchSize: 2 },
+        jest.fn(),
+      );
+      const payload = batchPayload(['1', '2'].map(mkMsg), jest.fn());
+      await config().eachBatch(payload);
+      expect(payload.commitOffsetsIfNecessary).not.toHaveBeenCalled();
+    });
+  });
 
   describe('retry by pause and rethrow', () => {
     beforeEach(() => jest.useFakeTimers());

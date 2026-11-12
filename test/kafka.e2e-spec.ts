@@ -400,6 +400,60 @@ describe('Kafka e2e (testcontainers)', () => {
     }
   });
 
+  it('autoCommit false commits: a restarted group does not re-read handled messages', async () => {
+    const first: string[] = [];
+
+    @Injectable()
+    class ManualCommitConsumer {
+      @Consumer('e2e-autocommit', {
+        groupId: 'e2e-ac-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+        autoCommit: false,
+      })
+      async handle(msg: any) {
+        first.push(msg.value?.id);
+      }
+    }
+
+    const app1 = await createApp([ManualCommitConsumer]);
+    try {
+      const client = app1.get(KafkaClient);
+      await client.send('e2e-autocommit', { value: { id: 'm1' } });
+      await client.send('e2e-autocommit', { value: { id: 'm2' } });
+      await waitFor(() => first.length >= 2);
+    } finally {
+      await app1.close();
+    }
+
+    const second: string[] = [];
+
+    @Injectable()
+    class RestartedConsumer {
+      @Consumer('e2e-autocommit', {
+        groupId: 'e2e-ac-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+        autoCommit: false,
+      })
+      async handle(msg: any) {
+        second.push(msg.value?.id);
+      }
+    }
+
+    const app2 = await createApp([RestartedConsumer]);
+    try {
+      await app2
+        .get(KafkaClient)
+        .send('e2e-autocommit', { value: { id: 'marker' } });
+      await waitFor(() => second.includes('marker'));
+      await new Promise((r) => setTimeout(r, 3000));
+      expect(second).toEqual(['marker']);
+    } finally {
+      await app2.close();
+    }
+  });
+
   it('retries past maxRetries indefinitely (skip=false) — consumer never crashes', async () => {
     let attempts = 0;
     const successes: string[] = [];

@@ -446,101 +446,155 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { groupId, groupKey, topics, options, connection } = group;
     const consumer = group.consumer!;
-    const runConfig = this.baseRunConfig(options);
+    const runConfig = this.baseRunConfig(group.options);
 
     runConfig.eachMessage = async (payload: EachMessagePayload) => {
       // Never return here: a normal return stores the offset, which the client
       // commits on close — the message would be lost.
       if (this.isShuttingDown) throw new Error('Consumer is shutting down');
 
-      const { topic, message, partition } = payload;
+      // Throws (after pausing the partition) when the message must be retried
+      await this.processMessage(group, payload);
 
-      const topicHandler = topics.get(topic);
-      if (!topicHandler) {
-        this.logger.warn(`No handler found for topic: ${topic}`);
-        return;
-      }
-
-      const { metadata, handler } = topicHandler;
-      const topicOptions = metadata.options;
-      const namespace = this.idempotencyNamespace(connection, groupId, topic);
-
-      const processOnce = async () => {
-        const processedMessage =
-          topicOptions.deserialize !== false
-            ? deserializeMessage(message, topic, partition)
-            : message;
-        await handler(processedMessage);
-      };
-
-      // One trace span per delivery (each retry is a redelivery)
-      const invokeOnce = async () => {
-        if (this.tracingService?.isEnabled()) {
-          return this.tracingService.withConsumeSpan(
-            {
-              topic,
-              partition,
-              offset: message.offset,
-              key: message.key?.toString(),
-              groupId,
-              headers: message.headers,
-            },
-            processOnce,
-          );
-        }
-        return processOnce();
-      };
-
-      const attemptKey = PartitionRetryTracker.attemptKey(
-        groupKey,
-        topic,
-        partition,
-        message.offset,
-      );
-      // Everything that can throw (the idempotency extractor included) runs
-      // inside the try, so every failure pauses the partition first.
-      try {
-        if (
-          topicOptions.idempotencyKey &&
-          this.idempotencyService.isProcessed(
-            message,
-            topicOptions.idempotencyKey,
-            namespace,
-          )
-        ) {
-          this.logger.debug(`Skipping duplicate message from ${topic}`);
-          return;
-        }
-        await invokeOnce();
-        if (topicOptions.idempotencyKey) {
-          this.idempotencyService.markProcessed(
-            message,
-            topicOptions.idempotencyKey,
-            namespace,
-            topicOptions.idempotencyTtl,
-          );
-        }
-      } catch (error) {
-        await this.handleHandlerFailure({
-          group,
-          metadata,
+      // With auto-commit off the client never commits on its own
+      if (group.options.autoCommit === false) {
+        const { topic, partition, message } = payload;
+        await this.commitMessageOffset(
+          consumer,
+          topic,
           partition,
-          messages: [message],
-          attemptKey,
-          error,
-          pause: () => payload.pause(),
-        });
-        return;
+          message.offset,
+        );
       }
-
-      this.retryTracker.clear(attemptKey);
     };
 
     // Resolves once the client has started its fetch loop. Handler and broker
     // errors never reject it: the client logs them and redelivers the message.
     await consumer.run(runConfig);
+  }
+
+  /**
+   * One delivery of one message. Resolves when the message may be acked
+   * (handled, duplicate, no handler, dead-lettered or skipped); throws after
+   * pausing the partition when it must be retried.
+   */
+  private async processMessage(
+    group: ConsumerGroup,
+    payload: EachMessagePayload,
+  ): Promise<void> {
+    const { groupId, groupKey, topics, connection } = group;
+    const { topic, message, partition } = payload;
+
+    const topicHandler = topics.get(topic);
+    if (!topicHandler) {
+      this.logger.warn(`No handler found for topic: ${topic}`);
+      return;
+    }
+
+    const { metadata, handler } = topicHandler;
+    const topicOptions = metadata.options;
+    const namespace = this.idempotencyNamespace(connection, groupId, topic);
+
+    const processOnce = async () => {
+      const processedMessage =
+        topicOptions.deserialize !== false
+          ? deserializeMessage(message, topic, partition)
+          : message;
+      await handler(processedMessage);
+    };
+
+    // One trace span per delivery (each retry is a redelivery)
+    const invokeOnce = async () => {
+      if (this.tracingService?.isEnabled()) {
+        return this.tracingService.withConsumeSpan(
+          {
+            topic,
+            partition,
+            offset: message.offset,
+            key: message.key?.toString(),
+            groupId,
+            headers: message.headers,
+          },
+          processOnce,
+        );
+      }
+      return processOnce();
+    };
+
+    const attemptKey = PartitionRetryTracker.attemptKey(
+      groupKey,
+      topic,
+      partition,
+      message.offset,
+    );
+    // Everything that can throw (the idempotency extractor included) runs
+    // inside the try, so every failure pauses the partition first.
+    try {
+      if (
+        topicOptions.idempotencyKey &&
+        this.idempotencyService.isProcessed(
+          message,
+          topicOptions.idempotencyKey,
+          namespace,
+        )
+      ) {
+        this.logger.debug(`Skipping duplicate message from ${topic}`);
+        return;
+      }
+      await invokeOnce();
+      if (topicOptions.idempotencyKey) {
+        this.idempotencyService.markProcessed(
+          message,
+          topicOptions.idempotencyKey,
+          namespace,
+          topicOptions.idempotencyTtl,
+        );
+      }
+    } catch (error) {
+      await this.handleHandlerFailure({
+        group,
+        metadata,
+        partition,
+        messages: [message],
+        attemptKey,
+        error,
+        pause: () => payload.pause(),
+      });
+      return;
+    }
+
+    this.retryTracker.clear(attemptKey);
+  }
+
+  /**
+   * Commit `offset + 1` (auto-commit off). A failure is only logged: the
+   * offset stays stored and the next successful commit covers it; rethrowing
+   * would redeliver a message that was handled.
+   */
+  private async commitMessageOffset(
+    consumer: Consumer,
+    topic: string,
+    partition: number,
+    offset: string,
+  ): Promise<void> {
+    const next = (BigInt(offset) + 1n).toString();
+    try {
+      await consumer.commitOffsets([{ topic, partition, offset: next }]);
+    } catch (error) {
+      this.logCommitFailure(topic, partition, next, error);
+    }
+  }
+
+  private logCommitFailure(
+    topic: string,
+    partition: number,
+    offset: string,
+    error: unknown,
+  ): void {
+    this.logger.warn(
+      `Commit failed for ${topic}[${partition}]@${offset}: ${String(error)}`,
+    );
   }
 
   private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
@@ -577,7 +631,22 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
         // Throws (after pausing the partition) when the chunk must be retried
         await this.processChunk(group, topicHandler, payload, chunk);
-        payload.resolveOffset(chunk[chunk.length - 1].offset);
+        const lastOffset = chunk[chunk.length - 1].offset;
+        payload.resolveOffset(lastOffset);
+
+        // With auto-commit off the client never commits on its own
+        if (options.autoCommit === false) {
+          try {
+            await payload.commitOffsetsIfNecessary();
+          } catch (error) {
+            this.logCommitFailure(
+              topic,
+              payload.batch.partition,
+              (BigInt(lastOffset) + 1n).toString(),
+              error,
+            );
+          }
+        }
       }
     };
 
