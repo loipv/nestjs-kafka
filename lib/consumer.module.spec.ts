@@ -8,7 +8,6 @@ import { BatchProcessorService } from './services/batch-processor.service';
 import { IdempotencyService } from './services/idempotency.service';
 import { PressureManagerService } from './services/pressure-manager.service';
 import { DlqService } from './services/dlq.service';
-import { DlqRetryService } from './services/dlq-retry.service';
 import { Consumer } from './decorators/consumer.decorator';
 
 // Mock @confluentinc/kafka-javascript
@@ -126,11 +125,6 @@ describe('ConsumerModule', () => {
 
     it('should provide DlqService', () => {
       const service = module.get<DlqService>(DlqService);
-      expect(service).toBeDefined();
-    });
-
-    it('should provide DlqRetryService', () => {
-      const service = module.get<DlqRetryService>(DlqRetryService);
       expect(service).toBeDefined();
     });
   });

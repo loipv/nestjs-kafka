@@ -17,7 +17,6 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
       {} as any,
       {} as any,
       {} as any,
-      {} as any,
       undefined,
       moduleOptions,
     );
@@ -58,10 +57,6 @@ describe('retry logic', () => {
       { stopCleanup: jest.fn() } as any,
       { register: jest.fn(), setTopics: jest.fn() } as any,
       { handleFailure: jest.fn() } as any,
-      {
-        registerOriginalGroupId: jest.fn(),
-        gracefulShutdown: jest.fn().mockResolvedValue(undefined),
-      } as any,
       undefined,
       undefined,
     );
@@ -180,11 +175,6 @@ describe('consumer auto-restart', () => {
       { stopCleanup: jest.fn() } as any,
       { register: jest.fn(), setTopics: jest.fn() } as any,
       { handleFailure: jest.fn() } as any,
-      {
-        registerOriginalGroupId: jest.fn(),
-        startAll: jest.fn().mockResolvedValue(undefined),
-        gracefulShutdown: jest.fn().mockResolvedValue(undefined),
-      } as any,
       undefined,
       undefined,
     );
@@ -291,15 +281,9 @@ describe('batch offset semantics', () => {
       { filterDuplicates: (m: any[]) => m } as any,
       { register: jest.fn(), setTopics: jest.fn() } as any,
       {} as any, // dlqService — not used in this path
-      {} as any, // dlqRetryService — replaced below
       undefined,
       undefined,
     );
-    (registry as any).dlqRetryService = {
-      registerOriginalGroupId: jest.fn(),
-      startAll: jest.fn().mockResolvedValue(undefined),
-      gracefulShutdown: jest.fn().mockResolvedValue(undefined),
-    };
     registry.registerConsumers([
       {
         topic: 't',
@@ -380,11 +364,6 @@ describe('DLQ on a separate connection', () => {
       { stopCleanup: jest.fn() } as any,
       { register: jest.fn(), setTopics: jest.fn() } as any,
       {} as any,
-      {
-        registerOriginalGroupId: jest.fn(),
-        registerDlqRetryConsumer: jest.fn(),
-        startAll: jest.fn().mockResolvedValue(undefined),
-      } as any,
       undefined,
       undefined,
     );
@@ -410,18 +389,14 @@ describe('DLQ on a separate connection', () => {
     ).toThrow('Kafka connection "missing" not found');
   });
 
-  it('auto-creates DLQ + final DLQ topics on the DLQ connection', async () => {
+  it('auto-creates the DLQ topic on the DLQ connection', async () => {
     const { registry, admins } = makeRegistry(['clusterA', 'dlqCluster']);
     registry.registerConsumers([
-      mkConsumer({
-        topic: 'orders-dlq',
-        connection: 'dlqCluster',
-        retry: { enabled: true, finalDlqTopic: 'orders-final' },
-      }),
+      mkConsumer({ topic: 'orders-dlq', connection: 'dlqCluster' }),
     ]);
     await (registry as any).startAll();
     expect(created(admins.clusterA)).toEqual(['orders']);
-    expect(created(admins.dlqCluster)).toEqual(['orders-dlq', 'orders-final']);
+    expect(created(admins.dlqCluster)).toEqual(['orders-dlq']);
   });
 
   it('auto-creates the DLQ topic on the consumer connection by default', async () => {

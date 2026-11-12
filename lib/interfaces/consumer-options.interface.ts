@@ -10,32 +10,12 @@ type KafkaMessage = KafkaJS.KafkaMessage;
  */
 export type PartitionAssigner = 'roundrobin' | 'range' | 'cooperative-sticky';
 
-/**
- * Options for DLQ retry - auto consume from DLQ and retry handler
- */
-export interface DlqRetryOptions {
-  /** Enable DLQ retry consumer. Default: false */
-  enabled?: boolean;
-  /** Max retries from DLQ before sending to final dead letter. Default: 3 */
-  maxRetries?: number;
-  /** Delay before retrying in ms. Default: 60000 (1 minute) */
-  delay?: number;
-  /** Backoff multiplier for retry delay. Default: 2 */
-  backoffMultiplier?: number;
-  /** Final dead letter topic. If not set, messages are dropped after max retries */
-  finalDlqTopic?: string;
-  /** GroupId for DLQ consumer. Default: ${dlqTopic}-retry-consumer */
-  groupId?: string;
-  /** Start consuming from beginning of DLQ topic. Default: false */
-  fromBeginning?: boolean;
-}
-
 export interface DlqOptions {
   /** DLQ topic to send failed messages */
   topic: string;
   /**
-   * Connection name to produce/consume the DLQ on (must be registered via
-   * KafkaModule.forRootMultiple). Default: the consumer's connection
+   * Connection name to produce the DLQ on (any registered connection).
+   * Default: the consumer's connection
    */
   connection?: string;
   /** Max retries before sending to DLQ. Default: 3 */
@@ -48,8 +28,6 @@ export interface DlqOptions {
   includeOriginalHeaders?: boolean;
   /** Include error info in headers. Default: true */
   includeErrorInfo?: boolean;
-  /** Enable auto-consume from DLQ and retry handler */
-  retry?: DlqRetryOptions;
 }
 
 export interface ConsumerRetryOptions {
@@ -249,5 +227,5 @@ export const MAX_RETRY_DELAY_MS = 30000;
  */
 export type RetryVerdict =
   | { action: 'retry'; delayMs: number }
-  /** ack: commit offset, move on (DLQ-sent / skipped / circuit-dropped) */
+  /** ack: commit offset, move on (DLQ-sent / skipped) */
   | { action: 'complete' };

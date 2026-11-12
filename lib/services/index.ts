@@ -4,8 +4,5 @@ export * from './consumer-registry.service';
 export * from './batch-processor.service';
 export * from './idempotency.service';
 export * from './pressure-manager.service';
-export * from './dlq-metrics.service';
-export * from './circuit-breaker.service';
 export * from './dlq.service';
-export * from './dlq-retry.service';
 export * from './tracing.service';

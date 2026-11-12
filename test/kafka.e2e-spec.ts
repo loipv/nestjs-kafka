@@ -430,9 +430,8 @@ describe('DLQ on a separate cluster (dlq.connection)', () => {
       return offsets.reduce((n, p) => n + Number(p.high), 0);
     });
 
-  it('dead-letters, auto-retries and final-DLQs on the DLQ cluster only', async () => {
+  it('dead-letters on the DLQ cluster only', async () => {
     let sourceAttempts = 0;
-    let reprocessAttempts = 0;
     const successes: string[] = [];
 
     @Injectable()
@@ -446,19 +445,11 @@ describe('DLQ on a separate cluster (dlq.connection)', () => {
           connection: 'dlq',
           maxRetries: 1,
           retryDelay: 100,
-          retry: {
-            enabled: true,
-            maxRetries: 1,
-            delay: 100,
-            fromBeginning: true,
-            finalDlqTopic: 'e2e-xdlq-final',
-          },
         },
       })
       async handle(msg: any) {
         if (msg.value?.fail) {
-          if (msg.headers?.['x-dlq-original-topic']) reprocessAttempts++;
-          else sourceAttempts++;
+          sourceAttempts++;
           throw new Error('permanent');
         }
         successes.push(msg.value?.id);
@@ -482,28 +473,16 @@ describe('DLQ on a separate cluster (dlq.connection)', () => {
       await client.send('e2e-xdlq-src', { value: { id: 'x', fail: true } });
       await client.send('e2e-xdlq-src', { value: { id: 'good' } });
 
+      // 'good' comes after the poison message on the same partition, so its
+      // arrival means the poison message has been dead-lettered.
       await waitFor(() => successes.includes('good'));
-      // DLQ retry consumer (on the DLQ cluster) re-invoked the handler,
-      // which failed again → back to DLQ → max reprocesses → final DLQ
-      await waitFor(() => reprocessAttempts >= 1);
-
-      const deadline = Date.now() + 45_000;
-      while (
-        (await messageCount(dlqBootstrap, 'e2e-xdlq-final')) < 1 &&
-        Date.now() < deadline
-      ) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
 
       expect(sourceAttempts).toBe(2); // 1 initial + 1 retry before DLQ
-      expect(reprocessAttempts).toBe(1);
-      expect(await messageCount(dlqBootstrap, 'e2e-xdlq-dead')).toBe(2); // first DLQ + re-send
-      expect(await messageCount(dlqBootstrap, 'e2e-xdlq-final')).toBe(1);
+      expect(await messageCount(dlqBootstrap, 'e2e-xdlq-dead')).toBe(1);
 
       const mainTopics = await withAdmin(bootstrap, (a) => a.listTopics());
       expect(mainTopics).toContain('e2e-xdlq-src');
       expect(mainTopics).not.toContain('e2e-xdlq-dead');
-      expect(mainTopics).not.toContain('e2e-xdlq-final');
     } finally {
       await moduleRef.close();
     }

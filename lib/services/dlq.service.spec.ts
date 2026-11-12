@@ -17,26 +17,10 @@ const mkMsg = () =>
     timestamp: '',
   }) as any;
 
-function makeService(circuitOpen = false) {
+function makeService() {
   const kafkaClient = { send: jest.fn().mockResolvedValue(undefined) };
-  const metrics = {
-    recordHandlerRetry: jest.fn(),
-    recordSentToDlq: jest.fn(),
-    recordFinalFailure: jest.fn(),
-  };
-  const circuitBreaker = {
-    canExecute: jest.fn().mockReturnValue(!circuitOpen),
-    recordSuccess: jest.fn(),
-    recordFailure: jest.fn(),
-    getState: jest.fn().mockReturnValue('OPEN'),
-    reset: jest.fn(),
-  };
-  const svc = new DlqService(
-    kafkaClient as any,
-    metrics as any,
-    circuitBreaker as any,
-  );
-  return { svc, kafkaClient, metrics, circuitBreaker };
+  const svc = new DlqService(kafkaClient as any);
+  return { svc, kafkaClient };
 }
 
 describe('DlqService.handleFailure (verdict API)', () => {
@@ -107,45 +91,21 @@ describe('DlqService.handleFailure (verdict API)', () => {
     );
   });
 
-  it('completes with drop when circuit breaker is open', async () => {
-    const { svc, metrics } = makeService(true);
-    const v = await svc.handleFailure(
-      mkMsg(),
-      new Error('x'),
-      { topic: 'dlq', maxRetries: 0 },
-      't',
-      0,
-      'default',
-      1,
-    );
-    expect(v).toEqual({ action: 'complete' });
-    expect(metrics.recordFinalFailure).toHaveBeenCalledWith('t', false);
-  });
-
-  it('propagates DLQ send errors → infra crash path (auto-restart), no data loss', async () => {
-    const kafkaClient = {
-      send: jest.fn().mockRejectedValue(new Error('dlq broker down')),
-    };
-    const svc = new DlqService(
-      kafkaClient as any,
-      { recordHandlerRetry: jest.fn() } as any,
-      {
-        canExecute: jest.fn().mockReturnValue(true),
-        recordSuccess: jest.fn(),
-        recordFailure: jest.fn(),
-        getState: jest.fn(),
-      } as any,
-    );
-    await expect(
-      svc.handleFailure(
-        mkMsg(),
-        new Error('x'),
-        { topic: 'dlq', maxRetries: 0 },
-        't',
-        0,
-        'default',
-        1,
-      ),
-    ).rejects.toThrow('dlq broker down');
+  it('rejects on every DLQ send failure and never completes', async () => {
+    const { svc, kafkaClient } = makeService();
+    kafkaClient.send.mockRejectedValue(new Error('dlq down'));
+    for (let i = 0; i < 10; i++) {
+      await expect(
+        svc.handleFailure(
+          mkMsg(),
+          new Error('x'),
+          { topic: 'd', maxRetries: 0 },
+          't',
+          0,
+          undefined,
+          1,
+        ),
+      ).rejects.toThrow('dlq down');
+    }
   });
 });

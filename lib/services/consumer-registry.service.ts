@@ -18,7 +18,6 @@ import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
 import { PressureManagerService } from './pressure-manager.service';
 import { DlqService } from './dlq.service';
-import { DlqRetryService } from './dlq-retry.service';
 import { TracingService } from './tracing.service';
 import {
   ConsumerMetadata,
@@ -60,7 +59,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     private readonly idempotencyService: IdempotencyService,
     private readonly pressureManager: PressureManagerService,
     private readonly dlqService: DlqService,
-    private readonly dlqRetryService: DlqRetryService,
     @Optional() private readonly tracingService?: TracingService,
     @Optional()
     @Inject(CONSUMER_MODULE_OPTIONS)
@@ -178,9 +176,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
       this.consumerGroups.set(groupKey, group);
 
-      // Register this groupId with DLQ retry service to prevent collision
-      this.dlqRetryService.registerOriginalGroupId(connectionName, groupId);
-
       this.pressureManager.register(groupKey, consumer, {
         backPressureThreshold: options.backPressureThreshold || 80,
         resumeThreshold: 60,
@@ -218,18 +213,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     this.logger.log(
       `Registered topic "${topic}" in group "${groupId}" (connection: ${connectionName})`,
     );
-
-    // Register DLQ retry consumer if enabled
-    if (options.dlq?.retry?.enabled) {
-      try {
-        this.dlqRetryService.registerDlqRetryConsumer(mergedMetadata, handler);
-      } catch (err) {
-        this.logger.error(
-          `Failed to register DLQ retry consumer for ${topic}`,
-          err,
-        );
-      }
-    }
   }
 
   async startAll(): Promise<void> {
@@ -238,9 +221,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     );
 
     await Promise.all(startPromises);
-
-    // Start DLQ retry consumers
-    await this.dlqRetryService.startAll();
   }
 
   /**
@@ -327,9 +307,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         const dlqConnection = opts.dlq?.connection || connection;
         if (opts.dlq?.topic) {
           addTopic(dlqConnection, opts.dlq.topic, opts);
-        }
-        if (opts.dlq?.retry?.finalDlqTopic) {
-          addTopic(dlqConnection, opts.dlq.retry.finalDlqTopic, opts);
         }
       }
 
@@ -902,7 +879,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           }
           continue;
         }
-        // 'complete': DLQ-sent / skipped / circuit-dropped — ack and move on
+        // 'complete': DLQ-sent / skipped — ack and move on
         this.logger.error(
           `Message from ${metadata.topic} skipped after ${attempt} attempts. ` +
             `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
@@ -963,9 +940,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     await Promise.all(shutdownPromises);
     this.idempotencyService.stopCleanup();
-
-    // Shutdown DLQ retry consumers
-    await this.dlqRetryService.gracefulShutdown();
 
     this.logger.log('All consumer groups shut down gracefully');
   }
