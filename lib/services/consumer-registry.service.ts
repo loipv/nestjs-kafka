@@ -318,7 +318,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { groupId, consumer, topics, options } = group;
+    const { groupId, consumer, topics, options, connection } = group;
 
     // Build run config with only defined values
     // Note: restartOnFailure is not supported in confluent-kafka-javascript
@@ -346,12 +346,14 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
       const { metadata, handler } = topicHandler;
       const topicOptions = metadata.options;
+      const namespace = this.idempotencyNamespace(connection, groupId, topic);
 
       if (
         topicOptions.idempotencyKey &&
         this.idempotencyService.isProcessed(
           message,
           topicOptions.idempotencyKey,
+          namespace,
         )
       ) {
         this.logger.debug(`Skipping duplicate message from ${topic}`);
@@ -370,6 +372,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           this.idempotencyService.markProcessed(
             message,
             topicOptions.idempotencyKey,
+            namespace,
             topicOptions.idempotencyTtl,
           );
         }
@@ -478,11 +481,17 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     metadata?: ConsumerMetadata,
   ): Promise<void> {
     let processableMessages = messages;
+    const namespace = this.idempotencyNamespace(
+      metadata?.connection || DEFAULT_KAFKA_CONNECTION,
+      groupId ?? `${topic}-group`,
+      topic,
+    );
 
     if (options.idempotencyKey) {
       processableMessages = this.idempotencyService.filterDuplicates(
         messages,
         options.idempotencyKey,
+        namespace,
       );
     }
 
@@ -572,9 +581,23 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     if (options.idempotencyKey) {
       for (const msg of processableMessages) {
-        this.idempotencyService.markProcessed(msg, options.idempotencyKey);
+        this.idempotencyService.markProcessed(
+          msg,
+          options.idempotencyKey,
+          namespace,
+          options.idempotencyTtl,
+        );
       }
     }
+  }
+
+  /** Idempotency keys are scoped to one consumer: `<connection>:<groupId>|<topic>`. */
+  private idempotencyNamespace(
+    connection: string,
+    groupId: string,
+    topic: string,
+  ): string {
+    return `${connection}:${groupId}|${topic}`;
   }
 
   /** Build the confluent consumer config with only defined values. */

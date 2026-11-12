@@ -127,6 +127,12 @@ export interface ConsumerMetadata {
  */
 export interface ConsumerModuleOptions {
   /**
+   * Max idempotency keys kept in memory; the oldest are evicted.
+   * Default: 100000
+   */
+  idempotencyMaxKeys?: number;
+
+  /**
    * Default partition assignment strategies for consumer groups.
    * Applied when @Consumer decorator doesn't specify partitionAssigners.
    * @example ['cooperative-sticky']

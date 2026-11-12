@@ -1,5 +1,6 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, OnModuleDestroy, Optional } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
+import { CONSUMER_MODULE_OPTIONS, ConsumerModuleOptions } from '../interfaces';
 
 type KafkaMessage = KafkaJS.KafkaMessage;
 
@@ -15,8 +16,15 @@ export class IdempotencyService implements OnModuleDestroy {
   private cleanupInterval: NodeJS.Timeout | null = null;
   readonly defaultTtl = 3600000; // 1 hour
   private readonly CLEANUP_INTERVAL = 60000; // 60 seconds
+  /** Oldest keys are evicted beyond this many entries */
+  private readonly maxKeys: number;
 
-  constructor() {
+  constructor(
+    @Optional()
+    @Inject(CONSUMER_MODULE_OPTIONS)
+    moduleOptions?: ConsumerModuleOptions,
+  ) {
+    this.maxKeys = moduleOptions?.idempotencyMaxKeys ?? 100000;
     this.startCleanup();
   }
 
@@ -24,12 +32,18 @@ export class IdempotencyService implements OnModuleDestroy {
     this.stopCleanup();
   }
 
+  /**
+   * `namespace` scopes keys (the registry passes `<connection>:<groupId>|<topic>`)
+   * so two consumers extracting the same key never dedupe each other.
+   */
   isProcessed(
     message: KafkaMessage,
     keyExtractor: (msg: KafkaMessage) => string | undefined,
+    namespace: string,
   ): boolean {
-    const key = keyExtractor(message);
-    if (!key) return false;
+    const extracted = keyExtractor(message);
+    if (!extracted) return false;
+    const key = `${namespace}|${extracted}`;
 
     const entry = this.processedKeys.get(key);
     if (!entry) return false;
@@ -46,23 +60,35 @@ export class IdempotencyService implements OnModuleDestroy {
   markProcessed(
     message: KafkaMessage,
     keyExtractor: (msg: KafkaMessage) => string | undefined,
+    namespace: string,
     ttl?: number,
   ): void {
-    const key = keyExtractor(message);
-    if (!key) return;
+    const extracted = keyExtractor(message);
+    if (!extracted) return;
+    const key = `${namespace}|${extracted}`;
 
+    // delete + set moves the key to the end of the Map's insertion order
+    this.processedKeys.delete(key);
     this.processedKeys.set(key, {
       key,
       timestamp: Date.now(),
       ttl: ttl ?? this.defaultTtl,
     });
+
+    while (this.processedKeys.size > this.maxKeys) {
+      const oldest = this.processedKeys.keys().next().value as string;
+      this.processedKeys.delete(oldest);
+    }
   }
 
   filterDuplicates(
     messages: KafkaMessage[],
     keyExtractor: (msg: KafkaMessage) => string | undefined,
+    namespace: string,
   ): KafkaMessage[] {
-    return messages.filter((msg) => !this.isProcessed(msg, keyExtractor));
+    return messages.filter(
+      (msg) => !this.isProcessed(msg, keyExtractor, namespace),
+    );
   }
 
   private startCleanup(): void {
