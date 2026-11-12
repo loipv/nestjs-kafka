@@ -35,6 +35,7 @@ describe('KafkaHealthIndicator', () => {
       getConnectionNames: jest.fn(() => Object.keys(producers)),
       isProducerConnected: jest.fn((name: string) => producers[name]),
       getConsumerStatuses: jest.fn(() => ({ ...consumers })),
+      connectProducerInBackground: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -73,6 +74,17 @@ describe('KafkaHealthIndicator', () => {
           message: 'Not ready: producer "analytics" not connected',
         },
       });
+    });
+
+    it('starts a background reconnect for a disconnected producer', () => {
+      producers = { default: true, analytics: false };
+      healthIndicator.isHealthy('kafka');
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(kafkaCore.connectProducerInBackground).toHaveBeenCalledTimes(1);
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(kafkaCore.connectProducerInBackground).toHaveBeenCalledWith(
+        'analytics',
+      );
     });
 
     it('is down when a group is failed', () => {

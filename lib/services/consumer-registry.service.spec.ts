@@ -395,6 +395,91 @@ describe('consumer groups', () => {
       expect(resolveOffset).toHaveBeenCalledWith('2');
     });
 
+    it('eachMessage: a handler rejecting with undefined still throws an Error (seek-back stays safe)', async () => {
+      const pause = jest.fn(() => jest.fn());
+      const { config } = await started(
+        {},
+        jest.fn().mockRejectedValue(undefined),
+      );
+      const err = await config()
+        .eachMessage(messagePayload('5', pause))
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('non-Error');
+      expect(pause).toHaveBeenCalledTimes(1);
+    });
+
+    it('eachBatch: a handler rejecting with null still throws an Error', async () => {
+      const { config } = await started(
+        { batch: true, batchSize: 2 },
+        jest.fn().mockRejectedValue(null),
+      );
+      const err = await config()
+        .eachBatch(batchPayload(['1', '2'].map(mkMsg), jest.fn()))
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+    });
+
+    it('eachMessage: a throwing idempotencyKey extractor goes through the retry path', async () => {
+      const idempotency = {
+        isProcessed: () => {
+          throw new Error('no id header');
+        },
+        markProcessed: jest.fn(),
+        stopCleanup: jest.fn(),
+      };
+      const pause = jest.fn(() => jest.fn());
+      const { config } = await started(
+        { idempotencyKey: () => 'k' },
+        jest.fn(),
+        { idempotency },
+      );
+      await expect(
+        config().eachMessage(messagePayload('5', pause)),
+      ).rejects.toThrow('no id header');
+      expect(pause).toHaveBeenCalledTimes(1);
+    });
+
+    it('eachBatch: a throwing idempotencyKey extractor goes through the retry path', async () => {
+      const idempotency = {
+        filterDuplicates: () => {
+          throw new Error('no id header');
+        },
+        markProcessed: jest.fn(),
+        stopCleanup: jest.fn(),
+      };
+      const pause = jest.fn(() => jest.fn());
+      const { config } = await started(
+        { batch: true, idempotencyKey: () => 'k' },
+        jest.fn(),
+        { idempotency },
+      );
+      await expect(
+        config().eachBatch(
+          batchPayload(['1'].map(mkMsg), jest.fn(), undefined, pause),
+        ),
+      ).rejects.toThrow('no id header');
+      expect(pause).toHaveBeenCalledTimes(1);
+    });
+
+    it('eachBatch: stops between chunks once shutdown starts', async () => {
+      const ref: { registry?: any } = {};
+      const handler = jest.fn(async () => {
+        await ref.registry.gracefulShutdown();
+      });
+      const { config, registry } = await started(
+        { batch: true, batchSize: 2 },
+        handler,
+      );
+      ref.registry = registry;
+      const resolveOffset = jest.fn();
+      await config().eachBatch(
+        batchPayload(['1', '2', '3', '4'].map(mkMsg), resolveOffset),
+      );
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(resolveOffset.mock.calls).toEqual([['2']]);
+    });
+
     it('gracefulShutdown cancels pending resume timers', async () => {
       const { config, registry } = await started(
         { retry: { initialRetryTime: 60_000 } },
@@ -436,6 +521,29 @@ describe('consumer groups', () => {
       ]);
       await registry.startAll();
       expect(consumerConfig()['js.consumer.max.batch.size']).toBe(100);
+    },
+  );
+
+  it('does not forward handler retry options to the client backoff', async () => {
+    const { registry, consumerConfig } = makeHarness();
+    registry.registerConsumers([
+      consumerMeta('t', {
+        retry: { maxRetryTime: 600000, initialRetryTime: 0 },
+      }),
+    ]);
+    await registry.startAll();
+    expect(consumerConfig().kafkaJS.retry).toBeUndefined();
+  });
+
+  it.each([0, -1, Number.NaN])(
+    'rejects dlq.sendTimeout %p at registration',
+    (sendTimeout) => {
+      const { registry } = makeHarness();
+      expect(() =>
+        registry.registerConsumers([
+          consumerMeta('t', { dlq: { topic: 'd', sendTimeout } }),
+        ]),
+      ).toThrow('Consumer "t": dlq.sendTimeout must be a positive number');
     },
   );
 

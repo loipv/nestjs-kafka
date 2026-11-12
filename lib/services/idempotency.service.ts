@@ -24,7 +24,11 @@ export class IdempotencyService implements OnModuleDestroy {
     @Inject(CONSUMER_MODULE_OPTIONS)
     moduleOptions?: ConsumerModuleOptions,
   ) {
-    this.maxKeys = moduleOptions?.idempotencyMaxKeys ?? 100000;
+    const maxKeys = moduleOptions?.idempotencyMaxKeys ?? 100000;
+    if (!Number.isInteger(maxKeys) || maxKeys <= 0) {
+      throw new Error('idempotencyMaxKeys must be a positive integer');
+    }
+    this.maxKeys = maxKeys;
     this.startCleanup();
   }
 
@@ -75,7 +79,10 @@ export class IdempotencyService implements OnModuleDestroy {
       ttl: ttl ?? this.defaultTtl,
     });
 
-    while (this.processedKeys.size > this.maxKeys) {
+    while (
+      this.processedKeys.size > this.maxKeys &&
+      this.processedKeys.size > 0
+    ) {
       const oldest = this.processedKeys.keys().next().value as string;
       this.processedKeys.delete(oldest);
     }

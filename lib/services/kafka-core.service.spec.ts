@@ -252,6 +252,33 @@ describe('KafkaCoreService', () => {
     });
   });
 
+  it('connectProducerInBackground reconnects an idle producer once, and never after shutdown', async () => {
+    const producer = {
+      connect: jest.fn(() => new Promise<void>(() => {})),
+      disconnect: jest.fn().mockResolvedValue(undefined),
+    };
+    (KafkaJS.Kafka as unknown as jest.Mock).mockImplementationOnce(() => ({
+      producer: () => producer,
+    }));
+    const core = new KafkaCoreService();
+    core.registerConnection({ ...opts });
+
+    core.connectProducerInBackground('default');
+    core.connectProducerInBackground('default'); // in flight: no second connect
+    expect(producer.connect).toHaveBeenCalledTimes(1);
+
+    jest.useFakeTimers();
+    try {
+      const closing = core.disconnectAll();
+      await jest.advanceTimersByTimeAsync(5000);
+      await closing;
+    } finally {
+      jest.useRealTimers();
+    }
+    core.connectProducerInBackground('default');
+    expect(producer.connect).toHaveBeenCalledTimes(1);
+  });
+
   it('records consumer group statuses', () => {
     const core = new KafkaCoreService();
     core.setConsumerStatus('default:g', 'starting');

@@ -154,6 +154,16 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const groupId = options.groupId || `${topic}-group`;
     const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
 
+    const sendTimeout = options.dlq?.sendTimeout;
+    if (
+      sendTimeout !== undefined &&
+      !(Number.isFinite(sendTimeout) && sendTimeout > 0)
+    ) {
+      throw new Error(
+        `Consumer "${topic}": dlq.sendTimeout must be a positive number`,
+      );
+    }
+
     // Fail fast on a mistyped DLQ connection instead of at the first failure
     if (options.dlq?.connection) {
       this.kafkaCore.getKafka(options.dlq.connection);
@@ -457,18 +467,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       const topicOptions = metadata.options;
       const namespace = this.idempotencyNamespace(connection, groupId, topic);
 
-      if (
-        topicOptions.idempotencyKey &&
-        this.idempotencyService.isProcessed(
-          message,
-          topicOptions.idempotencyKey,
-          namespace,
-        )
-      ) {
-        this.logger.debug(`Skipping duplicate message from ${topic}`);
-        return;
-      }
-
       const processOnce = async () => {
         const processedMessage =
           topicOptions.deserialize !== false
@@ -501,8 +499,29 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         partition,
         message.offset,
       );
+      // Everything that can throw (the idempotency extractor included) runs
+      // inside the try, so every failure pauses the partition first.
       try {
+        if (
+          topicOptions.idempotencyKey &&
+          this.idempotencyService.isProcessed(
+            message,
+            topicOptions.idempotencyKey,
+            namespace,
+          )
+        ) {
+          this.logger.debug(`Skipping duplicate message from ${topic}`);
+          return;
+        }
         await invokeOnce();
+        if (topicOptions.idempotencyKey) {
+          this.idempotencyService.markProcessed(
+            message,
+            topicOptions.idempotencyKey,
+            namespace,
+            topicOptions.idempotencyTtl,
+          );
+        }
       } catch (error) {
         await this.handleHandlerFailure({
           group,
@@ -510,21 +529,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           partition,
           messages: [message],
           attemptKey,
-          error: error as Error,
+          error,
           pause: () => payload.pause(),
         });
         return;
       }
 
       this.retryTracker.clear(attemptKey);
-      if (topicOptions.idempotencyKey) {
-        this.idempotencyService.markProcessed(
-          message,
-          topicOptions.idempotencyKey,
-          namespace,
-          topicOptions.idempotencyTtl,
-        );
-      }
     };
 
     // Resolves once the client has started its fetch loop. Handler and broker
@@ -558,7 +569,11 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         messages,
         topicHandler.metadata.options.batchSize,
       )) {
-        if (!payload.isRunning() || payload.isStale()) return;
+        // The client never resets isRunning() during disconnect: check our own
+        // flag too so shutdown does not wait for every remaining chunk.
+        if (this.isShuttingDown || !payload.isRunning() || payload.isStale()) {
+          return;
+        }
 
         // Throws (after pausing the partition) when the chunk must be retried
         await this.processChunk(group, topicHandler, payload, chunk);
@@ -590,19 +605,72 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       topic,
     );
 
-    const processable = options.idempotencyKey
-      ? this.idempotencyService.filterDuplicates(
+    const attemptKey = PartitionRetryTracker.attemptKey(
+      group.groupKey,
+      topic,
+      partition,
+      chunk[0].offset,
+    );
+
+    // Everything that can throw (the idempotency extractor included) runs
+    // inside the try, so every failure pauses the partition first.
+    let processable = chunk;
+    try {
+      if (options.idempotencyKey) {
+        processable = this.idempotencyService.filterDuplicates(
           chunk,
           options.idempotencyKey,
           namespace,
-        )
-      : chunk;
-    if (processable.length === 0) return;
+        );
+      }
+      if (processable.length === 0) return;
+      await this.invokeBatchHandler(
+        group,
+        handler,
+        options,
+        topic,
+        partition,
+        processable,
+      );
+      if (options.idempotencyKey) {
+        for (const msg of processable) {
+          this.idempotencyService.markProcessed(
+            msg,
+            options.idempotencyKey,
+            namespace,
+            options.idempotencyTtl,
+          );
+        }
+      }
+    } catch (error) {
+      await this.handleHandlerFailure({
+        group,
+        metadata,
+        partition,
+        messages: processable,
+        attemptKey,
+        error,
+        pause: () => payload.pause(),
+      });
+      return;
+    }
 
+    this.retryTracker.clear(attemptKey);
+  }
+
+  /** Deserialize, optionally group by key, and call the batch handler (traced). */
+  private async invokeBatchHandler(
+    group: ConsumerGroup,
+    handler: TopicHandler['handler'],
+    options: ConsumerOptions,
+    topic: string,
+    partition: number,
+    messages: KafkaJS.KafkaMessage[],
+  ): Promise<void> {
     const deserialized =
       options.deserialize !== false
-        ? processable.map((msg) => deserializeMessage(msg, topic, partition))
-        : processable;
+        ? messages.map((msg) => deserializeMessage(msg, topic, partition))
+        : messages;
 
     const processBatch = async () => {
       if (options.groupByKey) {
@@ -613,57 +681,22 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     };
 
     // First message becomes the span parent, the others are linked
-    const invokeOnce = async () => {
-      if (this.tracingService?.isEnabled()) {
-        return this.tracingService.withBatchConsumeSpan(
-          {
-            topic,
-            partition,
-            groupId: group.groupId,
-            messagesHeaders: processable.map((msg) => ({
-              offset: msg.offset,
-              key: msg.key?.toString(),
-              headers: msg.headers,
-            })),
-          },
-          processBatch,
-        );
-      }
-      return processBatch();
-    };
-
-    const attemptKey = PartitionRetryTracker.attemptKey(
-      group.groupKey,
-      topic,
-      partition,
-      chunk[0].offset,
-    );
-    try {
-      await invokeOnce();
-    } catch (error) {
-      await this.handleHandlerFailure({
-        group,
-        metadata,
-        partition,
-        messages: processable,
-        attemptKey,
-        error: error as Error,
-        pause: () => payload.pause(),
-      });
-      return;
+    if (this.tracingService?.isEnabled()) {
+      return this.tracingService.withBatchConsumeSpan(
+        {
+          topic,
+          partition,
+          groupId: group.groupId,
+          messagesHeaders: messages.map((msg) => ({
+            offset: msg.offset,
+            key: msg.key?.toString(),
+            headers: msg.headers,
+          })),
+        },
+        processBatch,
+      );
     }
-
-    this.retryTracker.clear(attemptKey);
-    if (options.idempotencyKey) {
-      for (const msg of processable) {
-        this.idempotencyService.markProcessed(
-          msg,
-          options.idempotencyKey,
-          namespace,
-          options.idempotencyTtl,
-        );
-      }
-    }
+    return processBatch();
   }
 
   /**
@@ -679,10 +712,18 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     partition: number;
     messages: KafkaJS.KafkaMessage[];
     attemptKey: string;
-    error: Error;
+    error: unknown;
     pause: () => (() => void) | undefined;
   }): Promise<void> {
-    const { group, metadata, partition, messages, attemptKey, error } = ctx;
+    const { group, metadata, partition, messages, attemptKey } = ctx;
+    // The client logs `${e}: ${e.stack}` before seeking back; a null or
+    // undefined rejection would throw there and skip the seek (message lost).
+    const error =
+      ctx.error instanceof Error
+        ? ctx.error
+        : new Error(
+            `Handler rejected with a non-Error value: ${String(ctx.error)}`,
+          );
     const { topic, options } = metadata;
     const attempt = this.retryTracker.nextAttempt(attemptKey);
 
@@ -775,13 +816,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       consumerConfig.partitionAssigners =
         options.partitionAssigners as KafkaJS.PartitionAssigners[];
     }
-    if (options.retry) {
-      consumerConfig.retry = {
-        retries: options.retry.retries,
-        maxRetryTime: options.retry.maxRetryTime,
-        initialRetryTime: options.retry.initialRetryTime,
-      };
-    }
+    // `options.retry` configures handler retries only. It is NOT forwarded to
+    // the client's request backoff (retry.backoff.ms is limited to 300000).
 
     return consumerConfig;
   }

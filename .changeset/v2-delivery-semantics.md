@@ -18,9 +18,10 @@ Fixes:
 Breaking changes:
 
 - A failing handler is no longer re-run inside the same call. The library pauses the message's partition, rethrows, and resumes after the backoff delay; the client redelivers the message. Other partitions keep flowing and long retries no longer get the member evicted. Each retry logs an extra line from the Kafka client.
-- `retry.maxRetryTime` (default 30000) caps every retry delay, DLQ backoff included.
+- `retry.maxRetryTime` (default 30000) caps every retry delay, DLQ backoff included. Consumer `retry` options no longer change the client's request backoff.
+- A throwing `idempotencyKey` extractor is handled like a handler failure instead of redelivering in a tight loop. `idempotencyMaxKeys` must be a positive integer and `dlq.sendTimeout` a positive number.
 - A failed DLQ send is retried with the backoff delay; new `dlq.sendTimeout` (default 30000) bounds each send.
 - Batch consumers dead-letter after `dlq.maxRetries` (was `retry.retries`), in one send per failing chunk, and commit after each successful chunk.
-- `KafkaHealthIndicator.isHealthy` is up only when every producer is connected and every consumer group is running; its details are `{ producers, consumers }` instead of `connected`. Producers connect at startup.
+- `KafkaHealthIndicator.isHealthy` is up only when every producer is connected and every consumer group is running; its details are `{ producers, consumers }` instead of `connected`. Producers connect at startup, and a disconnected producer is reconnected in the background when `isHealthy` runs.
 - An `ssl` object with an unknown key fails at startup. New `rdkafka` option passes raw librdkafka properties.
 - `DlqService.handleFailure()` and `sendToDlq()` take `messages: KafkaMessage[]`; `handleFailure()` never rejects. `IdempotencyService` methods take a `namespace` argument. `KafkaHealthIndicator` no longer depends on `KafkaClient`.

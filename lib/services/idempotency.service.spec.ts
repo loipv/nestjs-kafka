@@ -110,6 +110,15 @@ describe('IdempotencyService size bound', () => {
     }
   });
 
+  it.each([-1, 0, 1.5, Number.POSITIVE_INFINITY])(
+    'rejects idempotencyMaxKeys %p',
+    (idempotencyMaxKeys) => {
+      expect(() => new IdempotencyService({ idempotencyMaxKeys })).toThrow(
+        'idempotencyMaxKeys must be a positive integer',
+      );
+    },
+  );
+
   it('defaults idempotencyMaxKeys to 100000', () => {
     const svc = new IdempotencyService();
     try {

@@ -69,6 +69,12 @@ export class KafkaHealthIndicator {
     );
     const consumers = this.kafkaCore.getConsumerStatuses();
 
+    // A producer whose connect failed is only retried by the next send();
+    // a readiness probe must not wait for traffic that cannot arrive.
+    for (const [name, connected] of Object.entries(producers)) {
+      if (!connected) this.kafkaCore.connectProducerInBackground(name);
+    }
+
     const problems = [
       ...Object.entries(producers)
         .filter(([, connected]) => !connected)

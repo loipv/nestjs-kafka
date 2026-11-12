@@ -776,7 +776,7 @@ export class HealthController {
 }
 ```
 
-`isHealthy` is up when every connection's producer is connected and every consumer group is running. Producers connect at startup (a failure only logs a warning; `send()` retries the connection). The result lists each part:
+`isHealthy` is up when every connection's producer is connected and every consumer group is running. Producers connect at startup; a failure only logs a warning, and each `isHealthy` call (or the next `send()`) starts a new connection attempt, so readiness recovers once the brokers are back. The result lists each part:
 
 ```json
 {
@@ -1076,12 +1076,13 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | Before (v1) | Now (v2) |
 |---|---|
 | A failing handler was re-run inside the same call (`sleep` between attempts); long retries blocked every partition and could get the member evicted | The partition is paused, the error rethrown, and the message redelivered after the delay; other partitions keep flowing. Each retry logs an extra line from the Kafka client |
-| Retry delays capped at 30s | Capped by `retry.maxRetryTime` (default 30s), DLQ backoff included |
-| A failed DLQ send was redelivered immediately | It is retried with the backoff delay; `dlq.sendTimeout` (default 30s) bounds each send |
+| Retry delays capped at 30s; `retry.retries` / `initialRetryTime` / `maxRetryTime` were also copied into the client's request backoff | Capped by `retry.maxRetryTime` (default 30s), DLQ backoff included. `retry` configures handler retries only; client backoff is `KafkaModule.forRoot({ retry })` or `rdkafka` |
+| A failed DLQ send was redelivered immediately | It is retried with the backoff delay; `dlq.sendTimeout` (default 30s, must be positive) bounds each send |
 | Batch consumers decided on the DLQ with `retry.retries` and sent messages one by one | Batch consumers use `dlq.maxRetries` like single-message consumers and dead-letter a chunk in one send |
 | A batch was committed once, after all its chunks | Each successful chunk is committed; a failing chunk is redelivered without the earlier ones |
 | Two `@Consumer`s for the same topic in one group: the last one silently won | Fails at startup |
-| Idempotency keys were global and unbounded | Scoped per connection, group and topic; at most `idempotencyMaxKeys` (default 100000) kept |
+| Idempotency keys were global and unbounded; a batch also recorded keys of dead-lettered or skipped chunks | Scoped per connection, group and topic; at most `idempotencyMaxKeys` (a positive integer, default 100000) kept; recorded only after the handler succeeds |
+| A throwing `idempotencyKey` extractor redelivered the message in a tight loop | It is handled like a handler failure (pause, backoff, skip/DLQ) |
 | Consumers started in `onModuleInit` | Consumers start in `onApplicationBootstrap`, after every provider's `onModuleInit` |
 | `isHealthy` checked one producer, connected on the first send | Producers connect at startup; `isHealthy` covers every producer and every consumer group, with per-part details (`connected` is replaced by `producers` / `consumers`) |
 | `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties |

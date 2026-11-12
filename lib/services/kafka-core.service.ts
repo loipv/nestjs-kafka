@@ -40,6 +40,8 @@ export class KafkaCoreService implements OnApplicationBootstrap {
   private readonly logger = new Logger(KafkaCoreService.name);
   private connections = new Map<string, KafkaConnection>();
   private consumerStatuses = new Map<string, ConsumerGroupStatus>();
+  /** Set by disconnectAll: no background reconnect after shutdown */
+  private isShutDown = false;
 
   /**
    * Register a new Kafka connection
@@ -226,12 +228,34 @@ export class KafkaCoreService implements OnApplicationBootstrap {
    */
   onApplicationBootstrap(): void {
     for (const name of this.connections.keys()) {
-      this.connectProducer(name).catch((error) =>
-        this.logger.warn(
-          `Producer for connection "${name}" could not connect at startup: ${String(error)}`,
-        ),
-      );
+      this.connectProducerInBackground(name, 'at startup');
     }
+  }
+
+  /**
+   * Start connecting `name`'s producer without awaiting it. No-op when it is
+   * connected, a connect is in flight, or shutdown has begun. The health
+   * indicator calls this for a disconnected producer, so a producer whose
+   * startup connect failed recovers without waiting for a send().
+   */
+  connectProducerInBackground(
+    name: string,
+    context = 'in the background',
+  ): void {
+    const connection = this.connections.get(name);
+    if (
+      !connection ||
+      this.isShutDown ||
+      connection.isProducerConnected ||
+      connection.connectingPromise
+    ) {
+      return;
+    }
+    this.connectProducer(name).catch((error) =>
+      this.logger.warn(
+        `Producer for connection "${name}" could not connect ${context}: ${String(error)}`,
+      ),
+    );
   }
 
   /**
@@ -291,6 +315,7 @@ export class KafkaCoreService implements OnApplicationBootstrap {
    * Disconnect all producers
    */
   async disconnectAll(): Promise<void> {
+    this.isShutDown = true;
     for (const [name, connection] of this.connections) {
       try {
         // A connect still in flight (e.g. the one started at bootstrap) must be

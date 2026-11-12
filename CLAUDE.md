@@ -113,7 +113,7 @@ lib/
 
 ### Retry Mechanism — Pause Partition and Rethrow
 
-**Never sleep inside a handler.** On a handler failure `ConsumerRegistryService.handleHandlerFailure` asks for a verdict (`evaluateRetry`, or `DlqService.handleFailure` when a DLQ is configured):
+**Never sleep inside a handler.** Everything that can throw in `eachMessage` / a chunk (idempotency extractor included) runs inside the try, and `handleHandlerFailure` turns a non-Error rejection into an `Error` (the client's catch block would otherwise throw on `${e}` and skip its seek-back, losing the message). Handler `retry` options are NOT copied into the client's `kafkaJS.retry`. On a handler failure `ConsumerRegistryService.handleHandlerFailure` asks for a verdict (`evaluateRetry`, or `DlqService.handleFailure` when a DLQ is configured):
 - `retry`: pause the payload's partition (`payload.pause()`), schedule its resume through `PartitionRetryTracker.scheduleResume` after `delayMs`, and **rethrow**. The client seeks back and redelivers after the resume. The consumer keeps polling, so other partitions keep flowing and the member is never evicted.
 - `complete` (dead-lettered or skipped): return, so the offset is stored.
 
