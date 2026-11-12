@@ -99,6 +99,44 @@ describe('Kafka e2e (testcontainers)', () => {
     }
   });
 
+  it('boots and round-trips with the documented producer options', async () => {
+    const received: any[] = [];
+
+    @Injectable()
+    class ProducerOptionsConsumer {
+      @Consumer('e2e-producer-opts', {
+        groupId: 'e2e-po-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+      })
+      async handle(msg: any) {
+        received.push(msg);
+      }
+    }
+
+    const app = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({
+          clientId: 'e2e',
+          brokers: [bootstrap],
+          producer: { acks: -1, timeout: 30000, compression: 1 },
+        }),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [ProducerOptionsConsumer],
+    }).compile();
+    await app.init();
+    try {
+      await app.get(KafkaClient).send('e2e-producer-opts', {
+        value: { id: 'p' },
+      });
+      await waitFor(() => received.length >= 1);
+      expect(received[0].value).toEqual({ id: 'p' });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('retries a failing handler in-process, then keeps consuming (regression: fix #4)', async () => {
     let poisonAttempts = 0;
     const successes: string[] = [];
@@ -482,6 +520,56 @@ describe('DLQ on a separate cluster (dlq.connection)', () => {
       const mainTopics = await withAdmin(bootstrap, (a) => a.listTopics());
       expect(mainTopics).toContain('e2e-xdlq-src');
       expect(mainTopics).not.toContain('e2e-xdlq-dead');
+    } finally {
+      await moduleRef.close();
+    }
+  });
+
+  it('two forRoot() calls: a consumer on the second connection receives', async () => {
+    const received: any[] = [];
+
+    @Injectable()
+    class SecondConnectionConsumer {
+      @Consumer('e2e-two-roots', {
+        connection: 'second',
+        groupId: 'e2e-two-roots-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+      })
+      async handle(msg: any) {
+        received.push(msg);
+      }
+    }
+
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'e2e', brokers: [bootstrap] }),
+        KafkaModule.forRoot({
+          name: 'second',
+          clientId: 'e2e-2',
+          brokers: [dlqBootstrap],
+        }),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [SecondConnectionConsumer],
+    }).compile();
+    await moduleRef.init();
+
+    try {
+      await moduleRef
+        .get(KafkaClient)
+        .send(
+          'e2e-two-roots',
+          { value: { id: 'r' } },
+          { connection: 'second' },
+        );
+      await waitFor(() => received.length >= 1);
+      expect(received[0].value).toEqual({ id: 'r' });
+
+      const secondTopics = await withAdmin(dlqBootstrap, (a) => a.listTopics());
+      const mainTopics = await withAdmin(bootstrap, (a) => a.listTopics());
+      expect(secondTopics).toContain('e2e-two-roots');
+      expect(mainTopics).not.toContain('e2e-two-roots');
     } finally {
       await moduleRef.close();
     }
