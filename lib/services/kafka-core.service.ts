@@ -32,6 +32,9 @@ interface KafkaConnection {
   connectingPromise: Promise<void> | null;
 }
 
+/** How long shutdown waits for a producer connect still in flight (the client's own disconnect timeout) */
+const IN_FLIGHT_CONNECT_WAIT_MS = 5000;
+
 @Injectable()
 export class KafkaCoreService implements OnApplicationBootstrap {
   private readonly logger = new Logger(KafkaCoreService.name);
@@ -292,7 +295,14 @@ export class KafkaCoreService implements OnApplicationBootstrap {
       try {
         // A connect still in flight (e.g. the one started at bootstrap) must be
         // torn down too, or it finishes after shutdown and keeps the process
-        // alive. Never await it: against an unreachable broker it hangs.
+        // alive. Let it finish if it can, but never wait on it unbounded:
+        // against an unreachable broker it hangs.
+        if (connection.connectingPromise) {
+          await this.settleWithin(
+            connection.connectingPromise,
+            IN_FLIGHT_CONNECT_WAIT_MS,
+          );
+        }
         if (connection.isProducerConnected || connection.connectingPromise) {
           await connection.producer.disconnect();
           connection.isProducerConnected = false;
@@ -302,6 +312,18 @@ export class KafkaCoreService implements OnApplicationBootstrap {
         this.logger.error(`Error disconnecting producer for "${name}"`, error);
       }
     }
+  }
+
+  /** Resolves when `promise` settles or after `ms`, whichever comes first. */
+  private async settleWithin(promise: Promise<unknown>, ms: number) {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      promise.catch(() => undefined),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+    clearTimeout(timer);
   }
 
   /**

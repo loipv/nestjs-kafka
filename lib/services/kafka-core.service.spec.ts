@@ -197,22 +197,59 @@ describe('KafkaCoreService', () => {
     );
   });
 
-  it('disconnectAll disconnects a producer whose connect is still in flight, without waiting for it', async () => {
-    const producer = {
-      connect: jest.fn(() => new Promise<void>(() => {})), // unreachable broker
-      disconnect: jest.fn().mockResolvedValue(undefined),
+  describe('disconnectAll with a connect in flight', () => {
+    const coreWith = (producer: unknown) => {
+      (KafkaJS.Kafka as unknown as jest.Mock).mockImplementationOnce(() => ({
+        producer: () => producer,
+      }));
+      const core = new KafkaCoreService();
+      core.registerConnection({ ...opts });
+      return core;
     };
-    (KafkaJS.Kafka as unknown as jest.Mock).mockImplementationOnce(() => ({
-      producer: () => producer,
-    }));
-    const core = new KafkaCoreService();
-    core.registerConnection({ ...opts });
 
-    core.onApplicationBootstrap(); // connect starts and never settles
-    await core.disconnectAll();
+    it('waits for a connect that completes, then disconnects', async () => {
+      let finishConnect!: () => void;
+      const producer = {
+        connect: jest.fn(
+          () =>
+            new Promise<void>((r) => {
+              finishConnect = r;
+            }),
+        ),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+      };
+      const core = coreWith(producer);
 
-    expect(producer.disconnect).toHaveBeenCalledTimes(1);
-    expect(core.isProducerConnected()).toBe(false);
+      core.onApplicationBootstrap(); // connect starts, not awaited
+      const closing = core.disconnectAll();
+      finishConnect();
+      await closing;
+
+      expect(producer.disconnect).toHaveBeenCalledTimes(1);
+      expect(core.isProducerConnected()).toBe(false);
+    });
+
+    it('gives up waiting after 5s (unreachable broker) and disconnects anyway', async () => {
+      jest.useFakeTimers();
+      try {
+        const producer = {
+          connect: jest.fn(() => new Promise<void>(() => {})),
+          disconnect: jest.fn().mockResolvedValue(undefined),
+        };
+        const core = coreWith(producer);
+
+        core.onApplicationBootstrap();
+        const closing = core.disconnectAll();
+        await jest.advanceTimersByTimeAsync(4999);
+        expect(producer.disconnect).not.toHaveBeenCalled();
+        await jest.advanceTimersByTimeAsync(1);
+        await closing;
+
+        expect(producer.disconnect).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   it('records consumer group statuses', () => {
