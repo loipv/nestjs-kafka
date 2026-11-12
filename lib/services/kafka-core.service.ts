@@ -290,6 +290,9 @@ export class KafkaCoreService implements OnApplicationBootstrap {
   async disconnectAll(): Promise<void> {
     for (const [name, connection] of this.connections) {
       try {
+        // A connect still in flight (e.g. the one started at bootstrap) would
+        // otherwise finish after shutdown and keep the process alive.
+        await connection.connectingPromise?.catch(() => undefined);
         if (connection.isProducerConnected) {
           await connection.producer.disconnect();
           connection.isProducerConnected = false;

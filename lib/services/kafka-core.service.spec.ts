@@ -197,6 +197,32 @@ describe('KafkaCoreService', () => {
     );
   });
 
+  it('disconnectAll waits for an in-flight connect and disconnects it', async () => {
+    let finishConnect!: () => void;
+    const producer = {
+      connect: jest.fn(
+        () =>
+          new Promise<void>((r) => {
+            finishConnect = r;
+          }),
+      ),
+      disconnect: jest.fn().mockResolvedValue(undefined),
+    };
+    (KafkaJS.Kafka as unknown as jest.Mock).mockImplementationOnce(() => ({
+      producer: () => producer,
+    }));
+    const core = new KafkaCoreService();
+    core.registerConnection({ ...opts });
+
+    core.onApplicationBootstrap(); // connect starts, not awaited
+    const closing = core.disconnectAll();
+    finishConnect();
+    await closing;
+
+    expect(producer.disconnect).toHaveBeenCalledTimes(1);
+    expect(core.isProducerConnected()).toBe(false);
+  });
+
   it('records consumer group statuses', () => {
     const core = new KafkaCoreService();
     core.setConsumerStatus('default:g', 'starting');
