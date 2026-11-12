@@ -184,8 +184,9 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
     return consumerInstances;
   }
 
-  async onApplicationShutdown(): Promise<void> {
-    await this.registryService.gracefulShutdown();
+  // ConsumerRegistryService shuts the consumers down in its own
+  // onApplicationShutdown; this only allows a restarted app to start again.
+  onApplicationShutdown(): void {
     this.isStarted = false;
   }
 }

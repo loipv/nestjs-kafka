@@ -18,6 +18,7 @@ import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
 import { DlqService } from './dlq.service';
 import { TracingService } from './tracing.service';
+import { PartitionRetryTracker } from './partition-retry-tracker';
 import {
   ConsumerMetadata,
   ConsumerModuleOptions,
@@ -34,10 +35,18 @@ interface TopicHandler {
   handler: (...args: any[]) => Promise<void>;
 }
 
+/** librdkafka ERR__REVOKE_PARTITIONS (a literal: unit tests mock the module) */
+const ERR_REVOKE_PARTITIONS = -174;
+/** Default chunk size, shared with BatchProcessorService.splitIntoBatches */
+const DEFAULT_BATCH_SIZE = 100;
+
 interface ConsumerGroup {
   groupId: string;
+  /** `<connection>:<groupId>` */
+  groupKey: string;
   connection: string;
-  consumer: Consumer;
+  /** Created in startConsumerGroup, once every topic of the group is registered */
+  consumer?: Consumer;
   topics: Map<string, TopicHandler>;
   options: ConsumerOptions; // Use first consumer's options for shared settings
   isRunning: boolean;
@@ -50,6 +59,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   private readonly logger = new Logger(ConsumerRegistryService.name);
   private consumerGroups = new Map<string, ConsumerGroup>();
   private isShuttingDown = false;
+  private shutdownPromise?: Promise<void>;
+  private readonly retryTracker = new PartitionRetryTracker();
 
   constructor(
     private readonly kafkaCore: KafkaCoreService,
@@ -155,14 +166,10 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     let group = this.consumerGroups.get(groupKey);
 
     if (!group) {
-      const consumer = this.kafkaCore.getKafka(connectionName).consumer({
-        kafkaJS: this.buildConsumerConfig(groupId, options),
-      });
-
       group = {
         groupId,
+        groupKey,
         connection: connectionName,
-        consumer,
         topics: new Map(),
         options,
         isRunning: false,
@@ -179,6 +186,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     if (group.isBatch !== !!options.batch) {
       throw new Error(
         `Consumer group "${groupId}" mixes batch and non-batch consumers; use separate groupIds`,
+      );
+    }
+
+    if (group.topics.has(topic)) {
+      throw new Error(
+        `Consumer group "${groupId}" already has a handler for topic "${topic}"`,
       );
     }
 
@@ -262,8 +275,70 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     }
   }
 
+  /**
+   * Build the group's consumer: kafkaJS options, a rebalance callback that
+   * drops retry state of revoked partitions, and (batch groups) a client batch
+   * size large enough for the biggest `batchSize` in the group.
+   */
+  private createConsumer(group: ConsumerGroup): Consumer {
+    const config: KafkaJS.ConsumerConstructorConfig = {
+      kafkaJS: this.buildConsumerConfig(group.groupId, group.options),
+      rebalance_cb: (
+        err: { code: number },
+        assignment: Array<{ topic: string; partition: number }>,
+      ) => this.onRebalance(group, err, assignment),
+    };
+    if (group.isBatch) {
+      config['js.consumer.max.batch.size'] = Math.max(
+        ...[...group.topics.values()].map(({ metadata }) => {
+          const size = metadata.options.batchSize;
+          return size !== undefined && Number.isInteger(size) && size > 0
+            ? size
+            : DEFAULT_BATCH_SIZE;
+        }),
+      );
+    }
+    return this.kafkaCore.getKafka(group.connection).consumer(config);
+  }
+
+  /**
+   * On revoke: forget retry state and resume the revoked partitions. Runs
+   * before the client unassigns them, so the resume is applied while they are
+   * still assigned; the client keeps its own paused set across rebalances and
+   * would otherwise leave a re-assigned partition paused.
+   */
+  private onRebalance(
+    group: ConsumerGroup,
+    err: { code: number },
+    assignment: Array<{ topic: string; partition: number }>,
+  ): void {
+    if (err.code !== ERR_REVOKE_PARTITIONS || assignment.length === 0) return;
+
+    this.retryTracker.revoke(
+      assignment.map(({ topic, partition }) =>
+        PartitionRetryTracker.partitionKey(group.groupKey, topic, partition),
+      ),
+    );
+
+    const byTopic = new Map<string, number[]>();
+    for (const { topic, partition } of assignment) {
+      byTopic.set(topic, [...(byTopic.get(topic) ?? []), partition]);
+    }
+    try {
+      group.consumer?.resume(
+        [...byTopic].map(([topic, partitions]) => ({ topic, partitions })),
+      );
+    } catch (error) {
+      this.logger.debug(
+        `Resume of revoked partitions in "${group.groupId}" failed: ${String(error)}`,
+      );
+    }
+  }
+
   private async startConsumerGroup(group: ConsumerGroup): Promise<void> {
-    const { groupId, consumer, topics, connection } = group;
+    const { groupId, topics, connection } = group;
+    const consumer = this.createConsumer(group);
+    group.consumer = consumer;
 
     try {
       await consumer.connect();
@@ -313,12 +388,21 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       this.logger.log(`Started consumer group: ${groupId}`);
     } catch (error) {
       this.logger.error(`Failed to start consumer group: ${groupId}`, error);
+      try {
+        await consumer.disconnect();
+      } catch (disconnectError) {
+        this.logger.error(
+          `Failed to disconnect consumer group after a failed start: ${groupId}`,
+          disconnectError,
+        );
+      }
       throw error;
     }
   }
 
   private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { groupId, consumer, topics, options, connection } = group;
+    const { groupId, topics, options, connection } = group;
+    const consumer = group.consumer!;
 
     // Build run config with only defined values
     // Note: restartOnFailure is not supported in confluent-kafka-javascript
@@ -405,7 +489,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { groupId, consumer, topics, options } = group;
+    const { groupId, topics, options } = group;
+    const consumer = group.consumer!;
 
     // Build run config with only defined values
     // Note: restartOnFailure is not supported in confluent-kafka-javascript
@@ -752,8 +837,15 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     });
   }
 
-  async gracefulShutdown(): Promise<void> {
+  /** Idempotent: every call returns the first call's promise. */
+  gracefulShutdown(): Promise<void> {
+    this.shutdownPromise ??= this.shutdown();
+    return this.shutdownPromise;
+  }
+
+  private async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    this.retryTracker.clearAll();
 
     // Cancel all in-flight retry delays so shutdown isn't blocked
     for (const cancel of this.shutdownResolvers) {
@@ -768,7 +860,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         try {
           if (group.isRunning) {
             // Note: stop() is not supported in confluent-kafka-javascript, use disconnect() directly
-            await group.consumer.disconnect();
+            await group.consumer?.disconnect();
           }
         } catch (error) {
           this.logger.error(

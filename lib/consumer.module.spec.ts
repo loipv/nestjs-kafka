@@ -119,6 +119,13 @@ describe('ConsumerModule', () => {
     });
   });
 
+  it('onApplicationShutdown does not call gracefulShutdown (the registry owns it)', () => {
+    const registry = { gracefulShutdown: jest.fn() };
+    const mod = new ConsumerModule({} as any, registry as any, {} as any);
+    mod.onApplicationShutdown();
+    expect(registry.gracefulShutdown).not.toHaveBeenCalled();
+  });
+
   it('no longer exposes the static clearConsumers()', () => {
     expect((ConsumerModule as any).clearConsumers).toBeUndefined();
   });

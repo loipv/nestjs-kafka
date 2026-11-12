@@ -151,17 +151,22 @@ describe('consumer groups', () => {
     timestamp: '',
   });
 
-  /** Registry wired to one mocked consumer; `config()` is what run() got. */
+  /**
+   * Registry wired to one mocked consumer; `config()` is what run() got,
+   * `consumerConfig()` what the consumer was constructed with.
+   */
   const makeHarness = (run = jest.fn().mockResolvedValue(undefined)) => {
     const consumer = {
       connect: jest.fn(),
       subscribe: jest.fn(),
       run,
       disconnect: jest.fn(),
+      resume: jest.fn(),
     };
+    const consumerFactory = jest.fn().mockReturnValue(consumer);
     const core = {
       getKafka: jest.fn().mockReturnValue({
-        consumer: jest.fn().mockReturnValue(consumer),
+        consumer: consumerFactory,
         admin: jest.fn().mockReturnValue({
           connect: jest.fn(),
           disconnect: jest.fn(),
@@ -179,7 +184,8 @@ describe('consumer groups', () => {
       undefined,
     );
     const config = () => run.mock.calls[0][0];
-    return { registry, config };
+    const consumerConfig = () => consumerFactory.mock.calls[0][0];
+    return { registry, config, consumer, consumerConfig };
   };
 
   const consumerMeta = (topic: string, options: any, handler = jest.fn()) =>
@@ -201,6 +207,101 @@ describe('consumer groups', () => {
     isStale,
     resolveOffset,
     heartbeat: () => {},
+  });
+
+  it('rejects a second handler for the same topic in one group', () => {
+    const { registry } = makeHarness();
+    expect(() =>
+      registry.registerConsumers([
+        consumerMeta('t', { groupId: 'g' }),
+        consumerMeta('t', { groupId: 'g' }),
+      ]),
+    ).toThrow('Consumer group "g" already has a handler for topic "t"');
+  });
+
+  it('creates the consumer at start with the largest batchSize', async () => {
+    const { registry, consumerConfig } = makeHarness();
+    registry.registerConsumers([
+      consumerMeta('a', { groupId: 'g', batch: true, batchSize: 250 }),
+      consumerMeta('b', { groupId: 'g', batch: true, batchSize: 10 }),
+    ]);
+    await registry.startAll();
+    expect(consumerConfig()['js.consumer.max.batch.size']).toBe(250);
+  });
+
+  it.each([0, 1.5, undefined])(
+    'falls back to 100 for batchSize %p',
+    async (batchSize) => {
+      const { registry, consumerConfig } = makeHarness();
+      registry.registerConsumers([
+        consumerMeta('t', { batch: true, batchSize }),
+      ]);
+      await registry.startAll();
+      expect(consumerConfig()['js.consumer.max.batch.size']).toBe(100);
+    },
+  );
+
+  it('sets no max batch size for a non-batch group', async () => {
+    const { registry, consumerConfig } = makeHarness();
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.startAll();
+    expect(consumerConfig()).not.toHaveProperty('js.consumer.max.batch.size');
+  });
+
+  it('disconnects the consumer when subscribe fails after connect', async () => {
+    const { registry, consumer } = makeHarness();
+    consumer.subscribe.mockRejectedValue(new Error('boom'));
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await expect(registry.startAll()).rejects.toThrow('boom');
+    expect(consumer.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('on revoke, resumes the revoked partitions and clears their retry state', async () => {
+    jest.useFakeTimers();
+    try {
+      const { registry, consumer, consumerConfig } = makeHarness();
+      registry.registerConsumers([consumerMeta('t', {})]);
+      await registry.startAll();
+      const tracker = (registry as any).retryTracker;
+      const resumeFn = jest.fn();
+      tracker.nextAttempt('default:t-group|t|0|5');
+      tracker.scheduleResume('default:t-group|t|0', 100, resumeFn);
+
+      consumerConfig().rebalance_cb({ code: -174 }, [
+        { topic: 't', partition: 0 },
+      ]);
+
+      expect(consumer.resume).toHaveBeenCalledWith([
+        { topic: 't', partitions: [0] },
+      ]);
+      jest.advanceTimersByTime(100);
+      expect(resumeFn).not.toHaveBeenCalled();
+      expect(tracker.nextAttempt('default:t-group|t|0|5')).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('ignores assign events', async () => {
+    const { registry, consumer, consumerConfig } = makeHarness();
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.startAll();
+    consumerConfig().rebalance_cb({ code: -175 }, [
+      { topic: 't', partition: 0 },
+    ]);
+    expect(consumer.resume).not.toHaveBeenCalled();
+  });
+
+  it('gracefulShutdown runs once when called twice', async () => {
+    const { registry, consumer } = makeHarness();
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.startAll();
+    await Promise.all([
+      registry.gracefulShutdown(),
+      registry.gracefulShutdown(),
+    ]);
+    await registry.gracefulShutdown();
+    expect(consumer.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('startAll() rejects when run() rejects', async () => {
