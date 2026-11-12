@@ -1,5 +1,4 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { KafkaClient } from '../services/kafka-client.service';
 import { KafkaCoreService } from '../services/kafka-core.service';
 
 // Import types only, service is optional
@@ -44,41 +43,52 @@ import type {
  *   }
  * }
  * ```
+ *
+ * `isHealthy` suits a readiness probe. librdkafka reconnects on its own, so
+ * do not restart the app (liveness) on a Kafka outage; `checkBrokers` probes
+ * broker reachability.
  */
 @Injectable()
 export class KafkaHealthIndicator {
   constructor(
-    private readonly kafkaClient: KafkaClient,
     private readonly kafkaCore: KafkaCoreService,
     @Optional()
     private readonly healthIndicatorService?: HealthIndicatorService,
   ) {}
 
   /**
-   * Check if Kafka producer is healthy (connected)
+   * Up when every registered producer is connected and every consumer group
+   * is running. Details list each producer and group; `message` names what is
+   * not ready.
    */
   isHealthy(key: string): HealthIndicatorResult {
-    const isHealthy = this.kafkaClient.isHealthy();
+    const producers = Object.fromEntries(
+      this.kafkaCore
+        .getConnectionNames()
+        .map((name) => [name, this.kafkaCore.isProducerConnected(name)]),
+    );
+    const consumers = this.kafkaCore.getConsumerStatuses();
 
-    if (this.healthIndicatorService) {
-      const indicator = this.healthIndicatorService.check(key);
-      if (isHealthy) {
-        return indicator.up({ connected: true });
-      }
-      return indicator.down({
-        connected: false,
-        message: 'Kafka producer is not connected',
-      });
+    const problems = [
+      ...Object.entries(producers)
+        .filter(([, connected]) => !connected)
+        .map(([name]) => `producer "${name}" not connected`),
+      ...Object.entries(consumers)
+        .filter(([, status]) => status !== 'running')
+        .map(([group, status]) => `consumer group "${group}" is ${status}`),
+    ];
+    const details = { producers, consumers };
+
+    if (problems.length === 0) {
+      return this.healthIndicatorService
+        ? this.healthIndicatorService.check(key).up(details)
+        : { [key]: { status: 'up', ...details } };
     }
 
-    // Fallback without TerminusModule
-    return {
-      [key]: {
-        status: isHealthy ? 'up' : 'down',
-        connected: isHealthy,
-        ...(isHealthy ? {} : { message: 'Kafka producer is not connected' }),
-      },
-    };
+    const down = { ...details, message: `Not ready: ${problems.join('; ')}` };
+    return this.healthIndicatorService
+      ? this.healthIndicatorService.check(key).down(down)
+      : { [key]: { status: 'down', ...down } };
   }
 
   /**

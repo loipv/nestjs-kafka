@@ -3,6 +3,9 @@ import { KafkaJS } from '@confluentinc/kafka-javascript';
 
 type SASLOptions = KafkaJS.SASLOptions;
 
+/** Lifecycle state of one consumer group, keyed `<connection>:<groupId>` */
+export type ConsumerGroupStatus = 'starting' | 'running' | 'failed' | 'stopped';
+
 export interface RetryOptions {
   initialRetryTime?: number;
   retries?: number;

@@ -122,6 +122,7 @@ describe('consumer groups', () => {
     };
     const consumerFactory = jest.fn().mockReturnValue(consumer);
     const core = {
+      setConsumerStatus: jest.fn(),
       getKafka: jest.fn().mockReturnValue({
         consumer: consumerFactory,
         admin: jest.fn().mockReturnValue({
@@ -148,7 +149,7 @@ describe('consumer groups', () => {
     );
     const config = () => run.mock.calls[0][0];
     const consumerConfig = () => consumerFactory.mock.calls[0][0];
-    return { registry, config, consumer, consumerConfig };
+    return { registry, config, consumer, consumerConfig, core };
   };
 
   const consumerMeta = (topic: string, options: any, handler = jest.fn()) =>
@@ -501,6 +502,30 @@ describe('consumer groups', () => {
     expect(consumer.disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('reports starting, running and stopped', async () => {
+    const { registry, core } = makeHarness();
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.startAll();
+    await registry.gracefulShutdown();
+    expect(core.setConsumerStatus.mock.calls).toEqual([
+      ['default:t-group', 'starting'],
+      ['default:t-group', 'running'],
+      ['default:t-group', 'stopped'],
+    ]);
+  });
+
+  it('reports failed when start throws', async () => {
+    const { registry, core } = makeHarness(
+      jest.fn().mockRejectedValue(new Error('nope')),
+    );
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await expect(registry.startAll()).rejects.toThrow('nope');
+    expect(core.setConsumerStatus.mock.calls.at(-1)).toEqual([
+      'default:t-group',
+      'failed',
+    ]);
+  });
+
   it('startAll() rejects when run() rejects', async () => {
     const { registry } = makeHarness(
       jest.fn().mockRejectedValue(new Error('not connected')),
@@ -598,6 +623,7 @@ describe('DLQ on a separate connection', () => {
   const makeRegistry = (connections: string[]) => {
     const admins: Record<string, ReturnType<typeof mkAdmin>> = {};
     const core = {
+      setConsumerStatus: jest.fn(),
       getKafka: jest.fn((name: string) => {
         if (!connections.includes(name)) {
           throw new Error(`Kafka connection "${name}" not found`);

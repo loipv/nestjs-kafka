@@ -117,6 +117,36 @@ describe('KafkaCoreService', () => {
     });
   });
 
+  it('connects every producer at bootstrap without throwing', async () => {
+    const failing = { connect: jest.fn().mockRejectedValue(new Error('down')) };
+    const ok = { connect: jest.fn().mockResolvedValue(undefined) };
+    (KafkaJS.Kafka as unknown as jest.Mock)
+      .mockImplementationOnce(() => ({ producer: () => failing }))
+      .mockImplementationOnce(() => ({ producer: () => ok }));
+    const core = new KafkaCoreService();
+    const warn = jest
+      .spyOn((core as any).logger, 'warn')
+      .mockImplementation(() => {});
+    core.registerConnection({ ...opts });
+    core.registerConnection({ ...opts, name: 'analytics' });
+
+    expect(core.onApplicationBootstrap()).toBeUndefined();
+    await new Promise((r) => setImmediate(r));
+
+    expect(failing.connect).toHaveBeenCalledTimes(1);
+    expect(ok.connect).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      'Producer for connection "default" could not connect at startup: Error: down',
+    );
+  });
+
+  it('records consumer group statuses', () => {
+    const core = new KafkaCoreService();
+    core.setConsumerStatus('default:g', 'starting');
+    core.setConsumerStatus('default:g', 'running');
+    expect(core.getConsumerStatuses()).toEqual({ 'default:g': 'running' });
+  });
+
   it('dedupes concurrent producer connects', async () => {
     const core = new KafkaCoreService();
     let resolveConnect!: () => void;

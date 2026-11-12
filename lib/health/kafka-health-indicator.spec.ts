@@ -1,6 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { KafkaHealthIndicator } from './kafka-health-indicator';
-import { KafkaClient } from '../services/kafka-client.service';
 import { KafkaCoreService } from '../services/kafka-core.service';
 
 // The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
@@ -13,13 +12,13 @@ jest.mock('@confluentinc/kafka-javascript', () => ({
 
 describe('KafkaHealthIndicator', () => {
   let healthIndicator: KafkaHealthIndicator;
-  let kafkaClient: jest.Mocked<KafkaClient>;
   let kafkaCore: jest.Mocked<KafkaCoreService>;
+  let producers: Record<string, boolean>;
+  let consumers: Record<string, string>;
 
   beforeEach(async () => {
-    const mockKafkaClient = {
-      isHealthy: jest.fn(),
-    };
+    producers = { default: true };
+    consumers = {};
 
     const mockAdminClient = {
       connect: jest.fn(),
@@ -33,47 +32,67 @@ describe('KafkaHealthIndicator', () => {
       getKafka: jest.fn().mockReturnValue({
         admin: jest.fn().mockReturnValue(mockAdminClient),
       }),
+      getConnectionNames: jest.fn(() => Object.keys(producers)),
+      isProducerConnected: jest.fn((name: string) => producers[name]),
+      getConsumerStatuses: jest.fn(() => ({ ...consumers })),
     };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KafkaHealthIndicator,
-        { provide: KafkaClient, useValue: mockKafkaClient },
         { provide: KafkaCoreService, useValue: mockKafkaCore },
       ],
     }).compile();
 
     healthIndicator = module.get<KafkaHealthIndicator>(KafkaHealthIndicator);
-    kafkaClient = module.get(KafkaClient);
     kafkaCore = module.get(KafkaCoreService);
   });
 
   describe('isHealthy', () => {
-    it('should return up status when producer is connected', () => {
-      kafkaClient.isHealthy.mockReturnValue(true);
+    it('is up when every producer is connected and every group is running', () => {
+      producers = { default: true, analytics: true };
+      consumers = { 'default:g': 'running' };
 
-      const result = healthIndicator.isHealthy('kafka');
-
-      expect(result).toEqual({
+      expect(healthIndicator.isHealthy('kafka')).toEqual({
         kafka: {
           status: 'up',
-          connected: true,
+          producers: { default: true, analytics: true },
+          consumers: { 'default:g': 'running' },
         },
       });
     });
 
-    it('should return down status when producer is not connected', () => {
-      kafkaClient.isHealthy.mockReturnValue(false);
+    it('is down with a message naming a disconnected producer', () => {
+      producers = { default: true, analytics: false };
+
+      expect(healthIndicator.isHealthy('kafka')).toEqual({
+        kafka: {
+          status: 'down',
+          producers: { default: true, analytics: false },
+          consumers: {},
+          message: 'Not ready: producer "analytics" not connected',
+        },
+      });
+    });
+
+    it('is down when a group is failed', () => {
+      consumers = { 'default:g': 'failed', 'default:h': 'running' };
 
       const result = healthIndicator.isHealthy('kafka');
 
-      expect(result).toEqual({
-        kafka: {
-          status: 'down',
-          connected: false,
-          message: 'Kafka producer is not connected',
-        },
-      });
+      expect(result.kafka.status).toBe('down');
+      expect(result.kafka.message).toBe(
+        'Not ready: consumer group "default:g" is failed',
+      );
+    });
+
+    it('joins several problems', () => {
+      producers = { default: false };
+      consumers = { 'default:g': 'starting' };
+
+      expect(healthIndicator.isHealthy('kafka').kafka.message).toBe(
+        'Not ready: producer "default" not connected; consumer group "default:g" is starting',
+      );
     });
   });
 
@@ -195,7 +214,6 @@ describe('KafkaHealthIndicator', () => {
     it('should work without HealthIndicatorService', () => {
       // The test setup doesn't provide HealthIndicatorService
       // so it should use the fallback implementation
-      kafkaClient.isHealthy.mockReturnValue(true);
 
       const result = healthIndicator.isHealthy('kafka');
 

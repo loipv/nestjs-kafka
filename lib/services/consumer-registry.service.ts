@@ -339,6 +339,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const { groupId, topics, connection } = group;
     const consumer = this.createConsumer(group);
     group.consumer = consumer;
+    this.kafkaCore.setConsumerStatus(group.groupKey, 'starting');
 
     try {
       await consumer.connect();
@@ -385,9 +386,11 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       }
 
       group.isRunning = true;
+      this.kafkaCore.setConsumerStatus(group.groupKey, 'running');
       this.logger.log(`Started consumer group: ${groupId}`);
     } catch (error) {
       this.logger.error(`Failed to start consumer group: ${groupId}`, error);
+      this.kafkaCore.setConsumerStatus(group.groupKey, 'failed');
       try {
         await consumer.disconnect();
       } catch (disconnectError) {
@@ -821,6 +824,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           if (group.isRunning) {
             // Note: stop() is not supported in confluent-kafka-javascript, use disconnect() directly
             await group.consumer?.disconnect();
+            this.kafkaCore.setConsumerStatus(group.groupKey, 'stopped');
           }
         } catch (error) {
           this.logger.error(

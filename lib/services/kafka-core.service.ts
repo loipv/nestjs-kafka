@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import {
   CompressionCodec,
+  ConsumerGroupStatus,
   KafkaModuleOptions,
   ProducerConfig,
   DEFAULT_KAFKA_CONNECTION,
@@ -31,9 +32,10 @@ interface KafkaConnection {
 }
 
 @Injectable()
-export class KafkaCoreService {
+export class KafkaCoreService implements OnApplicationBootstrap {
   private readonly logger = new Logger(KafkaCoreService.name);
   private connections = new Map<string, KafkaConnection>();
+  private consumerStatuses = new Map<string, ConsumerGroupStatus>();
 
   /**
    * Register a new Kafka connection
@@ -202,6 +204,29 @@ export class KafkaCoreService {
    */
   getConnectionNames(): string[] {
     return Array.from(this.connections.keys());
+  }
+
+  /**
+   * Connect every producer at startup so health reflects real state. Not
+   * awaited: an unreachable broker logs a warning and never blocks startup;
+   * send() still connects lazily.
+   */
+  onApplicationBootstrap(): void {
+    for (const name of this.connections.keys()) {
+      this.connectProducer(name).catch((error) =>
+        this.logger.warn(
+          `Producer for connection "${name}" could not connect at startup: ${String(error)}`,
+        ),
+      );
+    }
+  }
+
+  setConsumerStatus(groupKey: string, status: ConsumerGroupStatus): void {
+    this.consumerStatuses.set(groupKey, status);
+  }
+
+  getConsumerStatuses(): Record<string, ConsumerGroupStatus> {
+    return Object.fromEntries(this.consumerStatuses);
   }
 
   /**
