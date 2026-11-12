@@ -2,7 +2,13 @@ import { GenericContainer, Wait } from 'testcontainers';
 import { Test } from '@nestjs/testing';
 import { Injectable } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
-import { KafkaModule, ConsumerModule, Consumer, KafkaClient } from '../lib';
+import {
+  KafkaModule,
+  ConsumerModule,
+  Consumer,
+  KafkaClient,
+  KafkaHealthIndicator,
+} from '../lib';
 
 let kafka: Awaited<ReturnType<GenericContainer['start']>>;
 let bootstrap: string;
@@ -53,10 +59,13 @@ async function waitFor(cond: () => boolean, timeout = 45_000): Promise<void> {
   }
 }
 
-async function createApp(providers: any[]) {
+async function createApp(
+  providers: any[],
+  rdkafka?: Record<string, string | number | boolean>,
+) {
   const moduleRef = await Test.createTestingModule({
     imports: [
-      KafkaModule.forRoot({ clientId: 'e2e', brokers: [bootstrap] }),
+      KafkaModule.forRoot({ clientId: 'e2e', brokers: [bootstrap], rdkafka }),
       ConsumerModule.forRoot(),
     ],
     providers,
@@ -137,7 +146,7 @@ describe('Kafka e2e (testcontainers)', () => {
     }
   });
 
-  it('retries a failing handler in-process, then keeps consuming (regression: fix #4)', async () => {
+  it('retries a failing handler by redelivery, then keeps consuming (regression: fix #4)', async () => {
     let poisonAttempts = 0;
     const successes: string[] = [];
 
@@ -301,7 +310,7 @@ describe('Kafka e2e (testcontainers)', () => {
     }
   });
 
-  it('app.close() completes promptly with a long retry delay in flight (regression: fix #3)', async () => {
+  it('app.close() completes promptly with a long resume delay pending (regression: fix #3)', async () => {
     let attempts = 0;
 
     @Injectable()
@@ -343,8 +352,8 @@ describe('Kafka e2e (testcontainers)', () => {
         fromBeginning: true,
         allowAutoTopicCreation: true,
         retry: { retries: 50, initialRetryTime: 60_000 },
-        // skip=false → infinite in-process retry; shutdown aborts with a
-        // one-shot rethrow so the offset is never committed.
+        // skip=false → retried forever; the partition is paused between
+        // attempts, so shutdown never commits the poison offset.
       })
       async handle(msg: any) {
         if (msg.value?.id === 'poison') {
@@ -362,10 +371,10 @@ describe('Kafka e2e (testcontainers)', () => {
       await client.send('e2e-midretry', { value: { id: 'poison' } });
       await client.send('e2e-midretry', { value: { id: 'good' } });
 
-      await waitFor(() => attempts >= 1); // poison is inside the retry sleep
+      await waitFor(() => attempts >= 1); // poison's partition is paused for 60s
       expect(app1Successes).toEqual([]); // 'good' not reached yet (partition order)
     } finally {
-      await app1.close(); // aborts the 60s retry sleep
+      await app1.close(); // drops the pending 60s resume
     }
 
     // Next boot, same groupId: committed offset never advanced past 'poison'
@@ -419,12 +428,178 @@ describe('Kafka e2e (testcontainers)', () => {
       await client.send('e2e-infinite', { value: { id: 'poison' } });
       await client.send('e2e-infinite', { value: { id: 'good' } });
 
-      // 3 attempts BEYOND maxRetries=2 — all in-process, no consumer restart, app stays up
+      // 3 attempts BEYOND maxRetries=2 — redelivered, no consumer restart, app stays up
       await waitFor(
         () => successes.includes('poison') && successes.includes('good'),
         60_000,
       );
       expect(attempts).toBe(5);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('a retrying partition does not block another partition or get the member evicted', async () => {
+    const t0 = Date.now();
+    let firstFailureAt = 0;
+    let aSuccesses = 0;
+    let aSucceededAt = 0;
+    const bSeen: string[] = [];
+    const bDoneAt: number[] = [];
+
+    @Injectable()
+    class TwoPartitionConsumer {
+      @Consumer('e2e-nonblocking', {
+        groupId: 'e2e-nb-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+        autoCreateTopicPartitions: 2,
+        sessionTimeout: 6000,
+        retry: { initialRetryTime: 1000, maxRetryTime: 2000 },
+      })
+      async handle(msg: any) {
+        const id = msg.value?.id as string;
+        if (id === 'A') {
+          firstFailureAt ||= Date.now();
+          if (Date.now() - firstFailureAt < 25_000)
+            throw new Error('A not yet');
+          aSuccesses++;
+          aSucceededAt = Date.now();
+          return;
+        }
+        bSeen.push(id);
+        bDoneAt.push(Date.now());
+      }
+    }
+
+    // librdkafka requires max.poll.interval.ms >= session.timeout.ms
+    const app = await createApp([TwoPartitionConsumer], {
+      'max.poll.interval.ms': 10000,
+    });
+    try {
+      const client = app.get(KafkaClient);
+      await client.send('e2e-nonblocking', {
+        value: { id: 'A' },
+        partition: 0,
+      });
+      await waitFor(() => firstFailureAt > 0);
+      await new Promise((r) => setTimeout(r, 2000));
+      for (let i = 1; i <= 5; i++) {
+        await client.send('e2e-nonblocking', {
+          value: { id: `B${i}` },
+          partition: 1,
+        });
+      }
+
+      await waitFor(() => aSuccesses >= 1, 60_000);
+      await new Promise((r) => setTimeout(r, 3000)); // room for a duplicate to show up
+      expect(bSeen.sort()).toEqual(['B1', 'B2', 'B3', 'B4', 'B5']);
+      expect(Math.max(...bDoneAt)).toBeLessThan(aSucceededAt);
+      expect(aSuccesses).toBe(1);
+      expect(Date.now() - t0).toBeGreaterThan(25_000);
+    } finally {
+      await app.close();
+    }
+  }, 120_000);
+
+  it('dead-letters a non-UTF-8 payload byte-for-byte', async () => {
+    const payload = Buffer.from([0xff, 0x00, 0xfe, 0x80]);
+    const key = Buffer.from([0x80, 0x81]);
+    const dlqReceived: any[] = [];
+
+    @Injectable()
+    class BinarySource {
+      @Consumer('e2e-bin-src', {
+        groupId: 'e2e-bin-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+        deserialize: false,
+        dlq: { topic: 'e2e-bin-dead', maxRetries: 0 },
+      })
+      async handle() {
+        throw new Error('cannot decode');
+      }
+    }
+
+    @Injectable()
+    class BinaryDlqSpy {
+      @Consumer('e2e-bin-dead', {
+        groupId: 'e2e-bin-spy',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+        deserialize: false,
+      })
+      async handle(msg: any) {
+        dlqReceived.push(msg);
+      }
+    }
+
+    const app = await createApp([BinarySource, BinaryDlqSpy]);
+    try {
+      await app.get(KafkaClient).send('e2e-bin-src', { key, value: payload });
+      await waitFor(() => dlqReceived.length >= 1);
+      expect(Buffer.from(dlqReceived[0].value).equals(payload)).toBe(true);
+      expect(Buffer.from(dlqReceived[0].key).equals(key)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('delivers more than 32 messages to one batch call', async () => {
+    const producerApp = await createApp([]);
+    try {
+      await producerApp.get(KafkaClient).sendBatch(
+        'e2e-big-batch',
+        Array.from({ length: 80 }, (_, i) => ({ value: { i } })),
+      );
+    } finally {
+      await producerApp.close();
+    }
+
+    const sizes: number[] = [];
+
+    @Injectable()
+    class BigBatchConsumer {
+      @Consumer('e2e-big-batch', {
+        groupId: 'e2e-big-batch-g',
+        fromBeginning: true,
+        batch: true,
+        batchSize: 100,
+      })
+      async handle(msgs: any[]) {
+        sizes.push(msgs.length);
+      }
+    }
+
+    const app = await createApp([BigBatchConsumer]);
+    try {
+      await waitFor(() => sizes.reduce((a, b) => a + b, 0) >= 80);
+      expect(Math.max(...sizes)).toBeGreaterThan(32);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('reports healthy with consumer details after bootstrap', async () => {
+    @Injectable()
+    class HealthConsumer {
+      @Consumer('e2e-health', {
+        groupId: 'e2e-health-g',
+        allowAutoTopicCreation: true,
+      })
+      async handle() {}
+    }
+
+    const app = await createApp([HealthConsumer]);
+    try {
+      const health = app.get(KafkaHealthIndicator);
+      await waitFor(
+        () => health.isHealthy('kafka').kafka.status === 'up',
+        10_000,
+      );
+      const { kafka: result } = health.isHealthy('kafka');
+      expect(result.consumers).toEqual({ 'default:e2e-health-g': 'running' });
+      expect(result.producers).toEqual({ default: true });
     } finally {
       await app.close();
     }
