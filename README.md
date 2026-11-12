@@ -1,6 +1,6 @@
 # @loipv/nestjs-kafka
 
-A production-ready NestJS module for Kafka client and consumer functionality built on top of [confluent-kafka-javascript](https://github.com/confluentinc/confluent-kafka-javascript). It provides batch processing, in-process retry with a Dead Letter Queue, idempotency, key-based grouping, multi-connection support and OpenTelemetry tracing.
+A production-ready NestJS module for Kafka client and consumer functionality built on top of [confluent-kafka-javascript](https://github.com/confluentinc/confluent-kafka-javascript). It provides batch processing, non-blocking retry (pause the partition, redeliver) with a Dead Letter Queue, idempotency, key-based grouping, multi-connection support and OpenTelemetry tracing.
 
 > **Note:** Starting from v1.0.0, this library uses `@confluentinc/kafka-javascript` instead of `kafkajs` for better performance and official Confluent support. See [Migration Guide](#migration-guide-from-v0x-to-v1x) for upgrade instructions.
 
@@ -11,9 +11,10 @@ A production-ready NestJS module for Kafka client and consumer functionality bui
 - **Batch Processing**: Batch handlers with a configurable maximum batch size
 - **Key-Based Grouping**: Group messages by key within batches for ordered processing
 - **Idempotency**: In-memory duplicate prevention with TTL
-- **Retry and Dead Letter Queue (DLQ)**: In-process retry with exponential backoff, then an optional DLQ topic
+- **Retry and Dead Letter Queue (DLQ)**: Failed messages are redelivered with exponential backoff while only their partition is paused, then an optional DLQ topic
 - **OpenTelemetry Tracing**: Distributed tracing across produce → consume with same trace ID
-- **Health Checks**: Integration with `@nestjs/terminus`
+- **Health Checks**: Producer and consumer-group readiness for `@nestjs/terminus`
+- **TLS**: Certificates through `ssl`, any librdkafka property through `rdkafka`
 - **Multi-connection**: Several Kafka clusters in one app
 - **Graceful Shutdown**: Proper cleanup on application shutdown
 
@@ -133,7 +134,7 @@ KafkaModule.forRoot({
   clientId: 'my-app',
   brokers: ['localhost:9092'],
 
-  // Optional - SSL/SASL
+  // Optional - TLS/SASL (see "TLS and librdkafka properties" below)
   ssl: true,
   sasl: {
     mechanism: 'scram-sha-256',
@@ -154,6 +155,47 @@ KafkaModule.forRoot({
 
   // Optional - Logging
   logLevel: 'INFO', // 'NOTHING' | 'ERROR' | 'WARN' | 'INFO' | 'DEBUG'
+});
+```
+
+### TLS and librdkafka properties
+
+`ssl: true` enables TLS with the system CA store. Pass an object to supply certificates; each option becomes a librdkafka property:
+
+```typescript
+KafkaModule.forRoot({
+  clientId: 'my-app',
+  brokers: ['broker:9093'],
+  ssl: {
+    ca: fs.readFileSync('ca.pem'),           // or an array of PEMs
+    cert: fs.readFileSync('client-cert.pem'),
+    key: fs.readFileSync('client-key.pem'),
+    passphrase: process.env.KEY_PASSWORD,
+    rejectUnauthorized: true,                 // false disables certificate verification
+  },
+});
+```
+
+| `ssl` option | librdkafka property |
+|--------------|---------------------|
+| `ca` | `ssl.ca.pem` (several PEMs are joined) |
+| `cert` | `ssl.certificate.pem` |
+| `key` | `ssl.key.pem` |
+| `passphrase` | `ssl.key.password` |
+| `rejectUnauthorized: false` | `enable.ssl.certificate.verification: false` |
+
+Any other key in the `ssl` object fails at startup. For anything else, pass raw [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md) through `rdkafka`. They apply to the connection's producer, consumers and admin clients, and override the properties the library generates:
+
+```typescript
+KafkaModule.forRoot({
+  clientId: 'my-app',
+  brokers: ['broker:9093'],
+  ssl: true,
+  rdkafka: {
+    'ssl.ca.location': '/etc/ssl/kafka-ca.pem',
+    'ssl.endpoint.identification.algorithm': 'none',
+    'socket.keepalive.enable': true,
+  },
 });
 ```
 
@@ -198,6 +240,9 @@ ConsumerModule.forRoot({
     initialRetryTime: 1000,
     multiplier: 2,
   },
+
+  // Max idempotency keys kept in memory (oldest evicted first)
+  idempotencyMaxKeys: 100000,
 });
 ```
 
@@ -232,6 +277,9 @@ async handleEvent(message: KafkaMessagePayload) {}
 | `autoCommitInterval` | `number` | Auto commit interval in ms |
 | `fromBeginning` | `boolean` | Start consuming from beginning |
 | `retry` | `ConsumerRetryOptions` | Default retry options |
+| `idempotencyMaxKeys` | `number` | Max idempotency keys kept in memory, oldest evicted first (default: 100000) |
+
+Consumers start in `onApplicationBootstrap`, after every provider's `onModuleInit`, so a handler never runs before your database pools or caches are ready.
 
 ### Multi-Connection (Multiple Kafka Clusters)
 
@@ -386,6 +434,7 @@ async handleBatch(groupedMessages: GroupedBatch[]) {
     retryDelay: 1000,        // Initial delay: 1 second
     retryBackoffMultiplier: 2, // Exponential backoff
     includeErrorInfo: true,  // Include error in DLQ headers
+    sendTimeout: 30000,      // A slower DLQ send counts as failed
   },
 })
 async handlePayment(message: KafkaMessagePayload) {
@@ -393,7 +442,11 @@ async handlePayment(message: KafkaMessagePayload) {
 }
 ```
 
-If sending to the DLQ fails, the message is not acknowledged: the client redelivers it and the retries start again. Nothing is dropped.
+Retries work as described in [Retry Mechanism](#retry-mechanism): the partition is paused between attempts. The DLQ backoff is capped by `retry.maxRetryTime` (default 30s).
+
+The DLQ message carries the original value and key unchanged, so binary payloads (Avro, Protobuf) arrive byte-for-byte. A batch consumer dead-letters the failing chunk in one send, without messages the idempotency check filtered out.
+
+If sending to the DLQ fails or exceeds `sendTimeout`, the message is not acknowledged: it is retried with the same backoff. Nothing is dropped. A send that timed out may still land later, so the DLQ can hold a duplicate (at-least-once).
 
 **DLQ Headers:**
 
@@ -434,6 +487,8 @@ async handleEvent(message: KafkaMessagePayload) {
   // Duplicate messages (same event-id) will be skipped
 }
 ```
+
+Keys are scoped to the consumer (connection, group and topic), so two consumers extracting the same key never skip each other's messages. The store is in memory: it holds at most `idempotencyMaxKeys` keys (default 100000, oldest evicted first) and does not survive a restart. A key is recorded only after the handler succeeds.
 
 ### Disabled Consumer
 
@@ -501,25 +556,25 @@ async handleBinary(message: KafkaJS.KafkaMessage) { // import { KafkaJS } from '
 }
 ```
 
-### Retry Mechanism (Without DLQ)
+### Retry Mechanism
 
-When **NOT using DLQ**, handler failures are retried **in-process** with capped exponential backoff — the consumer never crashes on handler errors:
+A failing handler is never re-run inside the same call. The library **pauses the message's partition, rethrows, and resumes the partition after the backoff delay**; the client then redelivers the message. The consumer keeps polling, so other partitions keep flowing and a long retry never gets the member evicted from its group.
 
 ```typescript
 @Consumer('orders', {
   retry: {
-    retries: 3,                    // DLQ/skip decision milestone (see below)
+    retries: 3,                    // skip/DLQ milestone (see below)
     initialRetryTime: 1000,        // Default: 1000ms
     multiplier: 2,                 // Default: 2 (exponential backoff)
-    maxRetryTime: 30000,           // Default: 30000ms — hard cap for every delay
+    maxRetryTime: 30000,           // Default: 30000ms — cap for every delay
     skipMessageOnMaxRetries: false, // Default: false (retry indefinitely)
   },
 })
 async handleOrders(message: KafkaMessagePayload) {
-  // If this fails, it is re-invoked in-process: 1s, 2s, 4s ... capped at 30s
+  // If this fails, it is redelivered after 1s, 2s, 4s ... capped at 30s
 }
 
-// Skip message to avoid blocking consumer (useful for multi-topic consumers)
+// Skip a message that keeps failing
 @Consumer('non-critical-logs', {
   retry: {
     retries: 5,
@@ -528,22 +583,18 @@ async handleOrders(message: KafkaMessagePayload) {
 })
 async handleLogs(message: KafkaMessagePayload) {
   // If this fails 5 times, message is skipped (offset committed)
-  // Consumer continues processing next message
 }
 ```
 
-**Split-error policy:**
-- **Handler errors never crash the consumer.** With `skipMessageOnMaxRetries: false` (default) the message is retried **indefinitely** — never silently dropped, never lost. `retries` only marks when the skip/DLQ decision happens; it is NOT a hard limit in the default mode.
-- **Skip mode** (`skipMessageOnMaxRetries: true`): message is skipped after `retries` attempts (offset committed).
-- **Infra failures** (lost broker connection, DLQ send failure) never stop the consumer either: the client logs the error, redelivers the message and keeps reconnecting. An error while starting a consumer (connect, subscribe) fails application startup.
-- **With DLQ**: messages are sent to DLQ topic after `dlq.maxRetries` (recommended for long-retry workloads — see warning below).
+**Policy:**
+- **Handler errors never crash the consumer.** With `skipMessageOnMaxRetries: false` (default) the message is retried **indefinitely** and never lost. `retries` only marks when the skip/DLQ decision happens.
+- **Skip mode** (`skipMessageOnMaxRetries: true`): the message is skipped after `retries` attempts and its offset is committed.
+- **With DLQ**: the message is dead-lettered after `dlq.maxRetries` attempts.
+- **Batch consumers** follow the same policy per chunk of `batchSize`. Each successful chunk is committed; a failing chunk pauses the partition and is redelivered, earlier chunks are not reprocessed. Batch handlers must still be idempotent (at-least-once).
+- **Infra failures** (lost broker connection) never stop the consumer: librdkafka reconnects on its own and consumption resumes. An error while starting a consumer (connect, subscribe) fails application startup.
+- **Shutdown** while a partition is paused never commits the failing message: it is redelivered on the next start.
 
-> **Long-retry warning:** indefinite in-process retry (`skipMessageOnMaxRetries: false`, no DLQ) blocks the partition and can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) — the consumer is then evicted from the group and rebalances every cycle while the poison message persists. No data is lost (the consumer rejoins on its next poll and redelivery resumes the retry), but for workloads that need retries spanning minutes, configure a DLQ instead.
-
-**When to use skip mode:**
-- Multi-topic consumers where one failing topic shouldn't block others
-- Non-critical messages that can be safely dropped
-- Development/debugging environments
+Attempt counters live in memory: a restart or a rebalance that moves the partition restarts the backoff ladder (the message itself is never lost). Each failed attempt is logged twice: once by this library, once by the Kafka client ("The same message may be reprocessed").
 
 ### All Consumer Options
 
@@ -567,7 +618,7 @@ interface ConsumerOptions {
 
   // Batch processing (every consumer in a group must agree on `batch`)
   batch?: boolean;
-  batchSize?: number;            // Default: 100 (the client fetches at most 32 per partition)
+  batchSize?: number;            // Default: 100 (also sets how many messages the client fetches per call)
   groupByKey?: boolean;
 
   // Auto-created topic sizing (when allowAutoTopicCreation: true)
@@ -587,6 +638,7 @@ interface ConsumerOptions {
     retryBackoffMultiplier?: number; // Default: 2
     includeOriginalHeaders?: boolean; // Default: true
     includeErrorInfo?: boolean;   // Default: true
+    sendTimeout?: number;         // Default: 30000
   };
 
   // Commit settings
@@ -600,12 +652,12 @@ interface ConsumerOptions {
   // Partition assignment strategy
   partitionAssigners?: PartitionAssigner[];  // 'roundrobin' | 'range' | 'cooperative-sticky'
 
-  // In-process retry of a failing handler
+  // Retry of a failing handler (pause partition, redeliver)
   retry?: {
     retries?: number;             // Default: 3 (skip/DLQ milestone, see above)
     initialRetryTime?: number;    // Default: 1000
     multiplier?: number;          // Default: 2
-    maxRetryTime?: number;        // Default: 30000
+    maxRetryTime?: number;        // Default: 30000 (cap for every delay, DLQ included)
     skipMessageOnMaxRetries?: boolean; // Default: false (retry indefinitely)
   };
 }
@@ -723,6 +775,21 @@ export class HealthController {
   }
 }
 ```
+
+`isHealthy` is up when every connection's producer is connected and every consumer group is running. Producers connect at startup (a failure only logs a warning; `send()` retries the connection). The result lists each part:
+
+```json
+{
+  "kafka": {
+    "status": "down",
+    "producers": { "default": true },
+    "consumers": { "default:orders-group": "failed" },
+    "message": "Not ready: consumer group \"default:orders-group\" is failed"
+  }
+}
+```
+
+Use `isHealthy` for a **readiness** probe. Do not restart the app (liveness) on a Kafka outage: librdkafka reconnects by itself and consumption resumes when the brokers are back, while the producer flag can stay `true` during an outage. `checkBrokers` probes broker reachability when you need it.
 
 ## OpenTelemetry Tracing
 
@@ -990,7 +1057,7 @@ export type {
 
 ## Migration Guide (from v1.x to v2.x)
 
-v2.0.0 removes features that did not work as documented or added risk without benefit, and fixes two configurations that failed at startup.
+v2.0.0 removes features that did not work as documented or added risk without benefit, fixes configurations that failed at startup, and changes how failed messages are retried.
 
 ### Fixed
 
@@ -998,6 +1065,28 @@ v2.0.0 removes features that did not work as documented or added risk without be
 - Producer options left `undefined` (for example an unset environment variable in `forRootAsync`) are ignored instead of making every send fail.
 - A producer whose first connect fails (for example a DLQ cluster that is down) is rebuilt, so the next send reconnects once the broker is back.
 - Several `KafkaModule.forRoot()` / `forRootAsync()` calls now share one connection registry, so a `@Consumer({ connection: 'analytics' })` finds a connection registered by a second `forRoot()`.
+- A message being processed during shutdown is no longer acknowledged: it is redelivered on the next start instead of being lost.
+- DLQ messages keep the original value and key bytes (binary payloads were corrupted by a UTF-8 conversion). Producer keys `0` and `''` are no longer sent as `null`.
+- `ssl: { ca, cert, key, ... }` is applied (the object used to be reduced to `ssl: true`).
+- `batchSize` above 32 takes effect (the client used to fetch at most 32 messages per call).
+- When consumer startup fails, the consumers that did start and the producers are closed before the error surfaces, so a failed boot no longer keeps the process alive.
+
+### Changed behaviour
+
+| Before (v1) | Now (v2) |
+|---|---|
+| A failing handler was re-run inside the same call (`sleep` between attempts); long retries blocked every partition and could get the member evicted | The partition is paused, the error rethrown, and the message redelivered after the delay; other partitions keep flowing. Each retry logs an extra line from the Kafka client |
+| Retry delays capped at 30s | Capped by `retry.maxRetryTime` (default 30s), DLQ backoff included |
+| A failed DLQ send was redelivered immediately | It is retried with the backoff delay; `dlq.sendTimeout` (default 30s) bounds each send |
+| Batch consumers decided on the DLQ with `retry.retries` and sent messages one by one | Batch consumers use `dlq.maxRetries` like single-message consumers and dead-letter a chunk in one send |
+| A batch was committed once, after all its chunks | Each successful chunk is committed; a failing chunk is redelivered without the earlier ones |
+| Two `@Consumer`s for the same topic in one group: the last one silently won | Fails at startup |
+| Idempotency keys were global and unbounded | Scoped per connection, group and topic; at most `idempotencyMaxKeys` (default 100000) kept |
+| Consumers started in `onModuleInit` | Consumers start in `onApplicationBootstrap`, after every provider's `onModuleInit` |
+| `isHealthy` checked one producer, connected on the first send | Producers connect at startup; `isHealthy` covers every producer and every consumer group, with per-part details (`connected` is replaced by `producers` / `consumers`) |
+| `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties |
+| `DlqService.handleFailure(message, ...)` / `sendToDlq(message, ...)`; `handleFailure` rejected on a failed send | Both take `messages: KafkaMessage[]`; `handleFailure` never rejects (it returns a retry verdict) |
+| `IdempotencyService` methods took `(message, keyExtractor)` | They take a `namespace` argument as well |
 
 ### Removed
 

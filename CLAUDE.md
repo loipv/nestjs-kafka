@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is `@loipv/nestjs-kafka`, a production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript (librdkafka). The library provides batch processing, in-process retry with a DLQ, idempotency, key-based grouping, multi-connection support and OpenTelemetry tracing.
+This is `@loipv/nestjs-kafka`, a production-ready NestJS module for Kafka client and consumer functionality built on top of confluent-kafka-javascript (librdkafka). The library provides batch processing, non-blocking retry (pause partition, redeliver) with a DLQ, idempotency, key-based grouping, multi-connection support and OpenTelemetry tracing.
 
 ## Commands
 
@@ -63,6 +63,7 @@ lib/
 │   ├── kafka-client.service.ts      # [KafkaCoreModule] Producer (send/sendBatch/sendMultiTopicBatch)
 │   ├── tracing.service.ts           # [KafkaCoreModule] OpenTelemetry tracing
 │   ├── consumer-registry.service.ts # [ConsumerModule] Consumer lifecycle and retry
+│   ├── partition-retry-tracker.ts   # [ConsumerModule] Attempt counters and resume timers (plain class)
 │   ├── batch-processor.service.ts   # [ConsumerModule] Batch splitting and key grouping
 │   ├── idempotency.service.ts       # [ConsumerModule] Duplicate prevention
 │   └── dlq.service.ts               # [ConsumerModule] Dead Letter Queue
@@ -94,32 +95,40 @@ lib/
   - `disabled: true`: Skip this consumer at startup without removing the decorator
   - `deserialize: false`: Receive raw `KafkaMessage` without JSON/string deserialization (default: true)
 - **@InjectKafkaClient() decorator**: Inject named connection clients in services
-- **KafkaHealthIndicator**: Health checks for Kafka connections
+- **KafkaHealthIndicator**: `isHealthy` = every producer connected and every consumer group running (status kept in `KafkaCoreService`); `checkBrokers` / `checkConsumerLag` probe with an admin client
+- **TLS**: `ssl` object mapped to librdkafka `ssl.*` keys (unknown keys throw); `rdkafka` passes raw librdkafka properties, applied last
 
 ### Features
 
 - Multi-connection support (connect to multiple Kafka clusters simultaneously)
-- Batch processing: fetched messages split into handler calls of at most `batchSize` (the client fetches at most 32 per partition)
+- Batch processing: fetched messages split into handler calls of at most `batchSize`; the consumer's `js.consumer.max.batch.size` is set to the group's largest `batchSize` (default 100)
 - Key-based message grouping for ordered processing within batches
-- In-memory idempotency with TTL (requires an `idempotencyKey` extractor)
-- In-process retry with capped exponential backoff, then an optional Dead Letter Queue (optionally on another connection)
+- In-memory idempotency with TTL (requires an `idempotencyKey` extractor), keys namespaced `<connection>:<groupId>|<topic>`, capped by `idempotencyMaxKeys`
+- Retry by pausing the partition with capped exponential backoff, then an optional Dead Letter Queue (optionally on another connection)
+- Consumers start in `ConsumerModule.onApplicationBootstrap`; producers connect at `KafkaCoreService.onApplicationBootstrap` (not awaited)
 - **OpenTelemetry tracing** (distributed tracing across produce → consume)
 - Graceful shutdown with proper cleanup
 
 ## Important Behavior Notes
 
-### Retry Mechanism Without DLQ — Split-Error Policy
+### Retry Mechanism — Pause Partition and Rethrow
 
-Handler failures are retried **in-process** with capped exponential backoff (`initialRetryTime × multiplier^n`, capped at `maxRetryTime`, default 30s). **Handler errors NEVER crash the consumer.**
+**Never sleep inside a handler.** On a handler failure `ConsumerRegistryService.handleHandlerFailure` asks for a verdict (`evaluateRetry`, or `DlqService.handleFailure` when a DLQ is configured):
+- `retry`: pause the payload's partition (`payload.pause()`), schedule its resume through `PartitionRetryTracker.scheduleResume` after `delayMs`, and **rethrow**. The client seeks back and redelivers after the resume. The consumer keeps polling, so other partitions keep flowing and the member is never evicted.
+- `complete` (dead-lettered or skipped): return, so the offset is stored.
 
-1. **Default** (`skipMessageOnMaxRetries: false`): the message is retried **indefinitely** — never dropped, never lost. `retry.retries` is only a milestone for the skip/DLQ decision, NOT a hard limit in this mode.
+Delays are `initialRetryTime × multiplier^(n-1)`, capped at `retry.maxRetryTime` (default `MAX_RETRY_DELAY_MS` = 30s); the DLQ backoff uses the same cap. **Handler errors NEVER crash the consumer.**
+
+1. **Default** (`skipMessageOnMaxRetries: false`): the message is retried **indefinitely** — never dropped, never lost. `retry.retries` is only a milestone for the skip decision.
 2. **Skip mode** (`skipMessageOnMaxRetries: true`): message is skipped after `retries` attempts and the offset commits.
 
-**Infra failures:** `consumer.run()` in confluent-kafka-javascript returns as soon as the fetch loop starts and never rejects for handler or broker errors: the client logs them, seeks back and redelivers the message, and keeps reconnecting on its own. There is no library-level restart. The registry awaits `run()`, so an error while starting a consumer (connect, subscribe, run) fails application startup. A DLQ send failure rejects out of the handler, so the client redelivers the message and the retry ladder starts again.
+Attempt counters are in memory, keyed `<connection>:<groupId>|<topic>|<partition>|<offset>` (a chunk uses its first offset). They are cleared on success, on `complete`, on revoke and on shutdown; a restart or a moved partition restarts the ladder.
 
-**Known limitation:** indefinite in-process retry can cumulatively exceed librdkafka's `max.poll.interval.ms` (default 5 min) → the consumer is evicted and rejoins on its next poll while a poison message persists (no data loss). For retries spanning minutes, configure a DLQ.
+**Revoke:** every group consumer gets a top-level `rebalance_cb`. On `ERR__REVOKE_PARTITIONS` (-174) it drops retry state for the revoked partitions and calls `consumer.resume()` for them while they are still assigned — the client keeps its own paused set across rebalances, so a re-assigned partition would otherwise stay paused.
 
-**Batch consumers** share the same policy and resolve offsets only after a successful flush (at-least-once) — batch handlers must be idempotent.
+**Infra failures:** `consumer.run()` in confluent-kafka-javascript returns as soon as the fetch loop starts and never rejects for handler or broker errors: the client logs them, seeks back and redelivers the message, and keeps reconnecting on its own. There is no library-level restart. The registry awaits `run()`, so an error while starting a consumer (connect, subscribe, run) fails application startup, and the consumer is disconnected first. `DlqService.handleFailure` never rejects: a failed DLQ send, or one exceeding `dlq.sendTimeout` (default 30s), is a `retry` verdict.
+
+**Batch consumers** (`eachBatchAutoResolve = false`) resolve the offset after each successful chunk. A failing chunk pauses and rethrows; the client seeks to the first unresolved offset, so earlier chunks are not reprocessed. An all-duplicate chunk is resolved without calling the handler. Batch handlers must be idempotent (at-least-once).
 
 **Example:**
 ```typescript
@@ -133,7 +142,7 @@ Handler failures are retried **in-process** with capped exponential backoff (`in
   },
 })
 async handleOrder(message: KafkaMessage) {
-  // If this keeps failing, it is re-invoked: 1s, 2s, 4s ... capped at 30s
+  // If this keeps failing, it is redelivered after 1s, 2s, 4s ... capped at 30s
 }
 
 // Skip message to avoid blocking (for multi-topic consumers)
@@ -150,11 +159,13 @@ async handleLogs(message: KafkaMessage) {
 
 ### Retry Mechanism With DLQ
 
-When **using DLQ**, failed messages are sent to the DLQ topic after `dlq.maxRetries`. The message is NOT skipped or dropped: if the DLQ send fails, it is redelivered. Reprocessing the DLQ is the application's job (an ordinary `@Consumer` on the DLQ topic).
+When **using DLQ**, failed messages are sent to the DLQ topic after `dlq.maxRetries` (batch consumers too: one `sendBatch` per exhausted chunk, idempotency-filtered messages excluded). Values and keys are sent unchanged (Buffers byte-exact). The message is NOT skipped or dropped: if the DLQ send fails or times out, it is retried with the same backoff. Reprocessing the DLQ is the application's job (an ordinary `@Consumer` on the DLQ topic).
 
-### Graceful Shutdown & In-Flight Delays
+### Graceful Shutdown
 
-`consumer-registry.service.ts` (the retry `sleep()`) uses a `shutdownResolvers: Set<() => void>` pattern with a cancellable `sleep()` helper. On shutdown, all pending delays are immediately resolved so the process does not block waiting for delays that can be up to several minutes; `sleep()` also resolves immediately if shutdown was signalled before it registered. A retry aborted by shutdown rethrows **once** so the offset is never committed (message redelivered next boot). Any new code that adds sleep-based retry loops must follow this same pattern.
+`ConsumerRegistryService.gracefulShutdown()` is idempotent (it memoises its promise) and runs only from the registry's own `onApplicationShutdown`. It clears every resume timer and counter, then disconnects the consumers. During shutdown `eachMessage` **throws** instead of returning: a normal return stores the offset, which the client commits on close, losing the message. `eachBatch` may return, because nothing unresolved is stored. `KafkaCoreService.disconnectAll()` waits up to 5s for an in-flight producer connect (the one started at bootstrap), then disconnects in every case. Nest skips shutdown hooks when initialisation fails, so `ConsumerModule` calls `ConsumerRegistryService.abortStartup()` (disconnect started groups and every producer) before rethrowing a register/start error; `startAll()` waits for every group to settle before rejecting.
+
+Any new retry or delay logic must go through `PartitionRetryTracker` (unref'd timers, cleared on shutdown), never a sleep inside a handler.
 
 ### OpenTelemetry Tracing
 
