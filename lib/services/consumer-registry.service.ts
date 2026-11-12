@@ -544,18 +544,16 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         );
 
         if (attempt > maxRetries && metadata?.options.dlq) {
-          // Exhausted: dead-letter every raw message of the batch
+          // Exhausted: dead-letter the batch in one send
           // (a sendToDlq failure rejects → the client redelivers the batch)
-          for (const msg of messages) {
-            await this.dlqService.sendToDlq(
-              msg,
-              err,
-              metadata.options.dlq,
-              topic,
-              attempt,
-              metadata.connection,
-            );
-          }
+          await this.dlqService.sendToDlq(
+            messages,
+            err,
+            metadata.options.dlq,
+            topic,
+            attempt,
+            metadata.connection,
+          );
           break;
         }
         if (
@@ -679,14 +677,14 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         );
         const verdict = metadata.options.dlq
           ? await this.dlqService.handleFailure(
-              message,
+              [message],
               err,
               metadata.options.dlq,
               metadata.topic,
               partition,
               metadata.connection,
               attempt,
-            ) // may REJECT (DLQ send failure) → propagates → the client redelivers
+            ) // never rejects: a failed DLQ send returns a retry verdict
           : this.evaluateRetry(attempt, metadata.options);
 
         if (verdict.action === 'retry') {

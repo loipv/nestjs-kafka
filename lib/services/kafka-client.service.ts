@@ -175,6 +175,13 @@ export class KafkaClient implements OnApplicationShutdown {
     return this.kafkaCore.isProducerConnected(connection);
   }
 
+  /** Strings and Buffers pass through (key 0 and '' included); null/undefined → null. */
+  private serializeKey(key: unknown): string | Buffer | null {
+    if (key === null || key === undefined) return null;
+    if (typeof key === 'string' || Buffer.isBuffer(key)) return key;
+    return String(key as number | bigint | boolean);
+  }
+
   private serializeMessage(message: ProducerMessage): Message {
     let value: Buffer | string | null;
 
@@ -189,7 +196,7 @@ export class KafkaClient implements OnApplicationShutdown {
     }
 
     return {
-      key: message.key ? String(message.key) : null,
+      key: this.serializeKey(message.key),
       value,
       headers: message.headers,
       partition: message.partition,

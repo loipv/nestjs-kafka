@@ -31,6 +31,15 @@ describe('KafkaClient', () => {
       expect(serialize({ value: null }).value).toBeNull();
       expect(serialize({ value: undefined }).value).toBeNull();
     });
+
+    it('keeps key 0, empty-string and Buffer keys', () => {
+      const buf = Buffer.from([0x80, 0xff]);
+      expect(serialize({ key: '', value: 'v' }).key).toBe('');
+      expect(serialize({ key: buf, value: 'v' }).key).toBe(buf);
+      expect(serialize({ key: null, value: 'v' }).key).toBeNull();
+      expect(serialize({ value: 'v' }).key).toBeNull();
+      expect(serialize({ key: 0, value: 'v' }).key).toBe('0');
+    });
   });
 
   describe('isHealthy', () => {

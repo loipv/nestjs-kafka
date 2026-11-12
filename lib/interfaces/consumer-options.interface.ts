@@ -28,6 +28,11 @@ export interface DlqOptions {
   includeOriginalHeaders?: boolean;
   /** Include error info in headers. Default: true */
   includeErrorInfo?: boolean;
+  /**
+   * Max time for a DLQ send in ms; a timeout counts as a failed send and the
+   * message is retried. Default: 30000
+   */
+  sendTimeout?: number;
 }
 
 export interface ConsumerRetryOptions {

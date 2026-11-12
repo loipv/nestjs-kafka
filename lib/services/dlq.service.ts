@@ -15,6 +15,9 @@ export const DLQ_HEADERS = {
   ERROR_STACK: 'x-dlq-error-stack',
 } as const;
 
+const DEFAULT_SEND_TIMEOUT_MS = 30000;
+const MAX_HEADER_LENGTH = 1000;
+
 @Injectable()
 export class DlqService {
   private readonly logger = new Logger(DlqService.name);
@@ -23,69 +26,134 @@ export class DlqService {
 
   /**
    * Decide what to do after a handler failure. Stateless: the caller supplies
-   * the current attempt number and owns the retry loop (and its delay/sleep).
+   * the current attempt number and owns the retry (pause, resume).
    *
    * - attempt <= maxRetries → { action: 'retry', delayMs } (capped backoff)
-   * - otherwise              → sends to DLQ → { action: 'complete' }
-   * - DLQ send failure       → REJECTS: the client redelivers the message and
-   *                            the retry ladder starts again. Nothing is dropped.
+   * - otherwise              → dead-letters `messages` → { action: 'complete' }
+   * - DLQ send failure or timeout → { action: 'retry', delayMs }. Never rejects:
+   *   the message is retried and nothing is dropped.
    */
   async handleFailure(
-    message: KafkaMessage,
+    messages: KafkaMessage[],
     error: Error,
     options: DlqOptions,
     originalTopic: string,
-    partition?: number,
-    connection?: string,
-    attempt = 1,
+    partition: number | undefined,
+    connection: string | undefined,
+    attempt: number,
+    maxDelayMs: number = MAX_RETRY_DELAY_MS,
   ): Promise<RetryVerdict> {
     const maxRetries = options.maxRetries ?? 3;
+    const delayMs = this.retryDelay(attempt, options, maxDelayMs);
 
     if (attempt <= maxRetries) {
-      const baseDelay = options.retryDelay ?? 1000;
-      const multiplier = options.retryBackoffMultiplier ?? 2;
-      const delayMs = Math.min(
-        baseDelay * multiplier ** (attempt - 1),
-        MAX_RETRY_DELAY_MS,
-      );
       this.logger.warn(
-        `Retry ${attempt}/${maxRetries} for message from ${originalTopic}, waiting ${delayMs}ms`,
+        `Retry ${attempt}/${maxRetries} for message from ${originalTopic}` +
+          `${partition !== undefined ? ` [${partition}]` : ''}, waiting ${delayMs}ms`,
       );
       return { action: 'retry', delayMs };
     }
 
-    await this.sendToDlq(
-      message,
-      error,
-      options,
-      originalTopic,
-      attempt,
-      connection,
-    );
-    return { action: 'complete' };
+    try {
+      await this.sendToDlq(
+        messages,
+        error,
+        options,
+        originalTopic,
+        attempt,
+        connection,
+      );
+      return { action: 'complete' };
+    } catch (dlqError) {
+      this.logger.error('Failed to send message to DLQ', dlqError);
+      return { action: 'retry', delayMs };
+    }
   }
 
+  /**
+   * Dead-letter `messages` in one batch. Values and keys pass through as
+   * received (Buffers stay byte-exact). Rejects on a send error or when the
+   * send exceeds `options.sendTimeout`.
+   */
   async sendToDlq(
-    message: KafkaMessage,
+    messages: KafkaMessage[],
     error: Error,
     options: DlqOptions,
     originalTopic: string,
     retryCount: number,
     connection?: string,
   ): Promise<void> {
+    const timestamp = new Date().toISOString();
+    const records = messages.map((message) => ({
+      key: message.key ?? null,
+      value: message.value ?? null,
+      headers: this.buildHeaders(
+        message,
+        error,
+        options,
+        originalTopic,
+        retryCount,
+        timestamp,
+      ),
+    }));
+
+    const target = options.connection || connection;
+    const timeoutMs = options.sendTimeout ?? DEFAULT_SEND_TIMEOUT_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`DLQ send timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+    });
+
+    try {
+      await Promise.race([
+        this.kafkaClient.sendBatch(
+          options.topic,
+          records,
+          target ? { connection: target } : undefined,
+        ),
+        timeout,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    this.logger.warn(
+      `${messages.length} message(s) sent to DLQ: ${options.topic} after ${retryCount} attempts`,
+    );
+  }
+
+  private retryDelay(
+    attempt: number,
+    options: DlqOptions,
+    maxDelayMs: number,
+  ): number {
+    const baseDelay = options.retryDelay ?? 1000;
+    const multiplier = options.retryBackoffMultiplier ?? 2;
+    return Math.min(baseDelay * multiplier ** (attempt - 1), maxDelayMs);
+  }
+
+  private buildHeaders(
+    message: KafkaMessage,
+    error: Error,
+    options: DlqOptions,
+    originalTopic: string,
+    retryCount: number,
+    timestamp: string,
+  ): IHeaders {
     const headers: IHeaders = {};
 
     if (options.includeOriginalHeaders !== false && message.headers) {
       Object.assign(headers, message.headers);
     }
 
-    // Use new header names
     headers[DLQ_HEADERS.ORIGINAL_TOPIC] = originalTopic;
     headers[DLQ_HEADERS.HANDLER_RETRY_COUNT] = String(retryCount);
-    headers[DLQ_HEADERS.TIMESTAMP] = new Date().toISOString();
+    headers[DLQ_HEADERS.TIMESTAMP] = timestamp;
 
     if (options.includeErrorInfo !== false) {
-      const MAX_HEADER_LENGTH = 1000;
       headers[DLQ_HEADERS.ERROR_MESSAGE] = (error.message || '').substring(
         0,
         MAX_HEADER_LENGTH,
@@ -96,33 +164,6 @@ export class DlqService {
       );
     }
 
-    try {
-      const messageValue = message.value
-        ? message.value.toString('utf-8')
-        : null;
-      const messageKey = message.key
-        ? Buffer.isBuffer(message.key)
-          ? message.key.toString('utf-8')
-          : message.key
-        : null;
-
-      const target = options.connection || connection;
-      await this.kafkaClient.send(
-        options.topic,
-        {
-          key: messageKey,
-          value: messageValue,
-          headers,
-        },
-        target ? { connection: target } : undefined,
-      );
-
-      this.logger.warn(
-        `Message sent to DLQ: ${options.topic} after ${retryCount} retries`,
-      );
-    } catch (dlqError) {
-      this.logger.error('Failed to send message to DLQ', dlqError);
-      throw dlqError;
-    }
+    return headers;
   }
 }

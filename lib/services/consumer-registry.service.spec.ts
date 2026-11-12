@@ -123,29 +123,6 @@ describe('retry logic', () => {
     expect(attempts).toHaveBeenCalledTimes(5); // succeeded 2 attempts PAST maxRetries=2
   });
 
-  it('DLQ send failure propagates (the client redelivers the message)', async () => {
-    const r = makeRegistry();
-    (r as any).dlqService = {
-      handleFailure: jest.fn().mockRejectedValue(new Error('dlq down')),
-    };
-    const attempts = jest.fn().mockRejectedValue(new Error('x'));
-    await expect(
-      (r as any).runWithRetry(
-        attempts,
-        mkMsg(),
-        {
-          topic: 't',
-          connection: 'default',
-          options: {
-            dlq: { topic: 'd' },
-            retry: { retries: 0, initialRetryTime: 1 },
-          },
-        } as any,
-        0,
-      ),
-    ).rejects.toThrow('dlq down');
-  });
-
   it('shutdown aborts the retry loop — rethrows once, no hot-loop, offset not committed', async () => {
     const r = makeRegistry();
     const attempts = jest.fn().mockRejectedValue(new Error('x'));
