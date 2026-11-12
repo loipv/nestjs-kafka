@@ -1,6 +1,20 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
-import { KafkaModuleOptions, DEFAULT_KAFKA_CONNECTION } from '../interfaces';
+import {
+  CompressionCodec,
+  KafkaModuleOptions,
+  ProducerConfig,
+  DEFAULT_KAFKA_CONNECTION,
+} from '../interfaces';
+
+/** Indexed by the numeric compression value (0..4). */
+const COMPRESSION_CODECS: readonly CompressionCodec[] = [
+  'none',
+  'gzip',
+  'snappy',
+  'lz4',
+  'zstd',
+];
 
 type Kafka = InstanceType<typeof KafkaJS.Kafka>;
 type Producer = KafkaJS.Producer;
@@ -75,7 +89,11 @@ export class KafkaCoreService {
 
     const kafka = new KafkaJS.Kafka({ kafkaJS: kafkaConfig });
 
-    const producer = kafka.producer(options.producer);
+    const producer = kafka.producer(
+      options.producer
+        ? { kafkaJS: this.toProducerConfig(name, options.producer) }
+        : undefined,
+    );
 
     this.connections.set(name, {
       kafka,
@@ -203,6 +221,33 @@ export class KafkaCoreService {
         this.logger.error(`Error disconnecting producer for "${name}"`, error);
       }
     }
+  }
+
+  /**
+   * KafkaJS-style producer keys must sit in the client's `kafkaJS` block, and
+   * the client only accepts codec names for `compression`.
+   */
+  private toProducerConfig(
+    connectionName: string,
+    producer: ProducerConfig,
+  ): KafkaJS.ProducerConfig {
+    const { compression, ...rest } = producer;
+    if (compression === undefined) {
+      return rest as KafkaJS.ProducerConfig;
+    }
+    const codec =
+      typeof compression === 'number'
+        ? COMPRESSION_CODECS[compression]
+        : COMPRESSION_CODECS.find((c) => c === compression);
+    if (!codec) {
+      throw new Error(
+        `Kafka connection "${connectionName}": unsupported compression ${String(compression)}`,
+      );
+    }
+    return {
+      ...rest,
+      compression: codec as KafkaJS.CompressionTypes,
+    } as KafkaJS.ProducerConfig;
   }
 
   private mapLogLevel(level?: string): KafkaJS.logLevel {

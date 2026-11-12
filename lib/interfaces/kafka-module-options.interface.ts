@@ -9,6 +9,8 @@ export interface RetryOptions {
   maxRetryTime?: number;
 }
 
+export type CompressionCodec = 'none' | 'gzip' | 'snappy' | 'lz4' | 'zstd';
+
 export interface ProducerConfig {
   retry?: RetryOptions;
   metadataMaxAge?: number;
@@ -26,11 +28,11 @@ export interface ProducerConfig {
    */
   acks?: -1 | 0 | 1;
   /**
-   * Compression type for messages.
-   * 0: None, 1: GZIP, 2: Snappy, 3: LZ4, 4: ZSTD
+   * Compression codec for messages: a codec name, or its number
+   * (0: none, 1: gzip, 2: snappy, 3: lz4, 4: zstd).
    * Note: In confluent-kafka-javascript, this is set at producer level, not per-send
    */
-  compression?: 0 | 1 | 2 | 3 | 4;
+  compression?: 0 | 1 | 2 | 3 | 4 | CompressionCodec;
   /**
    * Maximum time in ms to wait for the producer to send a message.
    * Note: In confluent-kafka-javascript, this is set at producer level, not per-send
