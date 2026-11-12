@@ -290,10 +290,10 @@ export class KafkaCoreService implements OnApplicationBootstrap {
   async disconnectAll(): Promise<void> {
     for (const [name, connection] of this.connections) {
       try {
-        // A connect still in flight (e.g. the one started at bootstrap) would
-        // otherwise finish after shutdown and keep the process alive.
-        await connection.connectingPromise?.catch(() => undefined);
-        if (connection.isProducerConnected) {
+        // A connect still in flight (e.g. the one started at bootstrap) must be
+        // torn down too, or it finishes after shutdown and keeps the process
+        // alive. Never await it: against an unreachable broker it hangs.
+        if (connection.isProducerConnected || connection.connectingPromise) {
           await connection.producer.disconnect();
           connection.isProducerConnected = false;
           this.logger.log(`Producer disconnected for "${name}"`);

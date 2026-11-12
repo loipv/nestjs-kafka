@@ -197,15 +197,9 @@ describe('KafkaCoreService', () => {
     );
   });
 
-  it('disconnectAll waits for an in-flight connect and disconnects it', async () => {
-    let finishConnect!: () => void;
+  it('disconnectAll disconnects a producer whose connect is still in flight, without waiting for it', async () => {
     const producer = {
-      connect: jest.fn(
-        () =>
-          new Promise<void>((r) => {
-            finishConnect = r;
-          }),
-      ),
+      connect: jest.fn(() => new Promise<void>(() => {})), // unreachable broker
       disconnect: jest.fn().mockResolvedValue(undefined),
     };
     (KafkaJS.Kafka as unknown as jest.Mock).mockImplementationOnce(() => ({
@@ -214,10 +208,8 @@ describe('KafkaCoreService', () => {
     const core = new KafkaCoreService();
     core.registerConnection({ ...opts });
 
-    core.onApplicationBootstrap(); // connect starts, not awaited
-    const closing = core.disconnectAll();
-    finishConnect();
-    await closing;
+    core.onApplicationBootstrap(); // connect starts and never settles
+    await core.disconnectAll();
 
     expect(producer.disconnect).toHaveBeenCalledTimes(1);
     expect(core.isProducerConnected()).toBe(false);
