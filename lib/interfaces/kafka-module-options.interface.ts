@@ -54,14 +54,38 @@ export interface TracingOptions {
 
 export const DEFAULT_KAFKA_CONNECTION: string = 'default';
 
+/**
+ * TLS material, applied as librdkafka `ssl.*` keys. For any other TLS setting
+ * pass the librdkafka key through `rdkafka`.
+ */
+export interface SslOptions {
+  /** CA certificate(s), PEM → `ssl.ca.pem` (several are joined) */
+  ca?: string | Buffer | Array<string | Buffer>;
+  /** Client certificate, PEM → `ssl.certificate.pem` */
+  cert?: string | Buffer;
+  /** Client private key, PEM → `ssl.key.pem` */
+  key?: string | Buffer;
+  /** Private key password → `ssl.key.password` */
+  passphrase?: string;
+  /** false → `enable.ssl.certificate.verification: false` */
+  rejectUnauthorized?: boolean;
+}
+
 export interface KafkaModuleOptions {
   /** Connection name for multi-connection support. Default: 'default' */
   name?: string;
   clientId: string;
   brokers: string[];
 
-  ssl?: boolean | object;
+  /** `true` enables TLS with system CAs; an object also sets TLS material */
+  ssl?: boolean | SslOptions;
   sasl?: SASLOptions;
+  /**
+   * Raw librdkafka properties for this connection's producer, consumers and
+   * admin clients. Applied last, so they override keys the library generates.
+   * @example { 'socket.keepalive.enable': true, 'ssl.endpoint.identification.algorithm': 'none' }
+   */
+  rdkafka?: Record<string, string | number | boolean>;
 
   connectionTimeout?: number;
   requestTimeout?: number;

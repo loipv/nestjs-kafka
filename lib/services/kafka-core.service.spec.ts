@@ -117,6 +117,63 @@ describe('KafkaCoreService', () => {
     });
   });
 
+  describe('TLS and rdkafka passthrough', () => {
+    const lastKafkaConfig = () =>
+      (KafkaJS.Kafka as unknown as jest.Mock).mock.calls.at(-1)![0];
+
+    it('maps an ssl object to librdkafka keys', () => {
+      new KafkaCoreService().registerConnection({
+        ...opts,
+        ssl: {
+          ca: [Buffer.from('A'), 'B'],
+          cert: 'C',
+          key: Buffer.from('K'),
+          passphrase: 'p',
+          rejectUnauthorized: false,
+        },
+      });
+      const config = lastKafkaConfig();
+      expect(config.kafkaJS.ssl).toBe(true);
+      expect(config['ssl.ca.pem']).toBe('A\nB');
+      expect(config['ssl.certificate.pem']).toBe('C');
+      expect(config['ssl.key.pem']).toBe('K');
+      expect(config['ssl.key.password']).toBe('p');
+      expect(config['enable.ssl.certificate.verification']).toBe(false);
+    });
+
+    it('ssl: true adds no librdkafka ssl keys', () => {
+      new KafkaCoreService().registerConnection({ ...opts, ssl: true });
+      const config = lastKafkaConfig();
+      expect(config.kafkaJS.ssl).toBe(true);
+      expect(Object.keys(config).filter((k) => k.startsWith('ssl.'))).toEqual(
+        [],
+      );
+    });
+
+    it('rejects an unknown ssl option', () => {
+      expect(() =>
+        new KafkaCoreService().registerConnection({
+          ...opts,
+          name: 'a',
+          ssl: { servername: 'x' } as any,
+        }),
+      ).toThrow(
+        'Kafka connection "a": unsupported ssl option "servername"; pass librdkafka keys through rdkafka',
+      );
+    });
+
+    it('rdkafka overrides generated keys', () => {
+      new KafkaCoreService().registerConnection({
+        ...opts,
+        ssl: { ca: 'A' },
+        rdkafka: { 'ssl.ca.pem': 'Z', 'socket.keepalive.enable': true },
+      });
+      const config = lastKafkaConfig();
+      expect(config['ssl.ca.pem']).toBe('Z');
+      expect(config['socket.keepalive.enable']).toBe(true);
+    });
+  });
+
   it('connects every producer at bootstrap without throwing', async () => {
     const failing = { connect: jest.fn().mockRejectedValue(new Error('down')) };
     const ok = { connect: jest.fn().mockResolvedValue(undefined) };

@@ -4,6 +4,7 @@ import {
   CompressionCodec,
   ConsumerGroupStatus,
   KafkaModuleOptions,
+  SslOptions,
   ProducerConfig,
   DEFAULT_KAFKA_CONNECTION,
 } from '../interfaces';
@@ -72,9 +73,12 @@ export class KafkaCoreService implements OnApplicationBootstrap {
     };
 
     // Add optional settings only if defined
+    let sslKeys: Record<string, string | boolean> = {};
     if (options.ssl !== undefined) {
-      kafkaConfig.ssl =
-        typeof options.ssl === 'boolean' ? options.ssl : !!options.ssl;
+      kafkaConfig.ssl = !!options.ssl;
+      if (typeof options.ssl === 'object' && options.ssl !== null) {
+        sslKeys = this.toSslKeys(name, options.ssl);
+      }
     }
     if (options.sasl !== undefined) {
       kafkaConfig.sasl = options.sasl;
@@ -92,7 +96,13 @@ export class KafkaCoreService implements OnApplicationBootstrap {
       kafkaConfig.retry = options.retry;
     }
 
-    const kafka = new KafkaJS.Kafka({ kafkaJS: kafkaConfig });
+    // Top-level keys are librdkafka properties shared by the producer,
+    // consumers and admin clients of this connection; `rdkafka` wins.
+    const kafka = new KafkaJS.Kafka({
+      kafkaJS: kafkaConfig,
+      ...sslKeys,
+      ...options.rdkafka,
+    } as KafkaJS.CommonConstructorConfig);
 
     const producerConfig: ProducerConstructorConfig = options.producer
       ? { kafkaJS: this.toProducerConfig(name, options.producer) }
@@ -219,6 +229,51 @@ export class KafkaCoreService implements OnApplicationBootstrap {
         ),
       );
     }
+  }
+
+  /**
+   * Map an `ssl` object to librdkafka keys (the client only accepts a boolean
+   * `ssl` in its kafkaJS block). Unknown options throw at registration.
+   */
+  private toSslKeys(
+    name: string,
+    ssl: SslOptions,
+  ): Record<string, string | boolean> {
+    const pem = (value: string | Buffer) =>
+      Buffer.isBuffer(value) ? value.toString('utf-8') : value;
+    const keys: Record<string, string | boolean> = {};
+
+    for (const [option, value] of Object.entries(ssl)) {
+      if (value === undefined) continue;
+      switch (option as keyof SslOptions) {
+        case 'ca':
+          keys['ssl.ca.pem'] = (
+            Array.isArray(value) ? value : [value as string | Buffer]
+          )
+            .map(pem)
+            .join('\n');
+          break;
+        case 'cert':
+          keys['ssl.certificate.pem'] = pem(value as string | Buffer);
+          break;
+        case 'key':
+          keys['ssl.key.pem'] = pem(value as string | Buffer);
+          break;
+        case 'passphrase':
+          keys['ssl.key.password'] = value as string;
+          break;
+        case 'rejectUnauthorized':
+          if (value === false) {
+            keys['enable.ssl.certificate.verification'] = false;
+          }
+          break;
+        default:
+          throw new Error(
+            `Kafka connection "${name}": unsupported ssl option "${option}"; pass librdkafka keys through rdkafka`,
+          );
+      }
+    }
+    return keys;
   }
 
   setConsumerStatus(groupKey: string, status: ConsumerGroupStatus): void {
