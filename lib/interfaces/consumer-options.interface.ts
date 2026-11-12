@@ -36,21 +36,25 @@ export interface DlqOptions {
 }
 
 export interface ConsumerRetryOptions {
-  /** Maximum number of retries per call. Default: 5 */
+  /**
+   * Attempts before `skipMessageOnMaxRetries` applies. Without skip the
+   * message is retried indefinitely. Default: 3
+   */
   retries?: number;
-  /** Max wait time for a retry in ms. Default: 30000 */
+  /** Cap for every retry delay in ms (also caps the DLQ backoff). Default: 30000 */
   maxRetryTime?: number;
-  /** Initial value used to calculate retry in ms. Default: 300 */
+  /** Delay before the first retry in ms. Default: 1000 */
   initialRetryTime?: number;
-  /** Exponential factor for internal retry backoff calculation. Default: 2 */
+  /** Exponential factor for the retry delay. Default: 2 */
   multiplier?: number;
   /**
    * Skip message after max retries exceeded (for non-DLQ scenarios).
-   * - true: skip message and continue (prevents consumer blocking)
-   * - false: throw error after max retries (default, may cause consumer to stop)
+   * - true: skip the message and commit its offset
+   * - false (default): keep retrying; the partition is paused between
+   *   attempts, other partitions keep flowing
    *
    * Note: This only applies when DLQ is NOT configured.
-   * With DLQ, messages are sent to DLQ topic after max retries.
+   * With DLQ, messages are sent to DLQ topic after `dlq.maxRetries`.
    */
   skipMessageOnMaxRetries?: boolean;
 }
@@ -203,15 +207,15 @@ export interface ConsumerModuleOptions {
 /** Injection token for ConsumerModule options */
 export const CONSUMER_MODULE_OPTIONS = Symbol('CONSUMER_MODULE_OPTIONS');
 
-/** Hard cap for every computed message retry delay */
+/** Default cap for every retry delay (override per consumer with `retry.maxRetryTime`) */
 export const MAX_RETRY_DELAY_MS = 30000;
 
 /**
  * What the retry engine should do after a handler failure.
  *
- * There is NO 'crash' verdict: handler errors retry in-process forever
- * (skip=false) or terminate via skip/DLQ. A DLQ send failure REJECTS instead
- * of returning a verdict: the client logs it and redelivers the message.
+ * There is NO 'crash' verdict: handler errors are retried forever (skip=false)
+ * or end via skip/DLQ. A retry pauses the partition, rethrows, and resumes
+ * after `delayMs`; a failed DLQ send is a retry too.
  */
 export type RetryVerdict =
   | { action: 'retry'; delayMs: number }

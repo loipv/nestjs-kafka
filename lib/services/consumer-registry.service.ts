@@ -400,14 +400,10 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     }
   }
 
-  private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { groupId, topics, options, connection } = group;
-    const consumer = group.consumer!;
-
-    // Build run config with only defined values
+  /** Run config shared by message and batch groups. */
+  private baseRunConfig(options: ConsumerOptions): KafkaJS.ConsumerRunConfig {
     // Note: restartOnFailure is not supported in confluent-kafka-javascript
     const runConfig: KafkaJS.ConsumerRunConfig = {};
-
     if (
       options.partitionsConsumedConcurrently !== undefined &&
       options.partitionsConsumedConcurrently > 0
@@ -415,13 +411,21 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       runConfig.partitionsConsumedConcurrently =
         options.partitionsConsumedConcurrently;
     }
+    return runConfig;
+  }
+
+  private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
+    const { groupId, groupKey, topics, options, connection } = group;
+    const consumer = group.consumer!;
+    const runConfig = this.baseRunConfig(options);
 
     runConfig.eachMessage = async (payload: EachMessagePayload) => {
-      if (this.isShuttingDown) return;
+      // Never return here: a normal return stores the offset, which the client
+      // commits on close — the message would be lost.
+      if (this.isShuttingDown) throw new Error('Consumer is shutting down');
 
       const { topic, message, partition } = payload;
 
-      // Find the handler for this topic
       const topicHandler = topics.get(topic);
       if (!topicHandler) {
         this.logger.warn(`No handler found for topic: ${topic}`);
@@ -449,20 +453,10 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           topicOptions.deserialize !== false
             ? deserializeMessage(message, topic, partition)
             : message;
-
         await handler(processedMessage);
-
-        if (topicOptions.idempotencyKey) {
-          this.idempotencyService.markProcessed(
-            message,
-            topicOptions.idempotencyKey,
-            namespace,
-            topicOptions.idempotencyTtl,
-          );
-        }
       };
 
-      // Per-attempt trace span (retry attempts each get their own span)
+      // One trace span per delivery (each retry is a redelivery)
       const invokeOnce = async () => {
         if (this.tracingService?.isEnabled()) {
           return this.tracingService.withConsumeSpan(
@@ -480,7 +474,36 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         return processOnce();
       };
 
-      await this.runWithRetry(invokeOnce, message, metadata, partition);
+      const attemptKey = PartitionRetryTracker.attemptKey(
+        groupKey,
+        topic,
+        partition,
+        message.offset,
+      );
+      try {
+        await invokeOnce();
+      } catch (error) {
+        await this.handleHandlerFailure({
+          group,
+          metadata,
+          partition,
+          messages: [message],
+          attemptKey,
+          error: error as Error,
+          pause: () => payload.pause(),
+        });
+        return;
+      }
+
+      this.retryTracker.clear(attemptKey);
+      if (topicOptions.idempotencyKey) {
+        this.idempotencyService.markProcessed(
+          message,
+          topicOptions.idempotencyKey,
+          namespace,
+          topicOptions.idempotencyTtl,
+        );
+      }
     };
 
     // Resolves once the client has started its fetch loop. Handler and broker
@@ -489,65 +512,36 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   }
 
   private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
-    const { groupId, topics, options } = group;
+    const { topics, options } = group;
     const consumer = group.consumer!;
-
-    // Build run config with only defined values
-    // Note: restartOnFailure is not supported in confluent-kafka-javascript
-    const runConfig: KafkaJS.ConsumerRunConfig = {};
-
-    if (
-      options.partitionsConsumedConcurrently !== undefined &&
-      options.partitionsConsumedConcurrently > 0
-    ) {
-      runConfig.partitionsConsumedConcurrently =
-        options.partitionsConsumedConcurrently;
-    }
+    const runConfig = this.baseRunConfig(options);
 
     // Batch groups commit ONLY what we explicitly resolve — never auto-resolve
-    // the whole fetched batch (that would ack unprocessed messages on a
-    // stale-break and break at-least-once).
+    // the whole fetched batch. On a throw or an early return the client seeks
+    // back to the first unresolved offset.
     runConfig.eachBatchAutoResolve = false;
 
     runConfig.eachBatch = async (payload: EachBatchPayload) => {
-      if (this.isShuttingDown) return;
+      if (this.isShuttingDown) return; // nothing resolved → redelivered
 
       const { batch } = payload;
-      const { topic, partition, messages } = batch;
+      const { topic, messages } = batch;
 
-      // Find the handler for this topic
       const topicHandler = topics.get(topic);
       if (!topicHandler) {
         this.logger.warn(`No handler found for topic: ${topic}`);
         return;
       }
 
-      const { metadata, handler } = topicHandler;
-      const topicOptions = metadata.options;
-
-      // Offsets resolve once, after every chunk processed so far succeeded
-      // (at-least-once); a stale or stopping payload ends the loop early.
-      let lastProcessedOffset: string | null = null;
       for (const chunk of this.batchProcessor.splitIntoBatches(
         messages,
-        topicOptions.batchSize,
+        topicHandler.metadata.options.batchSize,
       )) {
-        if (!payload.isRunning() || payload.isStale()) break;
+        if (!payload.isRunning() || payload.isStale()) return;
 
-        await this.processBatchMessages(
-          chunk,
-          topic,
-          partition,
-          topicOptions,
-          handler,
-          groupId,
-          metadata,
-        );
-        lastProcessedOffset = chunk[chunk.length - 1].offset;
-      }
-
-      if (lastProcessedOffset !== null) {
-        payload.resolveOffset(lastProcessedOffset);
+        // Throws (after pausing the partition) when the chunk must be retried
+        await this.processChunk(group, topicHandler, payload, chunk);
+        payload.resolveOffset(chunk[chunk.length - 1].offset);
       }
     };
 
@@ -556,58 +550,56 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     await consumer.run(runConfig);
   }
 
-  private async processBatchMessages(
-    messages: any[],
-    topic: string,
-    partition: number,
-    options: ConsumerOptions,
-    handler: (...args: any[]) => Promise<void>,
-    groupId?: string,
-    metadata?: ConsumerMetadata,
+  /**
+   * Hand one chunk to the batch handler. Resolves when the chunk may be
+   * resolved (handled, all duplicates, dead-lettered or skipped); throws after
+   * pausing the partition when it must be retried.
+   */
+  private async processChunk(
+    group: ConsumerGroup,
+    { metadata, handler }: TopicHandler,
+    payload: EachBatchPayload,
+    chunk: KafkaJS.KafkaMessage[],
   ): Promise<void> {
-    let processableMessages = messages;
+    const { topic, partition } = payload.batch;
+    const options = metadata.options;
     const namespace = this.idempotencyNamespace(
-      metadata?.connection || DEFAULT_KAFKA_CONNECTION,
-      groupId ?? `${topic}-group`,
+      group.connection,
+      group.groupId,
       topic,
     );
 
-    if (options.idempotencyKey) {
-      processableMessages = this.idempotencyService.filterDuplicates(
-        messages,
-        options.idempotencyKey,
-        namespace,
-      );
-    }
+    const processable = options.idempotencyKey
+      ? this.idempotencyService.filterDuplicates(
+          chunk,
+          options.idempotencyKey,
+          namespace,
+        )
+      : chunk;
+    if (processable.length === 0) return;
 
-    const deserializedMessages =
+    const deserialized =
       options.deserialize !== false
-        ? processableMessages.map((msg) =>
-            deserializeMessage(msg, topic, partition),
-          )
-        : processableMessages;
+        ? processable.map((msg) => deserializeMessage(msg, topic, partition))
+        : processable;
 
-    // Process batch - create a span for the batch if tracing is enabled
     const processBatch = async () => {
       if (options.groupByKey) {
-        const grouped =
-          this.batchProcessor.groupMessagesByKey(deserializedMessages);
-        await handler(grouped);
+        await handler(this.batchProcessor.groupMessagesByKey(deserialized));
       } else {
-        await handler(deserializedMessages);
+        await handler(deserialized);
       }
     };
 
-    const invokeBatchOnce = async () => {
-      // For batch processing, use links to connect all message traces
-      // First message becomes parent, others are linked
-      if (this.tracingService?.isEnabled() && messages.length > 0) {
+    // First message becomes the span parent, the others are linked
+    const invokeOnce = async () => {
+      if (this.tracingService?.isEnabled()) {
         return this.tracingService.withBatchConsumeSpan(
           {
             topic,
             partition,
-            groupId,
-            messagesHeaders: messages.map((msg) => ({
+            groupId: group.groupId,
+            messagesHeaders: processable.map((msg) => ({
               offset: msg.offset,
               key: msg.key?.toString(),
               headers: msg.headers,
@@ -619,53 +611,30 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       return processBatch();
     };
 
-    // Batch retry policy mirrors the single-message path: skip=false →
-    // retry the batch indefinitely (handler errors never crash the consumer);
-    // DLQ configured → dead-letter every raw message after maxRetries;
-    // skip=true → skip after maxRetries.
-    const maxRetries = options.retry?.retries ?? 3;
-    let attempt = 0;
-    for (;;) {
-      attempt++;
-      try {
-        await invokeBatchOnce();
-        break; // success
-      } catch (error) {
-        const err = error as Error;
-        this.logger.error(
-          `Error processing batch from ${topic} (attempt ${attempt})`,
-          err,
-        );
-
-        if (attempt > maxRetries && metadata?.options.dlq) {
-          // Exhausted: dead-letter the batch in one send
-          // (a sendToDlq failure rejects → the client redelivers the batch)
-          await this.dlqService.sendToDlq(
-            messages,
-            err,
-            metadata.options.dlq,
-            topic,
-            attempt,
-            metadata.connection,
-          );
-          break;
-        }
-        if (
-          attempt > maxRetries &&
-          (options.retry?.skipMessageOnMaxRetries ?? false)
-        ) {
-          break; // skip — fall through to resolve offset
-        }
-        // retry (indefinitely when skip=false)
-        await this.sleep(this.computeRetryDelay(attempt, options.retry));
-        if (this.isShuttingDown) {
-          throw err; // one-shot rethrow: offset never resolved → redelivered next boot
-        }
-      }
+    const attemptKey = PartitionRetryTracker.attemptKey(
+      group.groupKey,
+      topic,
+      partition,
+      chunk[0].offset,
+    );
+    try {
+      await invokeOnce();
+    } catch (error) {
+      await this.handleHandlerFailure({
+        group,
+        metadata,
+        partition,
+        messages: processable,
+        attemptKey,
+        error: error as Error,
+        pause: () => payload.pause(),
+      });
+      return;
     }
 
+    this.retryTracker.clear(attemptKey);
     if (options.idempotencyKey) {
-      for (const msg of processableMessages) {
+      for (const msg of processable) {
         this.idempotencyService.markProcessed(
           msg,
           options.idempotencyKey,
@@ -674,6 +643,72 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         );
       }
     }
+  }
+
+  /**
+   * One failed delivery of a message or chunk. Resolves on a terminal verdict
+   * (dead-lettered or skipped: the caller acks). Otherwise pauses the payload's
+   * partition, schedules its resume after the backoff delay and rethrows the
+   * handler error, so the client seeks back and redelivers after the resume.
+   * Never sleeps: the consumer keeps polling and stays in its group.
+   */
+  private async handleHandlerFailure(ctx: {
+    group: ConsumerGroup;
+    metadata: ConsumerMetadata;
+    partition: number;
+    messages: KafkaJS.KafkaMessage[];
+    attemptKey: string;
+    error: Error;
+    pause: () => (() => void) | undefined;
+  }): Promise<void> {
+    const { group, metadata, partition, messages, attemptKey, error } = ctx;
+    const { topic, options } = metadata;
+    const attempt = this.retryTracker.nextAttempt(attemptKey);
+
+    this.logger.error(
+      `Error processing ${messages.length > 1 ? `${messages.length} messages` : 'message'} ` +
+        `from ${topic} [${partition}] (attempt ${attempt})`,
+      error,
+    );
+
+    const verdict = options.dlq
+      ? await this.dlqService.handleFailure(
+          messages,
+          error,
+          options.dlq,
+          topic,
+          partition,
+          group.connection,
+          attempt,
+          this.maxRetryDelay(options.retry),
+        ) // never rejects: a failed DLQ send returns a retry verdict
+      : this.evaluateRetry(attempt, options);
+
+    if (verdict.action === 'complete') {
+      this.retryTracker.clear(attemptKey);
+      this.logger.error(
+        `Message(s) from ${topic} [${partition}] completed without success after ` +
+          `${attempt} attempts (${options.dlq ? 'dead-lettered' : 'skipped'}). ` +
+          `First offset: ${messages[0]?.offset ?? 'n/a'}`,
+      );
+      return;
+    }
+
+    let resume: (() => void) | undefined;
+    try {
+      resume = ctx.pause();
+    } catch (pauseError) {
+      // The consumer is disconnecting: the throw below still prevents the ack
+      this.logger.debug(`Pause failed: ${String(pauseError)}`);
+    }
+    if (resume) {
+      this.retryTracker.scheduleResume(
+        PartitionRetryTracker.partitionKey(group.groupKey, topic, partition),
+        verdict.delayMs,
+        resume,
+      );
+    }
+    throw error;
   }
 
   /** Idempotency keys are scoped to one consumer: `<connection>:<groupId>|<topic>`. */
@@ -730,6 +765,11 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     return consumerConfig;
   }
 
+  /** Effective cap for every retry delay: `retry.maxRetryTime`, default 30s. */
+  private maxRetryDelay(retry?: ConsumerOptions['retry']): number {
+    return retry?.maxRetryTime ?? MAX_RETRY_DELAY_MS;
+  }
+
   private computeRetryDelay(
     attempt: number,
     retry?: ConsumerOptions['retry'],
@@ -738,7 +778,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const multiplier = retry?.multiplier ?? 2;
     return Math.min(
       baseDelay * multiplier ** (attempt - 1),
-      MAX_RETRY_DELAY_MS,
+      this.maxRetryDelay(retry),
     );
   }
 
@@ -762,81 +802,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     return { action: 'complete' };
   }
 
-  /**
-   * Re-invoke `invoke` in-process with capped exponential backoff until a
-   * terminal verdict. Handler errors NEVER crash the consumer here — only an
-   * infra rejection from dlqService.handleFailure (DLQ send failure) escapes.
-   */
-  private async runWithRetry(
-    invoke: () => Promise<void>,
-    message: any,
-    metadata: ConsumerMetadata,
-    partition?: number,
-  ): Promise<void> {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await invoke();
-        return;
-      } catch (error) {
-        const err = error as Error;
-        this.logger.error(
-          `Error processing message from ${metadata.topic} (attempt ${attempt})`,
-          err,
-        );
-        const verdict = metadata.options.dlq
-          ? await this.dlqService.handleFailure(
-              [message],
-              err,
-              metadata.options.dlq,
-              metadata.topic,
-              partition,
-              metadata.connection,
-              attempt,
-            ) // never rejects: a failed DLQ send returns a retry verdict
-          : this.evaluateRetry(attempt, metadata.options);
-
-        if (verdict.action === 'retry') {
-          await this.sleep(verdict.delayMs); // cancellable on shutdown
-          if (this.isShuttingDown) {
-            // Shutdown cancelled the sleep — rethrow ONCE so the offset is NOT
-            // committed (message redelivered next boot, at-least-once).
-            // Returning normally here would ack the message and LOSE it.
-            throw err;
-          }
-          continue;
-        }
-        // 'complete': DLQ-sent / skipped — ack and move on
-        this.logger.error(
-          `Message from ${metadata.topic} skipped after ${attempt} attempts. ` +
-            `Offset: ${message.offset}, Partition: ${partition ?? 'unknown'}`,
-        );
-        return;
-      }
-    }
-  }
-
-  private shutdownResolvers = new Set<() => void>();
-
-  private sleep(ms: number): Promise<void> {
-    // Shutdown may have been signalled before this sleep registered its
-    // canceller — resolve immediately so callers re-check isShuttingDown.
-    if (this.isShuttingDown) return Promise.resolve();
-
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.shutdownResolvers.delete(cancelFn);
-        resolve();
-      }, ms);
-
-      const cancelFn = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-
-      this.shutdownResolvers.add(cancelFn);
-    });
-  }
-
   /** Idempotent: every call returns the first call's promise. */
   gracefulShutdown(): Promise<void> {
     this.shutdownPromise ??= this.shutdown();
@@ -845,13 +810,8 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
   private async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    // Pending resumes are dropped; paused partitions are redelivered next boot
     this.retryTracker.clearAll();
-
-    // Cancel all in-flight retry delays so shutdown isn't blocked
-    for (const cancel of this.shutdownResolvers) {
-      cancel();
-    }
-    this.shutdownResolvers.clear();
 
     this.logger.log('Starting graceful shutdown of consumers...');
 
