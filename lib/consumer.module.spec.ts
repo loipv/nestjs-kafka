@@ -6,7 +6,6 @@ import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service
 import { ConsumerRegistryService } from './services/consumer-registry.service';
 import { BatchProcessorService } from './services/batch-processor.service';
 import { IdempotencyService } from './services/idempotency.service';
-import { PressureManagerService } from './services/pressure-manager.service';
 import { DlqService } from './services/dlq.service';
 import { Consumer } from './decorators/consumer.decorator';
 
@@ -113,13 +112,6 @@ describe('ConsumerModule', () => {
 
     it('should provide IdempotencyService', () => {
       const service = module.get<IdempotencyService>(IdempotencyService);
-      expect(service).toBeDefined();
-    });
-
-    it('should provide PressureManagerService', () => {
-      const service = module.get<PressureManagerService>(
-        PressureManagerService,
-      );
       expect(service).toBeDefined();
     });
 

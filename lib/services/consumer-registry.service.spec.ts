@@ -16,7 +16,6 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
       {} as any,
       {} as any,
       {} as any,
-      {} as any,
       undefined,
       moduleOptions,
     );
@@ -55,7 +54,6 @@ describe('retry logic', () => {
       {} as any,
       {} as any,
       { stopCleanup: jest.fn() } as any,
-      { register: jest.fn(), setTopics: jest.fn() } as any,
       { handleFailure: jest.fn() } as any,
       undefined,
       undefined,
@@ -125,7 +123,7 @@ describe('retry logic', () => {
     expect(attempts).toHaveBeenCalledTimes(5); // succeeded 2 attempts PAST maxRetries=2
   });
 
-  it('DLQ send failure propagates (infra crash path → auto-restart)', async () => {
+  it('DLQ send failure propagates (the client redelivers the message)', async () => {
     const r = makeRegistry();
     (r as any).dlqService = {
       handleFailure: jest.fn().mockRejectedValue(new Error('dlq down')),
@@ -167,42 +165,22 @@ describe('retry logic', () => {
   });
 });
 
-describe('consumer auto-restart', () => {
-  const makeRegistry = () =>
-    new ConsumerRegistryService(
-      {} as any,
-      {} as any,
-      { stopCleanup: jest.fn() } as any,
-      { register: jest.fn(), setTopics: jest.fn() } as any,
-      { handleFailure: jest.fn() } as any,
-      undefined,
-      undefined,
-    );
-
-  it('computeRestartDelay grows exponentially and caps at maxRetryTime', () => {
-    const r = makeRegistry();
-    const group = {
-      options: {
-        retry: { initialRetryTime: 1000, multiplier: 2, maxRetryTime: 5000 },
-      },
-      restartAttempts: 0,
-    } as any;
-    expect((r as any).computeRestartDelay(group)).toBe(1000);
-    group.restartAttempts = 2;
-    expect((r as any).computeRestartDelay(group)).toBe(4000);
-    group.restartAttempts = 10;
-    expect((r as any).computeRestartDelay(group)).toBe(5000); // capped
+describe('consumer groups', () => {
+  const mkMsg = (offset: string) => ({
+    offset,
+    value: Buffer.from(offset),
+    key: null,
+    headers: {},
+    timestamp: '',
   });
 
-  it('run() rejection (connection crash) schedules a consumer restart', async () => {
-    const restart = jest.fn().mockResolvedValue(undefined);
+  /** Registry wired to one mocked consumer; `config()` is what run() got. */
+  const makeHarness = (run = jest.fn().mockResolvedValue(undefined)) => {
     const consumer = {
       connect: jest.fn(),
       subscribe: jest.fn(),
-      run: jest.fn().mockRejectedValue(new Error('connection reset')),
+      run,
       disconnect: jest.fn(),
-      pause: jest.fn(),
-      resume: jest.fn(),
     };
     const core = {
       getKafka: jest.fn().mockReturnValue({
@@ -211,118 +189,122 @@ describe('consumer auto-restart', () => {
           connect: jest.fn(),
           disconnect: jest.fn(),
           listTopics: jest.fn().mockResolvedValue([]),
+          createTopics: jest.fn(),
         }),
       }),
     };
-    const r = makeRegistry();
-    (r as any).kafkaCore = core;
-    (r as any).scheduleConsumerRestart = restart;
-    r.registerConsumers([
-      {
-        topic: 't',
-        connection: 'default',
-        options: {},
-        target: { h: async () => {} },
-        methodName: 'h',
-      } as any,
-    ]);
-    await (r as any).startAll();
-    await new Promise((resolve) => setImmediate(resolve)); // let the .catch microtask run
-    expect(restart).toHaveBeenCalledWith(
-      expect.objectContaining({ groupId: 't-group' }),
-      expect.any(Error),
-    );
-  });
-
-  it('does not restart while shutting down', async () => {
-    const r = makeRegistry();
-    const group = {
-      groupId: 'g',
-      isRestarting: false,
-      restartAttempts: 0,
-      consumer: { disconnect: jest.fn() },
-    } as any;
-    await (r as any).gracefulShutdown();
-    await (r as any).scheduleConsumerRestart(group, new Error('x'));
-    expect(group.restartAttempts).toBe(0); // returned before any sleep/reconnect
-  });
-});
-
-describe('batch offset semantics', () => {
-  it('resolves offsets only after successful flush (at-least-once)', async () => {
-    let captured: any;
-    const consumer = {
-      connect: jest.fn(),
-      subscribe: jest.fn(),
-      run: jest.fn().mockImplementation((cfg) => {
-        captured = cfg;
-        return Promise.resolve(undefined);
-      }),
-      disconnect: jest.fn(),
-      pause: jest.fn(),
-      resume: jest.fn(),
-    };
-    const admin = {
-      connect: jest.fn(),
-      disconnect: jest.fn(),
-      listTopics: jest.fn().mockResolvedValue([]),
-      createTopics: jest.fn(),
-    };
-    const core = {
-      getKafka: jest.fn().mockReturnValue({
-        consumer: jest.fn().mockReturnValue(consumer),
-        admin: jest.fn().mockReturnValue(admin),
-      }),
-    };
-    const handler = jest.fn().mockResolvedValue(undefined);
     const registry = new ConsumerRegistryService(
       core as any,
       new BatchProcessorService(),
-      { filterDuplicates: (m: any[]) => m } as any,
-      { register: jest.fn(), setTopics: jest.fn() } as any,
-      {} as any, // dlqService — not used in this path
+      { filterDuplicates: (m: any[]) => m, stopCleanup: jest.fn() } as any,
+      {} as any, // dlqService — not used in these paths
       undefined,
       undefined,
     );
+    const config = () => run.mock.calls[0][0];
+    return { registry, config };
+  };
+
+  const consumerMeta = (topic: string, options: any, handler = jest.fn()) =>
+    ({
+      topic,
+      connection: 'default',
+      options,
+      target: { h: handler },
+      methodName: 'h',
+    }) as any;
+
+  const batchPayload = (
+    messages: any[],
+    resolveOffset: jest.Mock,
+    isStale: () => boolean = () => false,
+  ) => ({
+    batch: { topic: 't', partition: 0, messages },
+    isRunning: () => true,
+    isStale,
+    resolveOffset,
+    heartbeat: () => {},
+  });
+
+  it('startAll() rejects when run() rejects', async () => {
+    const { registry } = makeHarness(
+      jest.fn().mockRejectedValue(new Error('not connected')),
+    );
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await expect(registry.startAll()).rejects.toThrow('not connected');
+  });
+
+  it.each([
+    [true, false],
+    [false, true],
+  ])(
+    'rejects a group mixing batch=%p and batch=%p consumers',
+    (first, second) => {
+      const { registry } = makeHarness();
+      expect(() =>
+        registry.registerConsumers([
+          consumerMeta('a', { groupId: 'g', batch: first }),
+          consumerMeta('b', { groupId: 'g', batch: second }),
+        ]),
+      ).toThrow(
+        'Consumer group "g" mixes batch and non-batch consumers; use separate groupIds',
+      );
+    },
+  );
+
+  it('resolves offsets only after successful flush (at-least-once)', async () => {
+    const handler = jest.fn().mockResolvedValue(undefined);
+    const { registry, config } = makeHarness();
     registry.registerConsumers([
-      {
-        topic: 't',
-        connection: 'default',
-        options: { batch: true, batchSize: 2, batchTimeout: 5000 },
-        target: { h: handler },
-        methodName: 'h',
-      } as any,
+      consumerMeta('t', { batch: true, batchSize: 2 }, handler),
     ]);
-    await (registry as any).startAll();
+    await registry.startAll();
 
-    const msgs = [
-      {
-        offset: '1',
-        value: Buffer.from('a'),
-        key: null,
-        headers: {},
-        timestamp: '',
-      },
-      {
-        offset: '2',
-        value: Buffer.from('b'),
-        key: null,
-        headers: {},
-        timestamp: '',
-      },
-    ];
     const resolveOffset = jest.fn();
-    await captured.eachBatch({
-      batch: { topic: 't', partition: 0, messages: msgs },
-      isRunning: () => true,
-      isStale: () => false,
-      resolveOffset,
-      heartbeat: () => {},
-    });
+    await config().eachBatch(
+      batchPayload([mkMsg('1'), mkMsg('2')], resolveOffset),
+    );
 
-    expect(handler).toHaveBeenCalledTimes(1); // flushed as one batch
-    expect(resolveOffset).toHaveBeenCalledTimes(1); // once, not per-add
-    expect(resolveOffset).toHaveBeenCalledWith('2'); // last offset, AFTER flush
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(resolveOffset).toHaveBeenCalledTimes(1);
+    expect(resolveOffset).toHaveBeenCalledWith('2');
+  });
+
+  it('chunks a fetched batch by batchSize and resolves once', async () => {
+    const handler = jest.fn().mockResolvedValue(undefined);
+    const { registry, config } = makeHarness();
+    registry.registerConsumers([
+      consumerMeta('t', { batch: true, batchSize: 2 }, handler),
+    ]);
+    await registry.startAll();
+
+    const resolveOffset = jest.fn();
+    await config().eachBatch(
+      batchPayload(['1', '2', '3', '4', '5'].map(mkMsg), resolveOffset),
+    );
+
+    expect(handler.mock.calls.map((c) => c[0].length)).toEqual([2, 2, 1]);
+    expect(resolveOffset).toHaveBeenCalledTimes(1);
+    expect(resolveOffset).toHaveBeenCalledWith('5');
+  });
+
+  it('stops at a stale payload and resolves only what was processed', async () => {
+    const handler = jest.fn().mockResolvedValue(undefined);
+    const { registry, config } = makeHarness();
+    registry.registerConsumers([
+      consumerMeta('t', { batch: true, batchSize: 2 }, handler),
+    ]);
+    await registry.startAll();
+
+    const resolveOffset = jest.fn();
+    const isStale = jest.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    await config().eachBatch(
+      batchPayload(['1', '2', '3', '4'].map(mkMsg), resolveOffset, isStale),
+    );
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(resolveOffset).toHaveBeenCalledTimes(1);
+    expect(resolveOffset).toHaveBeenCalledWith('2');
   });
 });
 
@@ -362,7 +344,6 @@ describe('DLQ on a separate connection', () => {
       core as any,
       {} as any,
       { stopCleanup: jest.fn() } as any,
-      { register: jest.fn(), setTopics: jest.fn() } as any,
       {} as any,
       undefined,
       undefined,

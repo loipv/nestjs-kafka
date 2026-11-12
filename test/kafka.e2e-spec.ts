@@ -199,7 +199,6 @@ describe('Kafka e2e (testcontainers)', () => {
         allowAutoTopicCreation: true,
         batch: true,
         batchSize: 3,
-        batchTimeout: 300,
       })
       async handle(msgs: any[]) {
         batches.push(msgs);

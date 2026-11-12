@@ -16,7 +16,6 @@ type EachBatchPayload = KafkaJS.EachBatchPayload;
 type EachMessagePayload = KafkaJS.EachMessagePayload;
 import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
-import { PressureManagerService } from './pressure-manager.service';
 import { DlqService } from './dlq.service';
 import { TracingService } from './tracing.service';
 import {
@@ -42,9 +41,8 @@ interface ConsumerGroup {
   topics: Map<string, TopicHandler>;
   options: ConsumerOptions; // Use first consumer's options for shared settings
   isRunning: boolean;
-  hasBatchConsumer: boolean;
-  restartAttempts: number;
-  isRestarting: boolean;
+  /** Set by the group's first consumer; every consumer in a group must match */
+  isBatch: boolean;
 }
 
 @Injectable()
@@ -57,7 +55,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     private readonly kafkaCore: KafkaCoreService,
     private readonly batchProcessor: BatchProcessorService,
     private readonly idempotencyService: IdempotencyService,
-    private readonly pressureManager: PressureManagerService,
     private readonly dlqService: DlqService,
     @Optional() private readonly tracingService?: TracingService,
     @Optional()
@@ -169,36 +166,19 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         topics: new Map(),
         options,
         isRunning: false,
-        hasBatchConsumer: false,
-        restartAttempts: 0,
-        isRestarting: false,
+        isBatch: !!options.batch,
       };
 
       this.consumerGroups.set(groupKey, group);
-
-      this.pressureManager.register(groupKey, consumer, {
-        backPressureThreshold: options.backPressureThreshold || 80,
-        resumeThreshold: 60,
-        maxQueueSize: options.maxQueueSize || 1000,
-        checkIntervalMs: 1000,
-      });
 
       this.logger.log(
         `Created consumer group: ${groupId} (connection: ${connectionName})`,
       );
     }
 
-    // Check if mixing batch and non-batch consumers in same group
-    if (options.batch) {
-      if (group.topics.size > 0 && !group.hasBatchConsumer) {
-        this.logger.warn(
-          `Consumer group "${groupId}" mixes batch and non-batch consumers. This may cause unexpected behavior.`,
-        );
-      }
-      group.hasBatchConsumer = true;
-    } else if (group.hasBatchConsumer) {
-      this.logger.warn(
-        `Consumer group "${groupId}" mixes batch and non-batch consumers. This may cause unexpected behavior.`,
+    if (group.isBatch !== !!options.batch) {
+      throw new Error(
+        `Consumer group "${groupId}" mixes batch and non-batch consumers; use separate groupIds`,
       );
     }
 
@@ -284,7 +264,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
   private async startConsumerGroup(group: ConsumerGroup): Promise<void> {
     const { groupId, consumer, topics, connection } = group;
-    const groupKey = `${connection}:${groupId}`;
 
     try {
       await consumer.connect();
@@ -319,19 +298,16 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
         // Note: fromBeginning is configured at consumer level in confluent-kafka-javascript
       }
 
-      // Update pressure manager with subscribed topics for accurate pause/resume
-      this.pressureManager.setTopics(groupKey, topicList);
-
       this.logger.log(
         `Consumer group "${groupId}" subscribed to topics: ${topicList.join(', ')}`,
       );
 
       // Determine if we should use batch or message processing
       // If any consumer in the group uses batch, we need special handling
-      if (group.hasBatchConsumer) {
-        this.startBatchGroupConsumer(group);
+      if (group.isBatch) {
+        await this.startBatchGroupConsumer(group);
       } else {
-        this.startMessageGroupConsumer(group);
+        await this.startMessageGroupConsumer(group);
       }
 
       group.isRunning = true;
@@ -342,7 +318,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     }
   }
 
-  private startMessageGroupConsumer(group: ConsumerGroup): void {
+  private async startMessageGroupConsumer(group: ConsumerGroup): Promise<void> {
     const { groupId, consumer, topics, options } = group;
 
     // Build run config with only defined values
@@ -421,15 +397,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       await this.runWithRetry(invokeOnce, message, metadata, partition);
     };
 
-    // Non-awaited: run() may only settle when the consumer stops. The .catch
-    // is the ONLY restart trigger — handler errors never reach it (retried
-    // in-process by runWithRetry); anything landing here is infra.
-    consumer.run(runConfig).catch((err: Error) => {
-      void this.scheduleConsumerRestart(group, err);
-    });
+    // Resolves once the client has started its fetch loop. Handler and broker
+    // errors never reject it: the client logs them and redelivers the message.
+    await consumer.run(runConfig);
   }
 
-  private startBatchGroupConsumer(group: ConsumerGroup): void {
+  private async startBatchGroupConsumer(group: ConsumerGroup): Promise<void> {
     const { groupId, consumer, topics, options } = group;
 
     // Build run config with only defined values
@@ -465,103 +438,35 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
       const { metadata, handler } = topicHandler;
       const topicOptions = metadata.options;
 
-      // Check if this topic uses batch processing
-      if (topicOptions.batch) {
-        // Use batch accumulator
-        const accumulator =
-          this.batchProcessor.createBatchAccumulator(topicOptions);
+      // Offsets resolve once, after every chunk processed so far succeeded
+      // (at-least-once); a stale or stopping payload ends the loop early.
+      let lastProcessedOffset: string | null = null;
+      for (const chunk of this.batchProcessor.splitIntoBatches(
+        messages,
+        topicOptions.batchSize,
+      )) {
+        if (!payload.isRunning() || payload.isStale()) break;
 
-        accumulator.onFlush(async (batchMessages) => {
-          await this.processBatchMessages(
-            batchMessages,
-            topic,
-            partition,
-            topicOptions,
-            handler,
-            groupId,
-            metadata,
-          );
-        });
+        await this.processBatchMessages(
+          chunk,
+          topic,
+          partition,
+          topicOptions,
+          handler,
+          groupId,
+          metadata,
+        );
+        lastProcessedOffset = chunk[chunk.length - 1].offset;
+      }
 
-        let lastAddedOffset: string | null = null;
-        for (const message of messages) {
-          if (!payload.isRunning() || payload.isStale()) break;
-
-          await accumulator.add(message);
-          lastAddedOffset = message.offset;
-          // NO resolveOffset here — offsets resolve only after successful flush
-        }
-
-        await accumulator.flush();
-        if (lastAddedOffset !== null) {
-          payload.resolveOffset(lastAddedOffset);
-        }
-      } else {
-        // Process messages one by one (non-batch consumer in a batch group)
-        for (const message of messages) {
-          if (!payload.isRunning() || payload.isStale()) break;
-
-          if (
-            topicOptions.idempotencyKey &&
-            this.idempotencyService.isProcessed(
-              message,
-              topicOptions.idempotencyKey,
-            )
-          ) {
-            payload.resolveOffset(message.offset);
-            // Note: heartbeat() is automatic in confluent-kafka-javascript
-            continue;
-          }
-
-          const processOnce = async () => {
-            const processedMessage =
-              topicOptions.deserialize !== false
-                ? deserializeMessage(message, topic, partition)
-                : message;
-
-            await handler(processedMessage);
-
-            if (topicOptions.idempotencyKey) {
-              this.idempotencyService.markProcessed(
-                message,
-                topicOptions.idempotencyKey,
-                topicOptions.idempotencyTtl,
-              );
-            }
-          };
-
-          // Per-attempt trace span (retry attempts each get their own span)
-          const invokeOnce = async () => {
-            if (this.tracingService?.isEnabled()) {
-              return this.tracingService.withConsumeSpan(
-                {
-                  topic,
-                  partition,
-                  offset: message.offset,
-                  key: message.key?.toString(),
-                  groupId,
-                  headers: message.headers,
-                },
-                processOnce,
-              );
-            }
-            return processOnce();
-          };
-
-          await this.runWithRetry(invokeOnce, message, metadata, partition);
-
-          payload.resolveOffset(message.offset);
-          // Note: heartbeat() is automatic in confluent-kafka-javascript
-        }
+      if (lastProcessedOffset !== null) {
+        payload.resolveOffset(lastProcessedOffset);
       }
     };
 
-    // Non-awaited: run() may only settle when the consumer stops. The .catch
-    // is the ONLY restart trigger — handler errors never reach it (retried
-    // in-process by runWithRetry); anything landing here is infra.
-    consumer.run(runConfig).catch((err: Error) => {
-      void this.scheduleConsumerRestart(group, err);
-    });
+    // Resolves once the client has started its fetch loop. Handler and broker
+    // errors never reject it: the client logs them and redelivers the message.
+    await consumer.run(runConfig);
   }
 
   private async processBatchMessages(
@@ -641,7 +546,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
         if (attempt > maxRetries && metadata?.options.dlq) {
           // Exhausted: dead-letter every raw message of the batch
-          // (sendToDlq failure rejects → infra crash path → auto-restart)
+          // (a sendToDlq failure rejects → the client redelivers the batch)
           for (const msg of messages) {
             await this.dlqService.sendToDlq(
               msg,
@@ -720,90 +625,6 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     return consumerConfig;
   }
 
-  private computeRestartDelay(group: ConsumerGroup): number {
-    const retry = group.options.retry;
-    const base = retry?.initialRetryTime ?? 1000;
-    const multiplier = retry?.multiplier ?? 2;
-    const maxTime = retry?.maxRetryTime ?? 30000;
-    return Math.min(base * multiplier ** group.restartAttempts, maxTime);
-  }
-
-  /**
-   * Auto-restart a crashed consumer group with exponential backoff capped at
-   * retry.maxRetryTime. Unlimited attempts: a dead consumer means a stalled
-   * partition, which breaks the no-data-loss guarantee of
-   * skipMessageOnMaxRetries=false. Users break a poison-message loop with
-   * skipMessageOnMaxRetries=true or a DLQ.
-   *
-   * Only infra failures reach this (handler errors are retried in-process by
-   * runWithRetry and never kill the run loop) — so a healthy Kafka connection
-   * means a running app.
-   */
-  private async scheduleConsumerRestart(
-    group: ConsumerGroup,
-    reason: Error,
-  ): Promise<void> {
-    if (this.isShuttingDown || group.isRestarting) return;
-    group.isRestarting = true;
-
-    try {
-      while (!this.isShuttingDown) {
-        const delay = this.computeRestartDelay(group);
-        this.logger.error(
-          `Consumer group "${group.groupId}" crashed: ${reason.message}. ` +
-            `Restarting in ${delay}ms (restart attempt ${group.restartAttempts + 1})`,
-        );
-
-        await this.sleep(delay); // cancellable on shutdown
-        if (this.isShuttingDown) return;
-        group.restartAttempts++;
-
-        try {
-          // Best-effort cleanup of the crashed consumer
-          try {
-            await group.consumer.disconnect();
-          } catch {
-            // already dead
-          }
-
-          // Fresh consumer instance, same groupId → rebalance picks up uncommitted offsets
-          group.consumer = this.kafkaCore.getKafka(group.connection).consumer({
-            kafkaJS: this.buildConsumerConfig(group.groupId, group.options),
-          });
-          group.isRunning = false;
-          await this.startConsumerGroup(group); // connect + subscribe + run
-
-          // Re-register so pause/resume targets the new consumer instance
-          this.pressureManager.register(
-            `${group.connection}:${group.groupId}`,
-            group.consumer,
-            {
-              backPressureThreshold: group.options.backPressureThreshold || 80,
-              resumeThreshold: 60,
-              maxQueueSize: group.options.maxQueueSize || 1000,
-              checkIntervalMs: 1000,
-            },
-          );
-
-          group.restartAttempts = 0; // fresh crash ladder starts from base delay
-          this.logger.log(
-            `Consumer group "${group.groupId}" restarted successfully`,
-          );
-          return;
-        } catch (restartError) {
-          reason = restartError as Error;
-          this.logger.error(
-            `Failed to restart consumer group "${group.groupId}"`,
-            restartError,
-          );
-          // loop continues with higher backoff
-        }
-      }
-    } finally {
-      group.isRestarting = false;
-    }
-  }
-
   private computeRetryDelay(
     attempt: number,
     retry?: ConsumerOptions['retry'],
@@ -866,7 +687,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
               partition,
               metadata.connection,
               attempt,
-            ) // may itself REJECT (DLQ send failure — infra) → propagates → run loop dies → auto-restart
+            ) // may REJECT (DLQ send failure) → propagates → the client redelivers
           : this.evaluateRetry(attempt, metadata.options);
 
         if (verdict.action === 'retry') {

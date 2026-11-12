@@ -77,11 +77,7 @@ export class ConsumerDiscoveryService {
         const consumerMetadata: ConsumerMetadata = {
           topic: metadata.topic,
           connection,
-          options: {
-            ...metadata.options,
-            topic: metadata.topic,
-            connection,
-          },
+          options: { ...metadata.options, connection },
           target: instance,
           methodName,
         };

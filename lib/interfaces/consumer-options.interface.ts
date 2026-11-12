@@ -51,8 +51,6 @@ export interface ConsumerRetryOptions {
 }
 
 export interface ConsumerOptions {
-  topic?: string;
-
   /** Connection name for multi-connection support. Default: 'default' */
   connection?: string;
 
@@ -68,16 +66,12 @@ export interface ConsumerOptions {
   rebalanceTimeout?: number;
 
   batch?: boolean;
+  /** Max messages per handler call (batch consumers). Default: 100 */
   batchSize?: number;
-  batchTimeout?: number;
 
   groupByKey?: boolean;
 
-  maxConcurrency?: number;
   partitionsConsumedConcurrently?: number;
-
-  backPressureThreshold?: number;
-  maxQueueSize?: number;
 
   idempotencyKey?: (message: KafkaMessage) => string | undefined;
   idempotencyTtl?: number;
@@ -104,7 +98,7 @@ export interface ConsumerOptions {
    */
   partitionAssigners?: PartitionAssigner[];
 
-  /** Retry options for consumer restart on failure */
+  /** In-process retry of a failing handler (see skipMessageOnMaxRetries) */
   retry?: ConsumerRetryOptions;
 
   /** Partitions for auto-created topics. Default: 1 */
@@ -120,22 +114,6 @@ export interface ConsumerMetadata {
   options: ConsumerOptions;
   target: any;
   methodName: string;
-}
-
-export interface PressureState {
-  isPaused: boolean;
-  currentQueueSize: number;
-  maxQueueSize: number;
-  currentConcurrency: number;
-  maxConcurrency: number;
-  utilizationPercent: number;
-}
-
-export interface PressureManagerOptions {
-  backPressureThreshold: number;
-  resumeThreshold: number;
-  maxQueueSize: number;
-  checkIntervalMs?: number;
 }
 
 /**
@@ -221,9 +199,8 @@ export const MAX_RETRY_DELAY_MS = 30000;
  * What the retry engine should do after a handler failure.
  *
  * There is NO 'crash' verdict: handler errors retry in-process forever
- * (skip=false) or terminate via skip/DLQ. Infra failures (e.g. DLQ send
- * failure) REJECT instead of returning a verdict → run loop dies →
- * auto-restart.
+ * (skip=false) or terminate via skip/DLQ. A DLQ send failure REJECTS instead
+ * of returning a verdict: the client logs it and redelivers the message.
  */
 export type RetryVerdict =
   | { action: 'retry'; delayMs: number }

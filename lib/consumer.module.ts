@@ -14,7 +14,6 @@ import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service
 import { ConsumerRegistryService } from './services/consumer-registry.service';
 import { BatchProcessorService } from './services/batch-processor.service';
 import { IdempotencyService } from './services/idempotency.service';
-import { PressureManagerService } from './services/pressure-manager.service';
 import { DlqService } from './services/dlq.service';
 import { ConsumerModuleOptions, CONSUMER_MODULE_OPTIONS } from './interfaces';
 import { KAFKA_CONSUMER_METADATA } from './decorators/constants';
@@ -25,7 +24,6 @@ const CONSUMER_PROVIDERS: Provider[] = [
   ConsumerRegistryService,
   BatchProcessorService,
   IdempotencyService,
-  PressureManagerService,
   DlqService,
 ];
 

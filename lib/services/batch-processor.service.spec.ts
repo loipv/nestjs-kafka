@@ -2,46 +2,25 @@ import { BatchProcessorService } from './batch-processor.service';
 
 describe('BatchProcessorService', () => {
   const svc = new BatchProcessorService();
-  const mkMsg = (i: number) =>
-    ({
-      offset: String(i),
-      key: null,
-      value: Buffer.from(String(i)),
-      headers: {},
-      timestamp: '',
-    }) as any;
-
-  describe('createBatchAccumulator', () => {
-    it('flushes when batchSize reached', async () => {
-      const flushed: any[] = [];
-      const acc = svc.createBatchAccumulator({
-        batch: true,
-        batchSize: 2,
-        batchTimeout: 5000,
-      });
-      acc.onFlush(async (msgs) => {
-        flushed.push(...msgs);
-      });
-      await acc.add(mkMsg(1));
-      await acc.add(mkMsg(2));
-      expect(flushed).toHaveLength(2);
+  describe('splitIntoBatches', () => {
+    it('splits into chunks of batchSize', () => {
+      expect(svc.splitIntoBatches([1, 2, 3, 4, 5], 2)).toEqual([
+        [1, 2],
+        [3, 4],
+        [5],
+      ]);
+      expect(svc.splitIntoBatches([], 2)).toEqual([]);
     });
 
-    it('flushes on timeout', async () => {
-      const flushed: any[] = [];
-      const acc = svc.createBatchAccumulator({
-        batch: true,
-        batchSize: 100,
-        batchTimeout: 50,
-      });
-      acc.onFlush(async (msgs) => {
-        flushed.push(...msgs);
-      });
-      await acc.add(mkMsg(1));
-      expect(flushed).toHaveLength(0);
-      await new Promise((r) => setTimeout(r, 120));
-      expect(flushed).toHaveLength(1);
-    });
+    it.each([undefined, 0, -3])(
+      'falls back to 100 for batchSize %p',
+      (size) => {
+        const items = Array.from({ length: 150 }, (_, i) => i);
+        expect(svc.splitIntoBatches(items, size).map((c) => c.length)).toEqual([
+          100, 50,
+        ]);
+      },
+    );
   });
 
   describe('groupMessagesByKey', () => {
