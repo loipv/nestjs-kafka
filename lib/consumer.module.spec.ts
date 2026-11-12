@@ -74,8 +74,6 @@ describe('ConsumerModule', () => {
     let module: TestingModule;
 
     beforeEach(async () => {
-      ConsumerModule.clearConsumers();
-
       module = await Test.createTestingModule({
         imports: [
           KafkaModule.forRoot({
@@ -121,12 +119,14 @@ describe('ConsumerModule', () => {
     });
   });
 
+  it('no longer exposes the static clearConsumers()', () => {
+    expect((ConsumerModule as any).clearConsumers).toBeUndefined();
+  });
+
   describe('auto-discovery', () => {
     let module: TestingModule;
 
     beforeEach(async () => {
-      ConsumerModule.clearConsumers();
-
       module = await Test.createTestingModule({
         imports: [
           KafkaModule.forRoot({
@@ -194,8 +194,6 @@ describe('ConsumerModule', () => {
 
   describe('module separation', () => {
     it('should require KafkaModule for consumer services to work', async () => {
-      ConsumerModule.clearConsumers();
-
       const module = await Test.createTestingModule({
         imports: [
           KafkaModule.forRoot({

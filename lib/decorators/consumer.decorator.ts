@@ -30,6 +30,3 @@ export function Consumer(
     return descriptor;
   };
 }
-
-export type MessageHandler<T = any> = (message: T) => Promise<void>;
-export type BatchHandler<T = any> = (messages: T[]) => Promise<void>;

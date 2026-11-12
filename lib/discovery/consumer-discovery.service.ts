@@ -11,36 +11,6 @@ export class ConsumerDiscoveryService {
   private discoveredConsumers: ConsumerMetadata[] = [];
 
   /**
-   * Manually register a consumer handler.
-   * Use this when auto-discovery doesn't work.
-   */
-  registerHandler(
-    target: any,
-    methodName: string,
-    topic: string,
-    options: Partial<ConsumerMetadata['options']> = {},
-  ): void {
-    const connection = options.connection || DEFAULT_KAFKA_CONNECTION;
-
-    const consumerMetadata: ConsumerMetadata = {
-      topic,
-      connection,
-      options: {
-        ...options,
-        topic,
-        connection,
-      } as ConsumerMetadata['options'],
-      target,
-      methodName,
-    };
-
-    this.discoveredConsumers.push(consumerMetadata);
-    this.logger.log(
-      `Registered consumer handler: ${target.constructor?.name || 'Unknown'}.${methodName} for topic: ${topic}`,
-    );
-  }
-
-  /**
    * Discover consumers from an array of provider instances.
    * Call this with your consumer service instances.
    */
@@ -94,9 +64,5 @@ export class ConsumerDiscoveryService {
 
   getConsumers(): ConsumerMetadata[] {
     return this.discoveredConsumers;
-  }
-
-  clearConsumers(): void {
-    this.discoveredConsumers = [];
   }
 }

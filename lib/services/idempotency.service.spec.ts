@@ -19,34 +19,57 @@ describe('IdempotencyService cleanup', () => {
 });
 
 describe('dedupe semantics', () => {
-  it('dedupes by idempotency-key header (Buffer or string)', () => {
-    const svc = new IdempotencyService();
-    const msg = { headers: { 'idempotency-key': Buffer.from('k1') } } as any;
-    expect(svc.isProcessed(msg)).toBe(false);
-    svc.markProcessed(msg);
-    expect(svc.isProcessed(msg)).toBe(true);
-    expect(
-      svc.isProcessed({ headers: { 'idempotency-key': 'k1' } } as any),
-    ).toBe(true);
+  const byId = (m: any) => m.headers?.id?.toString();
+  let svc: IdempotencyService;
+
+  beforeEach(() => {
+    svc = new IdempotencyService();
+  });
+
+  afterEach(() => {
+    svc.stopCleanup();
+  });
+
+  it('dedupes by the extractor key', () => {
+    const m = { headers: { id: Buffer.from('k') } } as any;
+    expect(svc.isProcessed(m, byId)).toBe(false);
+    svc.markProcessed(m, byId);
+    expect(svc.isProcessed(m, byId)).toBe(true);
+  });
+
+  it('never treats a message without a key as a duplicate', () => {
+    const m = { headers: { 'idempotency-key': 'k' } } as any; // no `id` header
+    svc.markProcessed(m, byId);
+    expect(svc.isProcessed(m, byId)).toBe(false);
+  });
+
+  it('requires an extractor', () => {
+    const m = { headers: { 'idempotency-key': 'k' } } as any;
+    expect(() =>
+      // @ts-expect-error keyExtractor is required
+      svc.markProcessed(m),
+    ).toThrow(TypeError);
   });
 
   it('expires after TTL', () => {
     jest.useFakeTimers();
-    const svc = new IdempotencyService();
-    const msg = { headers: { 'idempotency-key': 'k2' } } as any;
-    svc.markProcessed(msg, undefined, 1000);
-    jest.advanceTimersByTime(1500);
-    expect(svc.isProcessed(msg)).toBe(false);
-    svc.stopCleanup();
-    jest.useRealTimers();
+    try {
+      const timed = new IdempotencyService();
+      const m = { headers: { id: 'k2' } } as any;
+      timed.markProcessed(m, byId, 1000);
+      jest.advanceTimersByTime(1500);
+      expect(timed.isProcessed(m, byId)).toBe(false);
+      timed.stopCleanup();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('filterDuplicates removes processed', () => {
-    const svc = new IdempotencyService();
-    const a = { headers: { 'idempotency-key': 'a' } } as any;
-    const b = { headers: { 'idempotency-key': 'b' } } as any;
-    svc.markProcessed(a);
-    expect(svc.filterDuplicates([a, b])).toEqual([b]);
+    const a = { headers: { id: 'a' } } as any;
+    const b = { headers: { id: 'b' } } as any;
+    svc.markProcessed(a, byId);
+    expect(svc.filterDuplicates([a, b], byId)).toEqual([b]);
   });
 });
 

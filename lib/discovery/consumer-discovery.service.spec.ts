@@ -14,10 +14,9 @@ describe('ConsumerDiscoveryService', () => {
     expect(svc.getConsumers().map((c) => c.topic)).toEqual(['a']);
   });
 
-  it('clearConsumers resets', () => {
+  it('no longer exposes registerHandler or clearConsumers', () => {
     const svc = new ConsumerDiscoveryService();
-    svc.discoverFromProviders([new TestConsumers()]);
-    svc.clearConsumers();
-    expect(svc.getConsumers()).toHaveLength(0);
+    expect((svc as any).registerHandler).toBeUndefined();
+    expect((svc as any).clearConsumers).toBeUndefined();
   });
 });

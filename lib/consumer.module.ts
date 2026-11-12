@@ -108,13 +108,6 @@ export class ConsumerModule implements OnModuleInit, OnApplicationShutdown {
     };
   }
 
-  /**
-   * @deprecated No-op since discovery moved to per-instance state. Kept for backward compatibility.
-   */
-  static clearConsumers(): void {
-    // No-op: isStarted is now an instance variable, reset automatically on new instances.
-  }
-
   async onModuleInit(): Promise<void> {
     // Only start once per instance
     if (this.isStarted) {

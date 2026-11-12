@@ -26,9 +26,9 @@ export class IdempotencyService implements OnModuleDestroy {
 
   isProcessed(
     message: KafkaMessage,
-    keyExtractor?: (msg: KafkaMessage) => string | undefined,
+    keyExtractor: (msg: KafkaMessage) => string | undefined,
   ): boolean {
-    const key = this.extractKey(message, keyExtractor);
+    const key = keyExtractor(message);
     if (!key) return false;
 
     const entry = this.processedKeys.get(key);
@@ -45,10 +45,10 @@ export class IdempotencyService implements OnModuleDestroy {
 
   markProcessed(
     message: KafkaMessage,
-    keyExtractor?: (msg: KafkaMessage) => string | undefined,
+    keyExtractor: (msg: KafkaMessage) => string | undefined,
     ttl?: number,
   ): void {
-    const key = this.extractKey(message, keyExtractor);
+    const key = keyExtractor(message);
     if (!key) return;
 
     this.processedKeys.set(key, {
@@ -60,25 +60,9 @@ export class IdempotencyService implements OnModuleDestroy {
 
   filterDuplicates(
     messages: KafkaMessage[],
-    keyExtractor?: (msg: KafkaMessage) => string | undefined,
+    keyExtractor: (msg: KafkaMessage) => string | undefined,
   ): KafkaMessage[] {
     return messages.filter((msg) => !this.isProcessed(msg, keyExtractor));
-  }
-
-  private extractKey(
-    message: KafkaMessage,
-    keyExtractor?: (msg: KafkaMessage) => string | undefined,
-  ): string | undefined {
-    if (keyExtractor) {
-      return keyExtractor(message);
-    }
-
-    const header = message.headers?.['idempotency-key'];
-    if (header) {
-      return Buffer.isBuffer(header) ? header.toString() : String(header);
-    }
-
-    return undefined;
   }
 
   private startCleanup(): void {
