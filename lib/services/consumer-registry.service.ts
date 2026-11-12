@@ -208,12 +208,30 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     );
   }
 
+  /**
+   * Start every group. Waits for all of them to settle before rejecting with
+   * the first error, so a caller cleaning up never races a group still starting.
+   */
   async startAll(): Promise<void> {
-    const startPromises = Array.from(this.consumerGroups.values()).map(
-      (group) => this.startConsumerGroup(group),
+    const results = await Promise.allSettled(
+      Array.from(this.consumerGroups.values()).map((group) =>
+        this.startConsumerGroup(group),
+      ),
     );
+    const failed = results.find(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    );
+    if (failed) throw failed.reason;
+  }
 
-    await Promise.all(startPromises);
+  /**
+   * Startup failed: close the consumers that did start and every producer.
+   * Nest skips shutdown hooks when initialisation fails, so without this the
+   * open clients keep the process alive.
+   */
+  async abortStartup(): Promise<void> {
+    await this.gracefulShutdown();
+    await this.kafkaCore.disconnectAll();
   }
 
   /**

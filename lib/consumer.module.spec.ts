@@ -158,6 +158,31 @@ describe('ConsumerModule', () => {
     }
   });
 
+  it('aborts startup (closing consumers and producers) when consumers fail to start', async () => {
+    const registry = {
+      registerConsumers: jest.fn(() => {
+        throw new Error('Kafka connection "missing" not found');
+      }),
+      startAll: jest.fn(),
+      abortStartup: jest.fn().mockResolvedValue(undefined),
+    };
+    const discovery = {
+      discoverFromProviders: jest.fn(),
+      getConsumers: () => [{ topic: 't' }],
+    };
+    const nestDiscovery = { getProviders: () => [] };
+    const mod = new ConsumerModule(
+      discovery as any,
+      registry as any,
+      nestDiscovery as any,
+    );
+
+    await expect(mod.onApplicationBootstrap()).rejects.toThrow(
+      'Kafka connection "missing" not found',
+    );
+    expect(registry.abortStartup).toHaveBeenCalledTimes(1);
+  });
+
   it('no longer exposes the static clearConsumers()', () => {
     expect((ConsumerModule as any).clearConsumers).toBeUndefined();
   });

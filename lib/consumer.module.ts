@@ -133,8 +133,13 @@ export class ConsumerModule
     const consumers = this.discoveryService.getConsumers();
 
     if (consumers.length > 0) {
-      this.registryService.registerConsumers(consumers);
-      await this.registryService.startAll();
+      try {
+        this.registryService.registerConsumers(consumers);
+        await this.registryService.startAll();
+      } catch (error) {
+        await this.registryService.abortStartup();
+        throw error;
+      }
     }
   }
 

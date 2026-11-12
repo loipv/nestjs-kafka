@@ -526,6 +526,65 @@ describe('consumer groups', () => {
     ]);
   });
 
+  it('startAll() waits for every group before rejecting', async () => {
+    let finishB!: () => void;
+    const consumerA = {
+      connect: jest.fn().mockRejectedValue(new Error('a down')),
+      subscribe: jest.fn(),
+      run: jest.fn(),
+      disconnect: jest.fn(),
+    };
+    const consumerB = {
+      connect: jest.fn(
+        () =>
+          new Promise<void>((r) => {
+            finishB = r;
+          }),
+      ),
+      subscribe: jest.fn(),
+      run: jest.fn().mockResolvedValue(undefined),
+      disconnect: jest.fn(),
+    };
+    const factory = jest
+      .fn()
+      .mockReturnValueOnce(consumerA)
+      .mockReturnValueOnce(consumerB);
+    const registry = new ConsumerRegistryService(
+      {
+        setConsumerStatus: jest.fn(),
+        getKafka: () => ({ consumer: factory }),
+      } as any,
+      new BatchProcessorService(),
+      { stopCleanup: jest.fn() } as any,
+      {} as any,
+      undefined,
+      undefined,
+    );
+    registry.registerConsumers([consumerMeta('a', {}), consumerMeta('b', {})]);
+
+    let settled = false;
+    const starting = registry.startAll().catch((e: Error) => {
+      settled = true;
+      return e;
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(settled).toBe(false); // group b is still starting
+    finishB();
+    expect(((await starting) as Error).message).toBe('a down');
+  });
+
+  it('abortStartup disconnects started groups and every producer', async () => {
+    const { registry, consumer, core } = makeHarness();
+    (core as any).disconnectAll = jest.fn().mockResolvedValue(undefined);
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.startAll();
+
+    await registry.abortStartup();
+
+    expect(consumer.disconnect).toHaveBeenCalledTimes(1);
+    expect((core as any).disconnectAll).toHaveBeenCalledTimes(1);
+  });
+
   it('startAll() rejects when run() rejects', async () => {
     const { registry } = makeHarness(
       jest.fn().mockRejectedValue(new Error('not connected')),
