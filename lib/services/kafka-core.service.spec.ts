@@ -1,16 +1,8 @@
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { KafkaCoreService } from './kafka-core.service';
 
-jest.mock('@confluentinc/kafka-javascript', () => ({
-  KafkaJS: {
-    Kafka: jest.fn().mockImplementation(() => ({
-      producer: jest
-        .fn()
-        .mockReturnValue({ connect: jest.fn(), disconnect: jest.fn() }),
-    })),
-    logLevel: { NOTHING: 0, ERROR: 1, WARN: 2, INFO: 4, DEBUG: 5 },
-  },
-}));
+// The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
+jest.mock('@confluentinc/kafka-javascript');
 
 const opts = { clientId: 'c', brokers: ['localhost:9092'] } as any;
 

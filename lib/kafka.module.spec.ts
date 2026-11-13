@@ -8,36 +8,8 @@ import {
 import { TracingService } from './services/tracing.service';
 import { KafkaHealthIndicator } from './health/kafka-health-indicator';
 
-// Mock @confluentinc/kafka-javascript
-jest.mock('@confluentinc/kafka-javascript', () => ({
-  KafkaJS: {
-    Kafka: jest.fn().mockImplementation(() => ({
-      producer: jest.fn().mockReturnValue({
-        connect: jest.fn(),
-        disconnect: jest.fn(),
-        send: jest.fn(),
-      }),
-      consumer: jest.fn().mockReturnValue({
-        connect: jest.fn(),
-        disconnect: jest.fn(),
-        subscribe: jest.fn(),
-        run: jest.fn(),
-      }),
-      admin: jest.fn().mockReturnValue({
-        connect: jest.fn(),
-        disconnect: jest.fn(),
-        listTopics: jest.fn().mockResolvedValue([]),
-      }),
-    })),
-    logLevel: {
-      NOTHING: 0,
-      ERROR: 1,
-      WARN: 2,
-      INFO: 4,
-      DEBUG: 5,
-    },
-  },
-}));
+// The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
+jest.mock('@confluentinc/kafka-javascript');
 
 describe('KafkaModule', () => {
   describe('forRoot', () => {

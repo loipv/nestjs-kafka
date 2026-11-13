@@ -9,36 +9,8 @@ import { IdempotencyService } from './services/idempotency.service';
 import { DlqService } from './services/dlq.service';
 import { Consumer } from './decorators/consumer.decorator';
 
-// Mock @confluentinc/kafka-javascript
-jest.mock('@confluentinc/kafka-javascript', () => ({
-  KafkaJS: {
-    Kafka: jest.fn().mockImplementation(() => ({
-      producer: jest.fn().mockReturnValue({
-        connect: jest.fn(),
-        disconnect: jest.fn(),
-        send: jest.fn(),
-      }),
-      consumer: jest.fn().mockReturnValue({
-        connect: jest.fn(),
-        disconnect: jest.fn(),
-        subscribe: jest.fn(),
-        run: jest.fn().mockResolvedValue(undefined),
-      }),
-      admin: jest.fn().mockReturnValue({
-        connect: jest.fn(),
-        disconnect: jest.fn(),
-        listTopics: jest.fn().mockResolvedValue([]),
-      }),
-    })),
-    logLevel: {
-      NOTHING: 0,
-      ERROR: 1,
-      WARN: 2,
-      INFO: 4,
-      DEBUG: 5,
-    },
-  },
-}));
+// The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
+jest.mock('@confluentinc/kafka-javascript');
 
 // A dependency service that TestConsumer injects
 @Injectable()

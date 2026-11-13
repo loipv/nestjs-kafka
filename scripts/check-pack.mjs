@@ -53,12 +53,13 @@ for (const field of ['main', 'types']) {
   if (!fileSet.has(rel)) violations.push(`\`${field}\` missing from tarball: ${rel}`);
 }
 
-// 3. No test files and no TypeScript build info.
+// 3. No test files, test mocks or TypeScript build info.
 for (const p of files) {
   if (/\.(spec|test)\.[cm]?[jt]sx?$/.test(p) || /\.(spec|test)\.d\.[cm]?ts$/.test(p)) {
     violations.push(`test file shipped in tarball: ${p}`);
   }
   if (/\.tsbuildinfo$/.test(p)) violations.push(`tsbuildinfo shipped in tarball: ${p}`);
+  if (p.split('/').includes('__mocks__')) violations.push(`test mock shipped in tarball: ${p}`);
 }
 
 // 4. Sourcemaps are self-contained: `lib/` does not ship, so every source must be inlined

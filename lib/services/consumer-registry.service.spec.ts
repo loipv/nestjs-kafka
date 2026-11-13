@@ -3,12 +3,7 @@ import { ConsumerRegistryService } from './consumer-registry.service';
 import { BatchProcessorService } from './batch-processor.service';
 
 // The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
-jest.mock('@confluentinc/kafka-javascript', () => ({
-  KafkaJS: {
-    Kafka: jest.fn(),
-    logLevel: { NOTHING: 0, ERROR: 1, WARN: 2, INFO: 4, DEBUG: 5 },
-  },
-}));
+jest.mock('@confluentinc/kafka-javascript');
 
 describe('ConsumerRegistryService.mergeWithDefaults', () => {
   const makeRegistry = (moduleOptions?: any) =>
