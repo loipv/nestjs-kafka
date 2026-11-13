@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { KafkaCoreService } from '../services/kafka-core.service';
 
 // Type only: @nestjs/terminus is an optional peer dependency
@@ -47,6 +47,8 @@ import type { HealthIndicatorResult } from '@nestjs/terminus';
  */
 @Injectable()
 export class KafkaHealthIndicator {
+  private readonly logger = new Logger(KafkaHealthIndicator.name);
+
   constructor(private readonly kafkaCore: KafkaCoreService) {}
 
   /**
@@ -95,90 +97,80 @@ export class KafkaHealthIndicator {
    * Note: In confluent-kafka-javascript, describeCluster is not available.
    * We use listTopics to verify connectivity instead.
    */
-  async checkBrokers(key: string): Promise<HealthIndicatorResult> {
-    const admin = this.kafkaCore.getKafka().admin();
+  async checkBrokers(
+    key: string,
+    connection?: string,
+  ): Promise<HealthIndicatorResult> {
     try {
-      await admin.connect();
-
+      // The connection's shared admin stays connected between probes
+      const admin = await this.kafkaCore.getAdmin(connection);
       // Use listTopics to verify connectivity (describeCluster not available)
       const topics = await admin.listTopics();
-
-      const details = {
-        connected: true,
-        topicCount: topics.length,
+      return {
+        [key]: { status: 'up', connected: true, topicCount: topics.length },
       };
-
-      return { [key]: { status: 'up', ...details } };
     } catch (error) {
-      const errorDetails = { error: (error as Error).message };
-
-      return { [key]: { status: 'down', ...errorDetails } };
-    } finally {
-      try {
-        await admin.disconnect();
-      } catch {
-        // Ignore disconnect errors
-      }
+      return { [key]: { status: 'down', error: (error as Error).message } };
     }
   }
 
   /**
-   * Check consumer lag for a specific consumer group
+   * Check consumer lag for a consumer group. Topics whose latest offsets
+   * cannot be read are listed in `unreadableTopics` and not counted.
    */
   async checkConsumerLag(
     key: string,
     groupId: string,
     maxLag: number = 1000,
+    connection?: string,
   ): Promise<HealthIndicatorResult> {
-    const admin = this.kafkaCore.getKafka().admin();
     try {
-      await admin.connect();
-
+      const admin = await this.kafkaCore.getAdmin(connection);
       const committedOffsets = await admin.fetchOffsets({ groupId });
 
       let totalLag = 0;
+      const unreadableTopics: string[] = [];
 
       for (const topicOffset of committedOffsets) {
+        let latestOffsets: Array<{ partition: number; offset: string }>;
         try {
           // Fetch the latest (high-watermark) offsets for each topic
-          const latestOffsets = await admin.fetchTopicOffsets(
-            topicOffset.topic,
+          latestOffsets = await admin.fetchTopicOffsets(topicOffset.topic);
+        } catch (error) {
+          unreadableTopics.push(topicOffset.topic);
+          this.logger.warn(
+            `Lag of group "${groupId}" on topic "${topicOffset.topic}" is unknown: ${String(error)}`,
           );
+          continue;
+        }
 
-          for (const partition of topicOffset.partitions) {
-            const committed = parseInt(partition.offset, 10);
-            if (Number.isNaN(committed)) continue;
+        for (const partition of topicOffset.partitions) {
+          const committed = parseInt(partition.offset, 10);
+          if (Number.isNaN(committed)) continue;
 
-            const latestPartition = latestOffsets.find(
-              (o) => o.partition === partition.partition,
-            );
-            const latest = latestPartition
-              ? parseInt(latestPartition.offset, 10)
-              : committed;
-            const lag = Number.isNaN(latest)
-              ? 0
-              : Math.max(0, latest - committed);
-            totalLag += lag;
-          }
-        } catch {
-          // Skip topics where latest offsets cannot be fetched
+          const latestPartition = latestOffsets.find(
+            (o) => o.partition === partition.partition,
+          );
+          const latest = latestPartition
+            ? parseInt(latestPartition.offset, 10)
+            : committed;
+          totalLag += Number.isNaN(latest)
+            ? 0
+            : Math.max(0, latest - committed);
         }
       }
 
-      const isHealthy = totalLag < maxLag;
-      const details = { groupId, lag: totalLag, maxLag };
-
-      return { [key]: { status: isHealthy ? 'up' : 'down', ...details } };
+      const details = {
+        groupId,
+        lag: totalLag,
+        maxLag,
+        ...(unreadableTopics.length > 0 && { unreadableTopics }),
+      };
+      return {
+        [key]: { status: totalLag < maxLag ? 'up' : 'down', ...details },
+      };
     } catch (error) {
-      const errorDetails = { error: (error as Error).message };
-
-      return { [key]: { status: 'down', ...errorDetails } };
-    } finally {
-      try {
-        await admin.disconnect();
-      } catch {
-        // Ignore disconnect errors
-      }
+      return { [key]: { status: 'down', error: (error as Error).message } };
     }
   }
 }

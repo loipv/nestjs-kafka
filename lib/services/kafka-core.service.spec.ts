@@ -359,4 +359,63 @@ describe('KafkaCoreService', () => {
     await Promise.all([p1, p2]);
     expect(connect).toHaveBeenCalledTimes(1);
   });
+
+  describe('getAdmin', () => {
+    const adminFactory = (): jest.Mock =>
+      (KafkaJS.Kafka as unknown as jest.Mock).mock.results.at(-1)!.value.admin;
+    let core: KafkaCoreService;
+    beforeEach(() => {
+      core = new KafkaCoreService();
+      core.registerConnection({ ...opts });
+    });
+
+    it('connects once and reuses the admin', async () => {
+      const first = await core.getAdmin();
+      const second = await core.getAdmin();
+      expect(second).toBe(first);
+      expect(adminFactory()).toHaveBeenCalledTimes(1);
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(first.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('concurrent calls share one connect', async () => {
+      const [a, b] = await Promise.all([core.getAdmin(), core.getAdmin()]);
+      expect(a).toBe(b);
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(a.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('a failed admin connect is rebuilt on the next call', async () => {
+      adminFactory().mockImplementationOnce(() => ({
+        connect: jest.fn().mockRejectedValue(new Error('down')),
+        disconnect: jest.fn(),
+      }));
+      await expect(core.getAdmin()).rejects.toThrow('down');
+      const admin = await core.getAdmin();
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(admin.connect).toHaveBeenCalledTimes(1);
+      expect(adminFactory()).toHaveBeenCalledTimes(2);
+    });
+
+    it('disconnectAll disconnects the admin', async () => {
+      const admin = await core.getAdmin();
+      await core.disconnectAll();
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(admin.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects after disconnectAll without creating an admin', async () => {
+      await core.disconnectAll();
+      await expect(core.getAdmin()).rejects.toThrow(
+        'Kafka connections are shut down',
+      );
+      expect(adminFactory()).not.toHaveBeenCalled();
+    });
+
+    it('rejects for an unknown connection', async () => {
+      await expect(core.getAdmin('nope')).rejects.toThrow(
+        'Kafka connection "nope" not found',
+      );
+    });
+  });
 });

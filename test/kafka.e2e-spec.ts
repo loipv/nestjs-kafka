@@ -774,6 +774,12 @@ describe('Kafka e2e (testcontainers)', () => {
       const { kafka: result } = health.isHealthy('kafka');
       expect(result.consumers).toEqual({ 'default:e2e-health-g': 'running' });
       expect(result.producers).toEqual({ default: true });
+
+      // Two broker probes share one connected admin
+      for (let i = 0; i < 2; i++) {
+        const { b } = await health.checkBrokers('b');
+        expect(b.status).toBe('up');
+      }
     } finally {
       await app.close();
     }

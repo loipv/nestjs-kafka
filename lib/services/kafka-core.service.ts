@@ -21,6 +21,7 @@ const COMPRESSION_CODECS: readonly CompressionCodec[] = [
 
 type Kafka = InstanceType<typeof KafkaJS.Kafka>;
 type Producer = KafkaJS.Producer;
+type Admin = KafkaJS.Admin;
 type ProducerConstructorConfig = Parameters<Kafka['producer']>[0];
 
 interface KafkaConnection {
@@ -41,6 +42,8 @@ export class KafkaCoreService implements OnApplicationBootstrap {
   private readonly logger = new Logger(KafkaCoreService.name);
   private connections = new Map<string, KafkaConnection>();
   private consumerStatuses = new Map<string, ConsumerGroupStatus>();
+  /** One admin per connection for health probes: the client and its connect */
+  private admins = new Map<string, { admin: Admin; ready: Promise<Admin> }>();
   /** Set by disconnectAll: no background reconnect after shutdown */
   private isShutDown = false;
 
@@ -221,6 +224,38 @@ export class KafkaCoreService implements OnApplicationBootstrap {
   }
 
   /**
+   * The connection's shared admin client (health probes), created and
+   * connected on first use. Concurrent callers share the connect; a failed
+   * connect is discarded so the next call builds a new admin. Rejects after
+   * disconnectAll().
+   */
+  getAdmin(name?: string): Promise<Admin> {
+    const connectionName = name || DEFAULT_KAFKA_CONNECTION;
+    if (this.isShutDown) {
+      return Promise.reject(new Error('Kafka connections are shut down'));
+    }
+    const connection = this.connections.get(connectionName);
+    if (!connection) {
+      return Promise.reject(
+        new Error(`Kafka connection "${connectionName}" not found`),
+      );
+    }
+    const cached = this.admins.get(connectionName);
+    if (cached) return cached.ready;
+
+    const admin = connection.kafka.admin();
+    const ready = admin.connect().then(
+      () => admin,
+      (error: unknown) => {
+        this.admins.delete(connectionName);
+        throw error;
+      },
+    );
+    this.admins.set(connectionName, { admin, ready });
+    return ready;
+  }
+
+  /**
    * Check if a connection exists
    */
   hasConnection(name?: string): boolean {
@@ -340,11 +375,28 @@ export class KafkaCoreService implements OnApplicationBootstrap {
   async disconnectAll(): Promise<void> {
     this.isShutDown = true;
     // In parallel: the in-flight connect wait is bounded once, not per connection
-    await Promise.all(
-      [...this.connections].map(([name, connection]) =>
+    await Promise.all([
+      ...[...this.connections].map(([name, connection]) =>
         this.disconnectProducer(name, connection),
       ),
-    );
+      ...[...this.admins].map(([name, { admin, ready }]) =>
+        this.disconnectAdmin(name, admin, ready),
+      ),
+    ]);
+    this.admins.clear();
+  }
+
+  private async disconnectAdmin(
+    name: string,
+    admin: Admin,
+    ready: Promise<Admin>,
+  ): Promise<void> {
+    try {
+      await this.settleWithin(ready, IN_FLIGHT_CONNECT_WAIT_MS);
+      await admin.disconnect();
+    } catch (error) {
+      this.logger.error(`Error disconnecting admin for "${name}"`, error);
+    }
   }
 
   private async disconnectProducer(

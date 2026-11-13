@@ -26,6 +26,7 @@ describe('KafkaHealthIndicator', () => {
     };
 
     const mockKafkaCore = {
+      getAdmin: jest.fn().mockResolvedValue(mockAdminClient),
       getKafka: jest.fn().mockReturnValue({
         admin: jest.fn().mockReturnValue(mockAdminClient),
       }),
@@ -122,14 +123,15 @@ describe('KafkaHealthIndicator', () => {
         },
       });
       // eslint-disable-next-line @typescript-eslint/unbound-method
-      expect(admin.connect).toHaveBeenCalled();
+      expect(kafkaCore.getAdmin).toHaveBeenCalledWith(undefined);
+      // The shared admin stays connected between probes
       // eslint-disable-next-line @typescript-eslint/unbound-method
-      expect(admin.disconnect).toHaveBeenCalled();
+      expect(admin.disconnect).not.toHaveBeenCalled();
     });
 
     it('returns down when the broker check fails', async () => {
       const admin = kafkaCore.getKafka().admin();
-      (admin.connect as jest.Mock).mockRejectedValue(
+      (admin.listTopics as jest.Mock).mockRejectedValue(
         new Error('Connection failed'),
       );
 
@@ -216,13 +218,21 @@ describe('KafkaHealthIndicator', () => {
       const result = await healthIndicator.checkConsumerLag('lag', 'g', 1000);
 
       expect(result).toEqual({
-        lag: { status: 'up', groupId: 'g', lag: 7, maxLag: 1000 },
+        lag: {
+          status: 'up',
+          groupId: 'g',
+          lag: 7,
+          maxLag: 1000,
+          unreadableTopics: ['gone'],
+        },
       });
     });
 
     it('returns down when the fetch fails', async () => {
       const admin = kafkaCore.getKafka().admin();
-      (admin.connect as jest.Mock).mockRejectedValue(new Error('Fetch failed'));
+      (admin.fetchOffsets as jest.Mock).mockRejectedValue(
+        new Error('Fetch failed'),
+      );
 
       const result = await healthIndicator.checkConsumerLag(
         'lag-check',
@@ -234,6 +244,29 @@ describe('KafkaHealthIndicator', () => {
           status: 'down',
           error: 'Fetch failed',
         },
+      });
+    });
+  });
+
+  describe('connections and shutdown', () => {
+    it('checkBrokers uses the named connection admin', async () => {
+      await healthIndicator.checkBrokers('b', 'analytics');
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(kafkaCore.getAdmin).toHaveBeenCalledWith('analytics');
+    });
+
+    it('checkConsumerLag uses the named connection admin', async () => {
+      await healthIndicator.checkConsumerLag('l', 'g', 10, 'analytics');
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(kafkaCore.getAdmin).toHaveBeenCalledWith('analytics');
+    });
+
+    it('checkBrokers reports down after shutdown', async () => {
+      kafkaCore.getAdmin.mockRejectedValue(
+        new Error('Kafka connections are shut down'),
+      );
+      await expect(healthIndicator.checkBrokers('b')).resolves.toEqual({
+        b: { status: 'down', error: 'Kafka connections are shut down' },
       });
     });
   });
