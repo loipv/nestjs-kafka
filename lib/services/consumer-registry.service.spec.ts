@@ -922,6 +922,16 @@ describe('consumer groups', () => {
     expect(consumer.disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('onModuleDestroy runs the memoised graceful shutdown', async () => {
+    const { registry, consumer } = makeHarness();
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.startAll();
+    await (registry as any).onModuleDestroy();
+    await registry.gracefulShutdown();
+    expect(consumer.disconnect).toHaveBeenCalledTimes(1);
+    expect((registry as any).onApplicationShutdown).toBeUndefined();
+  });
+
   it('reports starting, running and stopped', async () => {
     const { registry, core } = makeHarness();
     registry.registerConsumers([consumerMeta('t', {})]);

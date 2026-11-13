@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { Injectable, Logger, Module, Scope } from '@nestjs/common';
 import { ConsumerModule } from './consumer.module';
 import { KafkaModule } from './kafka.module';
@@ -221,6 +222,41 @@ describe('ConsumerModule', () => {
       startAll.mockRestore();
       await mod.close();
     }
+  });
+
+  it.each([
+    ['KafkaModule first', true],
+    ['ConsumerModule first', false],
+  ])('stops consumers before producers (%s)', async (_order, kafkaFirst) => {
+    @Injectable()
+    class OrderConsumer {
+      @Consumer('ordering')
+      async handle() {}
+    }
+    const kafka = KafkaModule.forRoot({
+      clientId: 'c',
+      brokers: ['localhost:9092'],
+    });
+    const consumers = ConsumerModule.forRoot();
+    const mod = await Test.createTestingModule({
+      imports: kafkaFirst ? [kafka, consumers] : [consumers, kafka],
+      providers: [OrderConsumer],
+    }).compile();
+    await mod.init();
+    await new Promise((r) => setImmediate(r)); // bootstrap producer connect
+
+    const client = (KafkaJS.Kafka as unknown as jest.Mock).mock.results.at(
+      -1,
+    )!.value;
+    const producer = client.producer.mock.results.at(-1).value;
+    const consumer = client.consumer.mock.results.at(-1).value;
+    await mod.close();
+
+    expect(consumer.disconnect).toHaveBeenCalledTimes(1);
+    expect(producer.disconnect).toHaveBeenCalledTimes(1);
+    expect(consumer.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      producer.disconnect.mock.invocationCallOrder[0],
+    );
   });
 
   it('no longer exposes the static clearConsumers()', () => {

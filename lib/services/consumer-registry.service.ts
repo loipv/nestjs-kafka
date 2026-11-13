@@ -5,7 +5,7 @@ import {
   Injectable,
   Inject,
   Logger,
-  OnApplicationShutdown,
+  OnModuleDestroy,
   Optional,
 } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
@@ -74,7 +74,7 @@ interface ConsumerGroup {
 }
 
 @Injectable()
-export class ConsumerRegistryService implements OnApplicationShutdown {
+export class ConsumerRegistryService implements OnModuleDestroy {
   private readonly logger = new Logger(ConsumerRegistryService.name);
   private consumerGroups = new Map<string, ConsumerGroup>();
   private isShuttingDown = false;
@@ -983,7 +983,12 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     this.logger.log('All consumer groups shut down gracefully');
   }
 
-  async onApplicationShutdown(): Promise<void> {
+  /**
+   * Stop consumers in the earliest shutdown hook: every onModuleDestroy runs
+   * before any onApplicationShutdown, so consumers always stop before
+   * KafkaClient disconnects the producers, whatever the import order.
+   */
+  async onModuleDestroy(): Promise<void> {
     await this.gracefulShutdown();
   }
 }
