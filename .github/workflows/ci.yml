@@ -29,6 +29,7 @@ jobs:
       # that build, package checks and unit tests work without them (no librdkafka binary).
       - run: npm ci --ignore-scripts
       - run: npm run lint:check
+      - run: npm run check:specs
       - run: npm run typecheck
       - run: npm run build
       - run: npm run check:pkg

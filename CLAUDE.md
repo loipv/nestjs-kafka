@@ -23,6 +23,7 @@ npm run test:smoke     # Install the packed tarball into test/smoke/* fixture ap
 npx jest lib/services/<file>.spec.ts
 
 # Linting, formatting, types
+npm run check:specs    # Every lib/**/x.spec.ts has a sibling x.ts (one spec per source file)
 npm run lint           # ESLint with auto-fix
 npm run lint:check     # ESLint without --fix (CI)
 npm run format         # Prettier
@@ -40,7 +41,16 @@ npm run changeset      # Add a changeset to every PR that changes the published 
 
 Releases go through Changesets and the `Release` workflow (npm trusted publishing with provenance) — never `npm publish` by hand. See RELEASING.md.
 
-Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir: lib`). The Kafka e2e suite lives in `test/kafka.e2e-spec.ts` (`test/jest-e2e.json`). This is a published npm library (`files: ["dist", "CHANGELOG.md"]`; `prepublishOnly` runs build, `check:pack`, `check:pkg`, typecheck and unit tests). Every unit spec that imports `@confluentinc/kafka-javascript` (directly or through a service) must `jest.mock` it: CI and the release job install with `--ignore-scripts`, so the native binding is absent.
+Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir: lib`). The Kafka e2e suite lives in `test/kafka.e2e-spec.ts` (`test/jest-e2e.json`). This is a published npm library (`files: ["dist", "CHANGELOG.md"]`; `prepublishOnly` runs build, `check:pack`, `check:pkg`, typecheck and unit tests). Every unit spec that imports `@confluentinc/kafka-javascript` (directly or through a service) must call `jest.mock('@confluentinc/kafka-javascript')` (no factory; the shared manual mock in `lib/__mocks__/@confluentinc/kafka-javascript.ts` is used): CI and the release job install with `--ignore-scripts`, so the native binding is absent.
+
+Test layout (enforced in part by `npm run check:specs`):
+
+- Each source file `lib/**/x.ts` has at most one spec, `lib/**/x.spec.ts`, next to it. All tests for `x.ts` live there, grouped with `describe`; no per-feature spec files (`x.retry.spec.ts`).
+- A spec is named after the source file it tests: `@InjectKafkaClient` tests go in `inject-kafka-client.decorator.spec.ts`, not in a module spec.
+- Shared test code lives only in `lib/__mocks__/`.
+- The Kafka e2e suite stays one file, `test/kafka.e2e-spec.ts`; smoke fixtures live in `test/smoke/<fixture>`.
+- No spec is required for barrels (`index.ts`), `interfaces/*` without logic, `decorators/constants.ts` and `kafka-core.module.ts`.
+- Test names describe behaviour in the present tense without a `should` prefix (`returns down when lag exceeds the threshold`).
 
 ## Architecture
 

@@ -30,34 +30,34 @@ describe('KafkaModule', () => {
       await module.close();
     });
 
-    it('should provide KafkaCoreService', () => {
+    it('provides KafkaCoreService', () => {
       const service = module.get<KafkaCoreService>(KafkaCoreService);
       expect(service).toBeDefined();
     });
 
-    it('should provide KafkaClient', () => {
+    it('provides KafkaClient', () => {
       const client = module.get<KafkaClient>(KafkaClient);
       expect(client).toBeDefined();
     });
 
-    it('should provide KafkaHealthIndicator', () => {
+    it('provides KafkaHealthIndicator', () => {
       const health = module.get<KafkaHealthIndicator>(KafkaHealthIndicator);
       expect(health).toBeDefined();
     });
 
-    it('should NOT provide ConsumerRegistryService (moved to ConsumerModule)', () => {
+    it('does not provide ConsumerRegistryService (it lives in ConsumerModule)', () => {
       expect(() => {
         module.get('ConsumerRegistryService');
       }).toThrow();
     });
 
-    it('should NOT provide BatchProcessorService (moved to ConsumerModule)', () => {
+    it('does not provide BatchProcessorService (it lives in ConsumerModule)', () => {
       expect(() => {
         module.get('BatchProcessorService');
       }).toThrow();
     });
 
-    it('should register connection', () => {
+    it('registers the connection', () => {
       const coreService = module.get<KafkaCoreService>(KafkaCoreService);
       expect(coreService.hasConnection()).toBe(true);
     });
@@ -144,7 +144,7 @@ describe('KafkaModule', () => {
   });
 
   describe('forRootAsync', () => {
-    it('should work with useFactory', async () => {
+    it('works with useFactory', async () => {
       const module = await Test.createTestingModule({
         imports: [
           KafkaModule.forRootAsync({

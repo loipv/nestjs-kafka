@@ -61,31 +61,31 @@ describe('ConsumerModule', () => {
       await module.close();
     });
 
-    it('should provide ConsumerDiscoveryService', () => {
+    it('provides ConsumerDiscoveryService', () => {
       const service = module.get<ConsumerDiscoveryService>(
         ConsumerDiscoveryService,
       );
       expect(service).toBeDefined();
     });
 
-    it('should provide ConsumerRegistryService', () => {
+    it('provides ConsumerRegistryService', () => {
       const service = module.get<ConsumerRegistryService>(
         ConsumerRegistryService,
       );
       expect(service).toBeDefined();
     });
 
-    it('should provide BatchProcessorService', () => {
+    it('provides BatchProcessorService', () => {
       const service = module.get<BatchProcessorService>(BatchProcessorService);
       expect(service).toBeDefined();
     });
 
-    it('should provide IdempotencyService', () => {
+    it('provides IdempotencyService', () => {
       const service = module.get<IdempotencyService>(IdempotencyService);
       expect(service).toBeDefined();
     });
 
-    it('should provide DlqService', () => {
+    it('provides DlqService', () => {
       const service = module.get<DlqService>(DlqService);
       expect(service).toBeDefined();
     });
@@ -185,7 +185,7 @@ describe('ConsumerModule', () => {
       await module.close();
     });
 
-    it('should auto-discover consumer via @Consumer decorator', () => {
+    it('auto-discovers a consumer via @Consumer', () => {
       const discoveryService = module.get<ConsumerDiscoveryService>(
         ConsumerDiscoveryService,
       );
@@ -196,7 +196,7 @@ describe('ConsumerModule', () => {
       );
     });
 
-    it('should resolve consumer with its injected dependencies', () => {
+    it('resolves a consumer with its injected dependencies', () => {
       const consumer = module.get<TestConsumer>(TestConsumer);
       expect(consumer).toBeDefined();
       // TestConsumer should have TestDependencyService injected successfully
@@ -204,7 +204,7 @@ describe('ConsumerModule', () => {
       expect(consumer['testDependency']).toBeInstanceOf(TestDependencyService);
     });
 
-    it('should NOT discover non-consumer providers', () => {
+    it('does not discover non-consumer providers', () => {
       const discoveryService = module.get<ConsumerDiscoveryService>(
         ConsumerDiscoveryService,
       );
@@ -215,7 +215,7 @@ describe('ConsumerModule', () => {
       );
     });
 
-    it('should discover the correct topic from @Consumer metadata', () => {
+    it('discovers the topic from @Consumer metadata', () => {
       const discoveryService = module.get<ConsumerDiscoveryService>(
         ConsumerDiscoveryService,
       );
@@ -229,7 +229,7 @@ describe('ConsumerModule', () => {
   });
 
   describe('module separation', () => {
-    it('should require KafkaModule for consumer services to work', async () => {
+    it('resolves consumer services with KafkaModule imported', async () => {
       const module = await Test.createTestingModule({
         imports: [
           KafkaModule.forRoot({

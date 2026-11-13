@@ -104,7 +104,7 @@ describe('KafkaHealthIndicator', () => {
   });
 
   describe('checkBrokers', () => {
-    it('should return connected info when brokers are healthy', async () => {
+    it('returns connected info when brokers are healthy', async () => {
       const mockTopics = ['topic-1', 'topic-2', 'topic-3'];
 
       const admin = kafkaCore.getKafka().admin();
@@ -125,7 +125,7 @@ describe('KafkaHealthIndicator', () => {
       expect(admin.disconnect).toHaveBeenCalled();
     });
 
-    it('should return down status when broker check fails', async () => {
+    it('returns down when the broker check fails', async () => {
       const admin = kafkaCore.getKafka().admin();
       (admin.connect as jest.Mock).mockRejectedValue(
         new Error('Connection failed'),
@@ -143,7 +143,7 @@ describe('KafkaHealthIndicator', () => {
   });
 
   describe('checkConsumerLag', () => {
-    it('should return up when lag is below threshold', async () => {
+    it('returns up when lag is below the threshold', async () => {
       const admin = kafkaCore.getKafka().admin();
       (admin.fetchOffsets as jest.Mock).mockResolvedValue([
         {
@@ -171,7 +171,7 @@ describe('KafkaHealthIndicator', () => {
       });
     });
 
-    it('should return down when lag exceeds threshold', async () => {
+    it('returns down when lag exceeds the threshold', async () => {
       const admin = kafkaCore.getKafka().admin();
       (admin.fetchOffsets as jest.Mock).mockResolvedValue([
         {
@@ -199,7 +199,7 @@ describe('KafkaHealthIndicator', () => {
       });
     });
 
-    it('should return down when fetch fails', async () => {
+    it('returns down when the fetch fails', async () => {
       const admin = kafkaCore.getKafka().admin();
       (admin.connect as jest.Mock).mockRejectedValue(new Error('Fetch failed'));
 
@@ -218,7 +218,7 @@ describe('KafkaHealthIndicator', () => {
   });
 
   describe('without TerminusModule (fallback)', () => {
-    it('should work without HealthIndicatorService', () => {
+    it('works without HealthIndicatorService', () => {
       // The test setup doesn't provide HealthIndicatorService
       // so it should use the fallback implementation
 

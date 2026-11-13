@@ -61,6 +61,7 @@
     "lint:check": "eslint \"{lib,test}/**/*.ts\"",
     "check:pkg": "publint && attw --pack . --profile node16",
     "test:smoke": "node scripts/smoke.mjs",
+    "check:specs": "node scripts/check-specs.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
     "lint:workflows": "node scripts/lint-workflows.mjs",
     "changeset": "changeset",
