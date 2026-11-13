@@ -47,4 +47,31 @@ describe('ConsumerDiscoveryService', () => {
     expect(svc.getConsumers().map((c) => c.topic)).toEqual(['g']);
     expect(getter).not.toHaveBeenCalled();
   });
+
+  it('reads methods from property descriptors, not through the prototype', () => {
+    // A proxied prototype whose get trap throws: listing and descriptors work,
+    // property reads do not.
+    const proxied = new Proxy(TestConsumers.prototype, {
+      get: () => {
+        throw new Error('no reads');
+      },
+    });
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([Object.create(proxied)]);
+    expect(svc.getConsumers().map((c) => c.topic)).toEqual(['a']);
+  });
+
+  it('skips a prototype that throws on inspection', () => {
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys: () => {
+          throw new Error('no keys');
+        },
+      },
+    );
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([Object.create(hostile), new TestConsumers()]);
+    expect(svc.getConsumers().map((c) => c.topic)).toEqual(['a']);
+  });
 });

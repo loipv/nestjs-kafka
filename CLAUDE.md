@@ -15,7 +15,7 @@ npm run build
 # Testing
 npm test               # Run unit tests (librdkafka is mocked; no native binary needed)
 npm run test:watch     # Watch mode
-npm run test:cov       # With coverage
+npm run test:cov       # With coverage; fails below jest.coverageThreshold (measured % rounded down, minus 1 point of headroom; raise it when coverage rises)
 npm run test:e2e       # Kafka e2e via testcontainers (Docker; needs `npm rebuild @confluentinc/kafka-javascript` after an --ignore-scripts install)
 npm run test:smoke     # Install the packed tarball into test/smoke/* fixture apps and run them
 
@@ -41,7 +41,7 @@ npm run changeset      # Add a changeset to every PR that changes the published 
 
 Releases go through Changesets and the `Release` workflow (npm trusted publishing with provenance) — never `npm publish` by hand. See RELEASING.md.
 
-Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir: lib`). The Kafka e2e suite lives in `test/kafka.e2e-spec.ts` (`test/jest-e2e.json`). This is a published npm library (`files: ["dist", "CHANGELOG.md"]`; `prepublishOnly` runs build, `check:pack`, `check:pkg`, typecheck and unit tests). Every unit spec that imports `@confluentinc/kafka-javascript` (directly or through a service) must call `jest.mock('@confluentinc/kafka-javascript')` (no factory; the shared manual mock in `lib/__mocks__/@confluentinc/kafka-javascript.ts` is used): CI and the release job install with `--ignore-scripts`, so the native binding is absent.
+Test files are colocated with source as `*.spec.ts` under `lib/` (jest `rootDir: lib`). The Kafka e2e suite lives in `test/kafka.e2e-spec.ts` (`test/jest-e2e.json`). This is a published npm library (`files: ["dist", "CHANGELOG.md"]`; `prepublishOnly` runs build, `check:pack`, `check:pkg`, typecheck and unit tests). Every unit spec that imports `@confluentinc/kafka-javascript` (directly or through a service) gets the shared manual mock `lib/__mocks__/@confluentinc/kafka-javascript.ts` (Jest applies a node-module mock under a root's `__mocks__` automatically) and still calls `jest.mock('@confluentinc/kafka-javascript')` without a factory, so the dependency on the mock stays visible: CI and the release job install with `--ignore-scripts`, so the native binding is absent.
 
 Test layout (enforced in part by `npm run check:specs`):
 
@@ -140,7 +140,7 @@ Attempt counters are in memory, keyed `<connection>:<groupId>|<topic>|<partition
 
 **Infra failures:** `consumer.run()` in confluent-kafka-javascript returns as soon as the fetch loop starts and never rejects for handler or broker errors: the client logs them, seeks back and redelivers the message, and keeps reconnecting on its own. There is no library-level restart. The registry awaits `run()`, so an error while starting a consumer (connect, subscribe, run) fails application startup, and the consumer is disconnected first. `DlqService.handleFailure` never rejects: a failed DLQ send, or one exceeding `dlq.sendTimeout` (default 30s), is a `retry` verdict.
 
-**Commits:** with `autoCommit: false` the client never commits by itself, so the registry commits synchronously: `consumer.commitOffsets([{ topic, partition, offset: offset + 1 }])` after every normal return of `eachMessage` (handled, duplicate, no handler, skipped, dead-lettered) and `payload.commitOffsetsIfNecessary()` after each resolved chunk. A failed commit is logged, never rethrown. Timer options (`retry.initialRetryTime`, `retry.maxRetryTime`, `dlq.sendTimeout`) must be positive and at most 2147483647 ms.
+**Commits:** with `autoCommit: false` the client never commits by itself, so the registry commits synchronously: `consumer.commitOffsets([{ topic, partition, offset: offset + 1 }])` after every normal return of `eachMessage` (handled, duplicate, no handler, skipped, dead-lettered) and `payload.commitOffsetsIfNecessary()` after each resolved chunk. A failed commit is logged, never rethrown. Timer options (`retry.initialRetryTime`, `retry.maxRetryTime`, `dlq.sendTimeout`, `dlq.retryDelay`) must be positive and at most 2147483647 ms; `retry.multiplier` and `dlq.retryBackoffMultiplier` must be finite and >= 1. A failed commit is only logged: the partition's next commit covers it, otherwise the message is redelivered after a restart.
 
 **Batch consumers** (`eachBatchAutoResolve = false`) resolve the offset after each successful chunk. A failing chunk pauses and rethrows; the client seeks to the first unresolved offset, so earlier chunks are not reprocessed. An all-duplicate chunk is resolved without calling the handler. Batch handlers must be idempotent (at-least-once).
 

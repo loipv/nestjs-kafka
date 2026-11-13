@@ -21,7 +21,7 @@ describe('KafkaCoreService', () => {
     const core = new KafkaCoreService();
     core.registerConnection({ ...opts });
     expect(() => core.registerConnection({ ...opts, clientId: 'c2' })).toThrow(
-      'Kafka connection "default" is already registered',
+      'Kafka connection "default" is already registered with different options (clientId)',
     );
     expect(core.getConnectionNames()).toEqual(['default']);
   });

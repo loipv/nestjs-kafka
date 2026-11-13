@@ -20,9 +20,9 @@ export interface DlqOptions {
   connection?: string;
   /** Max retries before sending to DLQ. Default: 3 */
   maxRetries?: number;
-  /** Delay between retries in ms. Default: 1000 */
+  /** Delay before the first retry in ms. Positive, at most 2147483647. Default: 1000 */
   retryDelay?: number;
-  /** Backoff multiplier for retry delay. Default: 2 */
+  /** Backoff multiplier for retry delay; finite, >= 1. Default: 2 */
   retryBackoffMultiplier?: number;
   /** Include original message headers. Default: true */
   includeOriginalHeaders?: boolean;
@@ -48,7 +48,7 @@ export interface ConsumerRetryOptions {
   maxRetryTime?: number;
   /** Delay before the first retry in ms. At most 2147483647. Default: 1000 */
   initialRetryTime?: number;
-  /** Exponential factor for the retry delay. Default: 2 */
+  /** Exponential factor for the retry delay; finite, >= 1. Default: 2 */
   multiplier?: number;
   /**
    * Skip message after max retries exceeded (for non-DLQ scenarios).

@@ -24,30 +24,35 @@ export class ConsumerDiscoveryService {
       > | null;
       if (!prototype) continue;
 
-      let methodNames: string[];
+      // [name, function] pairs from data descriptors only: never a property
+      // read through the prototype, so no getter or proxy trap runs.
+      let methods: Array<[string, object]>;
+      let className: string | undefined;
       try {
-        methodNames = Object.getOwnPropertyNames(prototype).filter((name) => {
-          if (name === 'constructor') return false;
-          const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
-          return (
-            !!descriptor &&
-            !descriptor.get &&
-            typeof descriptor.value === 'function'
-          );
-        });
+        className = (
+          Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value as
+            | { name?: string }
+            | undefined
+        )?.name;
+        methods = Object.getOwnPropertyNames(prototype).flatMap(
+          (name): Array<[string, object]> => {
+            if (name === 'constructor') return [];
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+            return descriptor &&
+              !descriptor.get &&
+              typeof descriptor.value === 'function'
+              ? [[name, descriptor.value as object]]
+              : [];
+          },
+        );
       } catch {
         continue;
       }
 
-      for (const methodName of methodNames) {
+      for (const [methodName, method] of methods) {
         const metadata: ConsumerMethodMetadata | undefined =
-          Reflect.getMetadata(
-            KAFKA_CONSUMER_METADATA,
-            prototype[methodName] as object,
-          );
+          Reflect.getMetadata(KAFKA_CONSUMER_METADATA, method);
         if (!metadata) continue;
-
-        const className = instance.constructor?.name;
 
         // Skip disabled consumers
         if (metadata.options.disabled) {

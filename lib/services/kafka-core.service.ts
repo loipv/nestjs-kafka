@@ -68,7 +68,20 @@ export class KafkaCoreService implements OnApplicationBootstrap {
     const existing = this.connections.get(name);
     if (existing) {
       if (isDeepStrictEqual(existing.options, options)) return;
-      throw new Error(`Kafka connection "${name}" is already registered`);
+      const keys = new Set([
+        ...Object.keys(existing.options),
+        ...Object.keys(options),
+      ]);
+      const differing = [...keys].filter(
+        (key) =>
+          !isDeepStrictEqual(
+            existing.options[key as keyof KafkaModuleOptions],
+            options[key as keyof KafkaModuleOptions],
+          ),
+      );
+      throw new Error(
+        `Kafka connection "${name}" is already registered with different options (${differing.join(', ')})`,
+      );
     }
 
     // librdkafka would override kafkaJS.autoCommit, and the library only

@@ -126,6 +126,21 @@ describe('retry logic', () => {
 });
 
 describe('timer option bounds', () => {
+  describe.each(['retry.multiplier', 'dlq.retryBackoffMultiplier'])(
+    '%s',
+    (path) => {
+      it.each([1, 1.5, 3])('accepts %p', (value) => {
+        expect(() => register(withOption(path, value))).not.toThrow();
+      });
+
+      it.each([0.5, 0, -2, NaN, Infinity])('rejects %p', (value) => {
+        expect(() => register(withOption(path, value))).toThrow(
+          `Consumer "t": ${path} must be a finite number >= 1`,
+        );
+      });
+    },
+  );
+
   const makeRegistry = () =>
     new ConsumerRegistryService(
       { getKafka: jest.fn() } as any,
@@ -145,17 +160,18 @@ describe('timer option bounds', () => {
         methodName: 'h',
       } as any,
     ]);
-  const withOption = (path: string, value: number) =>
-    path === 'retry.maxRetryTime'
-      ? { retry: { maxRetryTime: value } }
-      : path === 'retry.initialRetryTime'
-        ? { retry: { initialRetryTime: value } }
-        : { dlq: { topic: 'd', sendTimeout: value } };
+  const withOption = (path: string, value: number) => {
+    const [group, key] = path.split('.');
+    return group === 'retry'
+      ? { retry: { [key]: value } }
+      : { dlq: { topic: 'd', [key]: value } };
+  };
 
   describe.each([
     'retry.maxRetryTime',
     'retry.initialRetryTime',
     'dlq.sendTimeout',
+    'dlq.retryDelay',
   ])('%s', (path) => {
     it('accepts 2147483647', () => {
       expect(() => register(withOption(path, 2147483647))).not.toThrow();
@@ -323,6 +339,20 @@ describe('consumer groups', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('eachMessage commits after a DLQ complete verdict', async () => {
+      const dlqService = {
+        handleFailure: jest.fn().mockResolvedValue({ action: 'complete' }),
+      };
+      const { config, consumer } = await started(
+        { autoCommit: false, dlq: { topic: 'd' } },
+        jest.fn().mockRejectedValue(new Error('x')),
+        { dlqService },
+      );
+      await config().eachMessage(messagePayload('5'));
+      expect(dlqService.handleFailure).toHaveBeenCalledTimes(1);
+      expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
     });
 
     it('eachMessage commits a duplicate skipped by idempotency', async () => {

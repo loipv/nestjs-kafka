@@ -18,6 +18,7 @@ Breaking changes:
 - `KafkaModule.forRootMultiple()` is removed: call `KafkaModule.forRoot()` once per connection.
 - `rdkafka: { 'enable.auto.commit': ... }` fails at startup: use the consumer `autoCommit` option.
 - A second registration of a connection name with different options fails at startup (it used to be ignored with a warning).
-- Timer options must be positive (`retry.initialRetryTime: 0` now fails at startup).
+- Timer options must be positive (`retry.initialRetryTime: 0` now fails at startup); `dlq.retryDelay` is bounded like the other delays, and `retry.multiplier` / `dlq.retryBackoffMultiplier` must be finite and >= 1.
+- A conflicting connection registration fails with `Kafka connection "<name>" is already registered with different options (<keys>)`.
 - Trace context goes through the registered OpenTelemetry propagator; without one, no trace headers are written.
 - `KafkaHealthIndicator` no longer has an optional `HealthIndicatorService` constructor parameter (it was never injected); it returns plain results, which Terminus evaluates as before.

@@ -1,7 +1,9 @@
 /**
  * Shared manual mock of the Kafka client for unit specs (the native librdkafka
- * binding is absent under `npm ci --ignore-scripts`). Each spec still calls
- * `jest.mock('@confluentinc/kafka-javascript')` explicitly.
+ * binding is absent under `npm ci --ignore-scripts`). Jest applies it
+ * automatically (node-module mock under the `lib` root's `__mocks__`); each
+ * spec still calls `jest.mock('@confluentinc/kafka-javascript')` so the
+ * dependency stays visible.
  *
  * `KafkaJS.Kafka` returns fresh producer / consumer / admin fakes; reach them
  * through `(KafkaJS.Kafka as jest.Mock).mock.results` and override per test

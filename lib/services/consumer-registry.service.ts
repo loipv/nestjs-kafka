@@ -194,12 +194,29 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     );
   }
 
-  /** Timer options must be positive and within setTimeout's range. */
+  /**
+   * Timer options must be positive and within setTimeout's range; backoff
+   * multipliers must be finite and >= 1 (a smaller one shrinks the delay
+   * towards a tight redelivery loop).
+   */
   private validateTimerOptions(topic: string, options: ConsumerOptions): void {
+    const multipliers: Array<[string, number | undefined]> = [
+      ['retry.multiplier', options.retry?.multiplier],
+      ['dlq.retryBackoffMultiplier', options.dlq?.retryBackoffMultiplier],
+    ];
+    for (const [name, value] of multipliers) {
+      if (value !== undefined && !(Number.isFinite(value) && value >= 1)) {
+        throw new Error(
+          `Consumer "${topic}": ${name} must be a finite number >= 1`,
+        );
+      }
+    }
+
     const timers: Array<[string, number | undefined]> = [
       ['retry.maxRetryTime', options.retry?.maxRetryTime],
       ['retry.initialRetryTime', options.retry?.initialRetryTime],
       ['dlq.sendTimeout', options.dlq?.sendTimeout],
+      ['dlq.retryDelay', options.dlq?.retryDelay],
     ];
     for (const [name, value] of timers) {
       if (value === undefined) continue;

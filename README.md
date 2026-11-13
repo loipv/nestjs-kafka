@@ -307,7 +307,7 @@ Connect to multiple Kafka clusters simultaneously:
 export class AppModule {}
 ```
 
-Each connection name is registered once: a second `forRoot()` with the same name and different options fails at startup (`Kafka connection "<name>" is already registered`). All connections share one `KafkaClient` and one consumer registry, so a consumer or a send can target any of them by name. Inject per-connection options with `@Inject(getKafkaOptionsToken('analytics'))`; the `KAFKA_MODULE_OPTIONS` token is ambiguous once there are several connections.
+Each connection name is registered once: a second `forRoot()` with the same name and different options fails at startup (`Kafka connection "<name>" is already registered with different options (<keys>)`). All connections share one `KafkaClient` and one consumer registry, so a consumer or a send can target any of them by name. Inject per-connection options with `@Inject(getKafkaOptionsToken('analytics'))`; the `KAFKA_MODULE_OPTIONS` token is ambiguous once there are several connections.
 
 **Using named connections in Consumer:**
 
@@ -573,8 +573,8 @@ async handleLogs(message: KafkaMessagePayload) {
 - **Batch consumers** follow the same policy per chunk of `batchSize`. Each successful chunk is committed; a failing chunk pauses the partition and is redelivered, earlier chunks are not reprocessed. Batch handlers must still be idempotent (at-least-once).
 - **Infra failures** (lost broker connection) never stop the consumer: librdkafka reconnects on its own and consumption resumes. An error while starting a consumer (connect, subscribe) fails application startup.
 - **Shutdown** while a partition is paused never commits the failing message: it is redelivered on the next start.
-- **Timer limits**: `retry.initialRetryTime`, `retry.maxRetryTime` and `dlq.sendTimeout` must be positive and at most 2147483647 ms (Node's `setTimeout` limit); other values fail at startup.
-- **`autoCommit: false`** commits each handled message (or batch chunk) synchronously, including skipped and dead-lettered ones. A failed commit is logged and covered by the next one.
+- **Timer limits**: `retry.initialRetryTime`, `retry.maxRetryTime`, `dlq.sendTimeout` and `dlq.retryDelay` must be positive and at most 2147483647 ms (Node's `setTimeout` limit); `retry.multiplier` and `dlq.retryBackoffMultiplier` must be finite and >= 1. Other values fail at startup.
+- **`autoCommit: false`** commits each handled message (or batch chunk) synchronously, including skipped and dead-lettered ones. A failed commit is logged, not retried: that partition's next successful commit covers it; if none follows (a quiet partition), the message is redelivered after a restart (at-least-once).
 
 Attempt counters live in memory: a restart or a rebalance that moves the partition restarts the backoff ladder (the message itself is never lost). Each failed attempt is logged twice: once by this library, once by the Kafka client ("The same message may be reprocessed").
 
@@ -1077,7 +1077,7 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | `DlqService.handleFailure(message, ...)` / `sendToDlq(message, ...)`; `handleFailure` rejected on a failed send | Both take `messages: KafkaMessage[]`; `handleFailure` never rejects (it returns a retry verdict) |
 | `IdempotencyService` methods took `(message, keyExtractor)` | They take a `namespace` argument as well |
 | A second `forRoot()` with an existing connection name was ignored with a warning | It fails at startup when its options differ (the same options twice are still accepted) |
-| `retry.initialRetryTime` / `retry.maxRetryTime` / `dlq.sendTimeout` above 2147483647 ms fired after 1 ms (a DLQ send then always timed out); `0` was accepted | Values must be positive and at most 2147483647 ms; others fail at startup |
+| `retry.initialRetryTime` / `retry.maxRetryTime` / `dlq.sendTimeout` / `dlq.retryDelay` above 2147483647 ms fired after 1 ms (a DLQ send then always timed out); `0`, a negative value or a multiplier below 1 was accepted (near-tight redelivery loop) | Delays must be positive and at most 2147483647 ms; `retry.multiplier` / `dlq.retryBackoffMultiplier` must be finite and >= 1; other values fail at startup |
 | Trace context was written and read as hand-built `traceparent` / `tracestate` headers | It goes through the application's registered OpenTelemetry propagator (W3C by default; B3 and `baggage` work). Without a registered propagator no trace headers are written |
 
 ### Removed
