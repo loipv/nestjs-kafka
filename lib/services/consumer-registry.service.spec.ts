@@ -26,6 +26,16 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
     expect(merged.retry).toEqual({ retries: 5, skipMessageOnMaxRetries: true });
   });
 
+  it('keeps a module retry default when the decorator sets that field to undefined', () => {
+    const registry = makeRegistry({
+      retry: { initialRetryTime: 500, retries: 7 },
+    });
+    const merged = (registry as any).mergeWithDefaults({
+      retry: { initialRetryTime: undefined, retries: 2 },
+    });
+    expect(merged.retry).toEqual({ initialRetryTime: 500, retries: 2 });
+  });
+
   it('uses module default retry when decorator has none', () => {
     const registry = makeRegistry({ retry: { retries: 7 } });
     const merged = (registry as any).mergeWithDefaults({});
@@ -407,6 +417,48 @@ describe('consumer groups', () => {
       expect(commit.mock.invocationCallOrder[0]).toBeLessThan(
         resolveOffset.mock.invocationCallOrder[1],
       );
+    });
+
+    it('eachBatch treats ERR__NO_OFFSET (nothing new to commit) as success', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      try {
+        const { config } = await started(
+          { batch: true, batchSize: 2, autoCommit: false },
+          jest.fn(),
+        );
+        const payload = batchPayload(['1', '2'].map(mkMsg), jest.fn());
+        payload.commitOffsetsIfNecessary.mockRejectedValue(
+          Object.assign(new Error('Local: No offset stored'), { code: -168 }),
+        );
+        await expect(config().eachBatch(payload)).resolves.toBeUndefined();
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('eachBatch logs and does not throw when the commit fails', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      try {
+        const { config } = await started(
+          { batch: true, batchSize: 2, autoCommit: false },
+          jest.fn(),
+        );
+        const payload = batchPayload(['1', '2'].map(mkMsg), jest.fn());
+        payload.commitOffsetsIfNecessary.mockRejectedValue(
+          new Error('ERR__STATE'),
+        );
+        await expect(config().eachBatch(payload)).resolves.toBeUndefined();
+        expect(warn).toHaveBeenCalledWith(
+          'Commit failed for t[0]@3: Error: ERR__STATE',
+        );
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('eachBatch does not commit under auto-commit', async () => {

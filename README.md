@@ -184,7 +184,7 @@ KafkaModule.forRoot({
 | `passphrase` | `ssl.key.password` |
 | `rejectUnauthorized: false` | `enable.ssl.certificate.verification: false` |
 
-Any other key in the `ssl` object fails at startup. For anything else, pass raw [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md) through `rdkafka`. They apply to the connection's producer, consumers and admin clients, and override the properties built from `ssl` and the other connection options. Two consumer properties the library sets itself win over `rdkafka`: `js.consumer.max.batch.size` (from `batchSize`) and `rebalance_cb`. A consumer-only property also reaches the producer and admin clients, where librdkafka logs a warning and ignores it:
+Any other key in the `ssl` object fails at startup. For anything else, pass raw [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md) through `rdkafka`. They apply to the connection's producer, consumers and admin clients, and override the properties built from `ssl` and the other connection options. Two consumer properties the library sets itself win over `rdkafka`: `js.consumer.max.batch.size` (from `batchSize`) and `rebalance_cb`. A consumer-only property also reaches the producer and admin clients, where librdkafka logs a warning and ignores it. `enable.auto.commit` is rejected at startup: set `autoCommit` on the consumer instead, so the library knows when to commit itself:
 
 ```typescript
 KafkaModule.forRoot({
@@ -1054,7 +1054,7 @@ v2.0.0 removes features that did not work as documented or added risk without be
 - `batchSize` above 32 takes effect (the client used to fetch at most 32 messages per call).
 - When consumer startup fails, the consumers that did start and the producers are closed before the error surfaces, so a failed boot no longer keeps the process alive.
 - `autoCommit: false` commits: offsets used to be stored but never committed, so the group re-read everything after each restart.
-- A `ConsumerModule.forRoot()` default is no longer hidden by an explicit `undefined` in `@Consumer()` options (for example an unset environment variable).
+- A `ConsumerModule.forRoot()` default (including each `retry` field) is no longer hidden by an explicit `undefined` in `@Consumer()` options (for example an unset environment variable).
 - Consumer discovery no longer reads provider getters (it could trigger their side effects).
 - Producers of several connections disconnect in parallel on shutdown.
 - The published type declarations keep their JSDoc (descriptions and defaults show in the editor).
@@ -1073,7 +1073,7 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | A throwing `idempotencyKey` extractor redelivered the message in a tight loop | It is handled like a handler failure (pause, backoff, skip/DLQ) |
 | Consumers started in `onModuleInit` | Consumers start in `onApplicationBootstrap`, after every provider's `onModuleInit` |
 | `isHealthy` checked one producer, connected on the first send | Producers connect at startup; `isHealthy` covers every producer and every consumer group, with per-part details (`connected` is replaced by `producers` / `consumers`) |
-| `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties |
+| `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties (except `enable.auto.commit`: use `autoCommit`) |
 | `DlqService.handleFailure(message, ...)` / `sendToDlq(message, ...)`; `handleFailure` rejected on a failed send | Both take `messages: KafkaMessage[]`; `handleFailure` never rejects (it returns a retry verdict) |
 | `IdempotencyService` methods took `(message, keyExtractor)` | They take a `namespace` argument as well |
 | A second `forRoot()` with an existing connection name was ignored with a warning | It fails at startup when its options differ (the same options twice are still accepted) |

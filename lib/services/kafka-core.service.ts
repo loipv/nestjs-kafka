@@ -71,6 +71,14 @@ export class KafkaCoreService implements OnApplicationBootstrap {
       throw new Error(`Kafka connection "${name}" is already registered`);
     }
 
+    // librdkafka would override kafkaJS.autoCommit, and the library only
+    // commits itself when it knows auto-commit is off.
+    if (options.rdkafka && 'enable.auto.commit' in options.rdkafka) {
+      throw new Error(
+        `Kafka connection "${name}": set autoCommit on the consumer instead of rdkafka "enable.auto.commit"`,
+      );
+    }
+
     // Build Kafka config with only defined values to avoid undefined property issues
     const kafkaConfig: KafkaJS.KafkaConfig = {
       clientId: options.clientId,

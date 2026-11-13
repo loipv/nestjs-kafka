@@ -8,7 +8,7 @@ Fixes:
 
 - `autoCommit: false` commits each handled message (or batch chunk) synchronously; offsets used to be stored but never committed, so the group re-read everything after a restart.
 - `retry.initialRetryTime`, `retry.maxRetryTime` and `dlq.sendTimeout` above 2147483647 ms fail at startup instead of firing after 1 ms (a DLQ send then always timed out and the message was retried forever).
-- A `ConsumerModule.forRoot()` default is no longer hidden by an explicit `undefined` in `@Consumer()` options.
+- A `ConsumerModule.forRoot()` default (including each `retry` field) is no longer hidden by an explicit `undefined` in `@Consumer()` options.
 - Consumer discovery no longer reads provider getters, which could trigger their side effects.
 - Producers of several connections disconnect in parallel on shutdown.
 - The published type declarations keep their JSDoc.
@@ -16,6 +16,7 @@ Fixes:
 Breaking changes:
 
 - `KafkaModule.forRootMultiple()` is removed: call `KafkaModule.forRoot()` once per connection.
+- `rdkafka: { 'enable.auto.commit': ... }` fails at startup: use the consumer `autoCommit` option.
 - A second registration of a connection name with different options fails at startup (it used to be ignored with a warning).
 - Timer options must be positive (`retry.initialRetryTime: 0` now fails at startup).
 - Trace context goes through the registered OpenTelemetry propagator; without one, no trace headers are written.

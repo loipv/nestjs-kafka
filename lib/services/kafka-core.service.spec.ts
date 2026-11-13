@@ -33,6 +33,17 @@ describe('KafkaCoreService', () => {
     expect(core.getConnectionNames()).toEqual(['default']);
   });
 
+  it('rejects enable.auto.commit in rdkafka (use the consumer autoCommit option)', () => {
+    expect(() =>
+      new KafkaCoreService().registerConnection({
+        ...opts,
+        rdkafka: { 'enable.auto.commit': false },
+      }),
+    ).toThrow(
+      'Kafka connection "default": set autoCommit on the consumer instead of rdkafka "enable.auto.commit"',
+    );
+  });
+
   it('throws for unknown connection', () => {
     expect(() => new KafkaCoreService().getKafka('nope')).toThrow('not found');
   });

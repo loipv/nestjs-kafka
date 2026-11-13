@@ -37,6 +37,8 @@ interface TopicHandler {
 
 /** librdkafka ERR__REVOKE_PARTITIONS (a literal: unit tests mock the module) */
 const ERR_REVOKE_PARTITIONS = -174;
+/** librdkafka ERR__NO_OFFSET: a commit with nothing stored to commit */
+const ERR_NO_OFFSET = -168;
 /** Default chunk size, shared with BatchProcessorService.splitIntoBatches */
 const DEFAULT_BATCH_SIZE = 100;
 /** Consumer options that ConsumerModule.forRoot() may default */
@@ -112,7 +114,11 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     // Deep-merge retry per field (decorator wins per field) — must happen
     // after the spread above, which would otherwise clobber with options.retry
     if (defaults.retry || options.retry) {
-      merged.retry = { ...defaults.retry, ...options.retry };
+      const retry: Record<string, unknown> = { ...defaults.retry };
+      for (const [key, value] of Object.entries(options.retry ?? {})) {
+        if (value !== undefined) retry[key] = value;
+      }
+      merged.retry = retry as ConsumerOptions['retry'];
     }
 
     return merged;
@@ -631,12 +637,16 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
           try {
             await payload.commitOffsetsIfNecessary();
           } catch (error) {
-            this.logCommitFailure(
-              topic,
-              payload.batch.partition,
-              (BigInt(lastOffset) + 1n).toString(),
-              error,
-            );
+            // Nothing new stored (another partition's commit already covered
+            // it): the client rejects with ERR__NO_OFFSET, which is not a failure
+            if ((error as { code?: number }).code !== ERR_NO_OFFSET) {
+              this.logCommitFailure(
+                topic,
+                payload.batch.partition,
+                (BigInt(lastOffset) + 1n).toString(),
+                error,
+              );
+            }
           }
         }
       }
