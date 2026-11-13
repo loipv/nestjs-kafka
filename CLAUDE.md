@@ -57,7 +57,7 @@ Test layout (enforced in part by `npm run check:specs`):
 ```
 lib/
 ├── index.ts                         # Main barrel export
-├── kafka.module.ts                  # KafkaModule - forRoot/forRootAsync/forRootMultiple (per-connection providers)
+├── kafka.module.ts                  # KafkaModule - forRoot/forRootAsync, one call per connection (per-connection providers)
 ├── kafka-core.module.ts             # KafkaCoreModule - static global module with the shared services
 ├── consumer.module.ts               # ConsumerModule - Consumer logic
 ├── interfaces/
@@ -79,8 +79,10 @@ lib/
 │   └── dlq.service.ts               # [ConsumerModule] Dead Letter Queue
 ├── discovery/
 │   └── consumer-discovery.service.ts # [ConsumerModule] Auto-discover @Consumer
-└── health/
-    └── kafka-health-indicator.ts    # [KafkaCoreModule] Health checks
+├── health/
+│   └── kafka-health-indicator.ts    # [KafkaCoreModule] Health checks (plain HealthIndicatorResult objects)
+└── __mocks__/@confluentinc/kafka-javascript.ts # Shared Kafka client mock for unit specs (not built)
+scripts/check-specs.mjs              # One spec per source file (npm run check:specs)
 ```
 
 ### Module Separation
@@ -90,8 +92,8 @@ lib/
 
 ### Key Components
 
-- **KafkaModule**: Root module with `forRoot()`, `forRootAsync()`, and `forRootMultiple()` for configuration
-  - Supports multi-connection setup with named connections; `forRoot()`/`forRootAsync()` may be called several times
+- **KafkaModule**: Root module with `forRoot()` and `forRootAsync()`, called once per connection
+  - Multi-connection: one `forRoot()`/`forRootAsync()` call per named connection; the same name registered again with different options fails at startup (identical options are accepted)
   - Producer options are passed to the client inside its `kafkaJS` block; numeric `compression` is mapped to a codec name
 - **ConsumerModule**: Auto-discovers and registers consumer methods on app startup
   - Use `forRoot(options?)` in app module with optional default options
@@ -105,7 +107,7 @@ lib/
   - `disabled: true`: Skip this consumer at startup without removing the decorator
   - `deserialize: false`: Receive raw `KafkaMessage` without JSON/string deserialization (default: true)
 - **@InjectKafkaClient() decorator**: Inject named connection clients in services
-- **KafkaHealthIndicator**: `isHealthy` = every producer connected and every consumer group running (status kept in `KafkaCoreService`); `checkBrokers` / `checkConsumerLag` probe with an admin client
+- **KafkaHealthIndicator**: returns plain `HealthIndicatorResult` objects (Terminus 11 treats `down` as a failed check); `isHealthy` = every producer connected and every consumer group running (status kept in `KafkaCoreService`); `checkBrokers` / `checkConsumerLag` probe with an admin client
 - **TLS**: `ssl` object mapped to librdkafka `ssl.*` keys (unknown keys throw); `rdkafka` passes raw librdkafka properties, applied last
 
 ### Features
@@ -134,9 +136,11 @@ Delays are `initialRetryTime × multiplier^(n-1)`, capped at `retry.maxRetryTime
 
 Attempt counters are in memory, keyed `<connection>:<groupId>|<topic>|<partition>|<offset>` (a chunk uses its first offset). They are cleared on success, on `complete`, on revoke and on shutdown; a restart or a moved partition restarts the ladder.
 
-**Revoke:** every group consumer gets a top-level `rebalance_cb`. On `ERR__REVOKE_PARTITIONS` (-174) it drops retry state for the revoked partitions and calls `consumer.resume()` for them while they are still assigned — the client keeps its own paused set across rebalances, so a re-assigned partition would otherwise stay paused.
+**Revoke:** every group consumer gets a top-level `rebalance_cb`. On `ERR__REVOKE_PARTITIONS` (-174) it drops retry state for the revoked partitions and calls `consumer.resume()` for them while they are still assigned — the client keeps paused partitions (its own `#pausedPartitions` map, mirrored by a librdkafka pause) across rebalances, so a re-assigned partition would otherwise stay paused.
 
 **Infra failures:** `consumer.run()` in confluent-kafka-javascript returns as soon as the fetch loop starts and never rejects for handler or broker errors: the client logs them, seeks back and redelivers the message, and keeps reconnecting on its own. There is no library-level restart. The registry awaits `run()`, so an error while starting a consumer (connect, subscribe, run) fails application startup, and the consumer is disconnected first. `DlqService.handleFailure` never rejects: a failed DLQ send, or one exceeding `dlq.sendTimeout` (default 30s), is a `retry` verdict.
+
+**Commits:** with `autoCommit: false` the client never commits by itself, so the registry commits synchronously: `consumer.commitOffsets([{ topic, partition, offset: offset + 1 }])` after every normal return of `eachMessage` (handled, duplicate, no handler, skipped, dead-lettered) and `payload.commitOffsetsIfNecessary()` after each resolved chunk. A failed commit is logged, never rethrown. Timer options (`retry.initialRetryTime`, `retry.maxRetryTime`, `dlq.sendTimeout`) must be positive and at most 2147483647 ms.
 
 **Batch consumers** (`eachBatchAutoResolve = false`) resolve the offset after each successful chunk. A failing chunk pauses and rethrows; the client seeks to the first unresolved offset, so earlier chunks are not reprocessed. An all-duplicate chunk is resolved without calling the handler. Batch handlers must be idempotent (at-least-once).
 
@@ -180,8 +184,8 @@ Any new retry or delay logic must go through `PartitionRetryTracker` (unref'd ti
 ### OpenTelemetry Tracing
 
 The library supports distributed tracing with OpenTelemetry. When enabled, trace context is:
-1. **Injected** into Kafka message headers when producing (W3C Trace Context format)
-2. **Extracted** from headers when consuming, linking producer and consumer spans
+1. **Injected** into Kafka message headers when producing, through the application's registered OpenTelemetry propagator (W3C Trace Context by default; B3 and baggage work too)
+2. **Extracted** from headers when consuming (string, Buffer or array values), linking producer and consumer spans
 
 **Enable tracing:**
 ```typescript
@@ -222,7 +226,7 @@ Producer App                    Consumer App
 2. **heartbeat()** is automatic - no manual calls needed
 3. **consumer.stop()** is not supported - use `disconnect()` directly
 4. **autoCommitThreshold** is not supported - use `autoCommitInterval` instead
-5. **Platform support**: Linux (x64/arm64), macOS (arm64), Windows (x64), Node.js 18-22
+5. **Platform support**: Linux (x64/arm64), macOS (arm64), Windows (x64), Node.js 20, 22, 24. Development needs Node ≥ 22.11 (devDependencies; `.nvmrc` pins 24)
 
 ## Usage Example
 

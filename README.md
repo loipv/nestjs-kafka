@@ -38,7 +38,7 @@ confluent-kafka-javascript is built on librdkafka (C library). Supported platfor
 - **Linux**: x64, arm64
 - **macOS**: arm64 (Apple Silicon)
 - **Windows**: x64
-- **Node.js**: 18, 20, 21, 22
+- **Node.js**: 20, 22, 24 (`engines: >=20`)
 
 ### Optional: OpenTelemetry Tracing
 
@@ -184,7 +184,7 @@ KafkaModule.forRoot({
 | `passphrase` | `ssl.key.password` |
 | `rejectUnauthorized: false` | `enable.ssl.certificate.verification: false` |
 
-Any other key in the `ssl` object fails at startup. For anything else, pass raw [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md) through `rdkafka`. They apply to the connection's producer, consumers and admin clients, and override the properties the library generates:
+Any other key in the `ssl` object fails at startup. For anything else, pass raw [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md) through `rdkafka`. They apply to the connection's producer, consumers and admin clients, and override the properties built from `ssl` and the other connection options. Two consumer properties the library sets itself win over `rdkafka`: `js.consumer.max.batch.size` (from `batchSize`) and `rebalance_cb`. A consumer-only property also reaches the producer and admin clients, where librdkafka logs a warning and ignores it:
 
 ```typescript
 KafkaModule.forRoot({
@@ -273,7 +273,7 @@ async handleEvent(message: KafkaMessagePayload) {}
 | `sessionTimeout` | `number` | Session timeout in ms |
 | `heartbeatInterval` | `number` | Heartbeat interval in ms |
 | `rebalanceTimeout` | `number` | Rebalance timeout in ms |
-| `autoCommit` | `boolean` | Enable auto commit |
+| `autoCommit` | `boolean` | Commit in the background (default `true`); `false` commits synchronously after each handled message or chunk |
 | `autoCommitInterval` | `number` | Auto commit interval in ms |
 | `fromBeginning` | `boolean` | Start consuming from beginning |
 | `retry` | `ConsumerRetryOptions` | Default retry options |
@@ -286,7 +286,7 @@ Consumers start in `onApplicationBootstrap`, after every provider's `onModuleIni
 Connect to multiple Kafka clusters simultaneously:
 
 ```typescript
-// Option 1: Multiple forRoot() (or forRootAsync()) calls, each with its own name
+// One forRoot() (or forRootAsync()) call per connection, each with its own name
 @Module({
   imports: [
     // Primary cluster (default connection)
@@ -305,29 +305,9 @@ Connect to multiple Kafka clusters simultaneously:
   ],
 })
 export class AppModule {}
-
-// Option 2: forRootMultiple() for cleaner setup
-@Module({
-  imports: [
-    KafkaModule.forRootMultiple([
-      {
-        name: 'default',
-        clientId: 'my-app',
-        brokers: ['primary-kafka:9092'],
-      },
-      {
-        name: 'analytics',
-        clientId: 'my-app-analytics',
-        brokers: ['analytics-kafka:9092'],
-      },
-    ]),
-    ConsumerModule.forRoot(),
-  ],
-})
-export class AppModule {}
 ```
 
-All connections share one `KafkaClient` and one consumer registry, so a consumer or a send can target any of them by name. Inject per-connection options with `@Inject(getKafkaOptionsToken('analytics'))`; the `KAFKA_MODULE_OPTIONS` token is ambiguous once there are several connections.
+Each connection name is registered once: a second `forRoot()` with the same name and different options fails at startup (`Kafka connection "<name>" is already registered`). All connections share one `KafkaClient` and one consumer registry, so a consumer or a send can target any of them by name. Inject per-connection options with `@Inject(getKafkaOptionsToken('analytics'))`; the `KAFKA_MODULE_OPTIONS` token is ambiguous once there are several connections.
 
 **Using named connections in Consumer:**
 
@@ -593,6 +573,8 @@ async handleLogs(message: KafkaMessagePayload) {
 - **Batch consumers** follow the same policy per chunk of `batchSize`. Each successful chunk is committed; a failing chunk pauses the partition and is redelivered, earlier chunks are not reprocessed. Batch handlers must still be idempotent (at-least-once).
 - **Infra failures** (lost broker connection) never stop the consumer: librdkafka reconnects on its own and consumption resumes. An error while starting a consumer (connect, subscribe) fails application startup.
 - **Shutdown** while a partition is paused never commits the failing message: it is redelivered on the next start.
+- **Timer limits**: `retry.initialRetryTime`, `retry.maxRetryTime` and `dlq.sendTimeout` must be positive and at most 2147483647 ms (Node's `setTimeout` limit); other values fail at startup.
+- **`autoCommit: false`** commits each handled message (or batch chunk) synchronously, including skipped and dead-lettered ones. A failed commit is logged and covered by the next one.
 
 Attempt counters live in memory: a restart or a rebalance that moves the partition restarts the backoff ladder (the message itself is never lost). Each failed attempt is logged twice: once by this library, once by the Kafka client ("The same message may be reprocessed").
 
@@ -638,11 +620,12 @@ interface ConsumerOptions {
     retryBackoffMultiplier?: number; // Default: 2
     includeOriginalHeaders?: boolean; // Default: true
     includeErrorInfo?: boolean;   // Default: true
-    sendTimeout?: number;         // Default: 30000
+    sendTimeout?: number;         // Default: 30000 (at most 2147483647)
   };
 
   // Commit settings
-  autoCommit?: boolean;           // Default: true
+  autoCommit?: boolean;           // Default: true. false: commit synchronously after each
+                                  // handled message / batch chunk (fewer redeliveries, lower throughput)
   autoCommitInterval?: number;
   fromBeginning?: boolean;        // Default: false
 
@@ -655,9 +638,9 @@ interface ConsumerOptions {
   // Retry of a failing handler (pause partition, redeliver)
   retry?: {
     retries?: number;             // Default: 3 (skip/DLQ milestone, see above)
-    initialRetryTime?: number;    // Default: 1000
+    initialRetryTime?: number;    // Default: 1000 (positive, at most 2147483647)
     multiplier?: number;          // Default: 2
-    maxRetryTime?: number;        // Default: 30000 (cap for every delay, DLQ included)
+    maxRetryTime?: number;        // Default: 30000 (cap for every delay, DLQ included; at most 2147483647)
     skipMessageOnMaxRetries?: boolean; // Default: false (retry indefinitely)
   };
 }
@@ -716,7 +699,7 @@ await kafka.send('topic', {
 
 Integrate with `@nestjs/terminus`:
 
-> **Note:** To use `KafkaHealthIndicator` with full Terminus integration, you must import `TerminusModule`. Without it, the health indicator will use a fallback implementation that returns plain objects.
+> **Note:** `KafkaHealthIndicator` returns plain `HealthIndicatorResult` objects. Terminus' `HealthCheckService` (import `TerminusModule`) turns a `down` result into a failed check; without Terminus you can read the result directly.
 
 ```typescript
 // app.module.ts
@@ -1070,6 +1053,11 @@ v2.0.0 removes features that did not work as documented or added risk without be
 - `ssl: { ca, cert, key, ... }` is applied (the object used to be reduced to `ssl: true`).
 - `batchSize` above 32 takes effect (the client used to fetch at most 32 messages per call).
 - When consumer startup fails, the consumers that did start and the producers are closed before the error surfaces, so a failed boot no longer keeps the process alive.
+- `autoCommit: false` commits: offsets used to be stored but never committed, so the group re-read everything after each restart.
+- A `ConsumerModule.forRoot()` default is no longer hidden by an explicit `undefined` in `@Consumer()` options (for example an unset environment variable).
+- Consumer discovery no longer reads provider getters (it could trigger their side effects).
+- Producers of several connections disconnect in parallel on shutdown.
+- The published type declarations keep their JSDoc (descriptions and defaults show in the editor).
 
 ### Changed behaviour
 
@@ -1088,6 +1076,9 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties |
 | `DlqService.handleFailure(message, ...)` / `sendToDlq(message, ...)`; `handleFailure` rejected on a failed send | Both take `messages: KafkaMessage[]`; `handleFailure` never rejects (it returns a retry verdict) |
 | `IdempotencyService` methods took `(message, keyExtractor)` | They take a `namespace` argument as well |
+| A second `forRoot()` with an existing connection name was ignored with a warning | It fails at startup when its options differ (the same options twice are still accepted) |
+| `retry.initialRetryTime` / `retry.maxRetryTime` / `dlq.sendTimeout` above 2147483647 ms fired after 1 ms (a DLQ send then always timed out); `0` was accepted | Values must be positive and at most 2147483647 ms; others fail at startup |
+| Trace context was written and read as hand-built `traceparent` / `tracestate` headers | It goes through the application's registered OpenTelemetry propagator (W3C by default; B3 and `baggage` work). Without a registered propagator no trace headers are written |
 
 ### Removed
 
@@ -1097,6 +1088,7 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | Circuit breaker on DLQ sends (`DlqService.getCircuitState()`, `resetCircuit()`) | None. A failed DLQ send is redelivered and retried; nothing is dropped |
 | DLQ metrics (`getMetrics()`) | None |
 | `KafkaClient.sendQueued()` | `send()` / `sendBatch()`; librdkafka batches internally (`linger.ms`) |
+| `KafkaModule.forRootMultiple([a, b])` | `KafkaModule.forRoot(a), KafkaModule.forRoot(b)` |
 | `KafkaClient.forConnection(name)` | `send(topic, message, { connection: name })` or `@InjectKafkaClient(name)` |
 | `SendOptionsWithConnection` | `SendOptions` (now `{ connection?: string }`); `ConnectionBoundClient` methods take no options |
 | `backPressureThreshold`, `maxQueueSize`, `maxConcurrency`, and the `PressureState` / `PressureManagerOptions` types | None (they had no effect) |
@@ -1209,11 +1201,7 @@ The following retry options have been removed as they are not supported in confl
 
 #### 6. Platform Requirements
 
-confluent-kafka-javascript only supports:
-- **Linux**: x64, arm64
-- **macOS**: arm64 (Apple Silicon)
-- **Windows**: x64
-- **Node.js**: 18, 20, 21, 22
+See [Platform Support](#platform-support) for the supported platforms and Node.js versions.
 
 ### No Changes Required
 

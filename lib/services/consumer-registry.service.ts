@@ -324,7 +324,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   /**
    * On revoke: forget retry state and resume the revoked partitions. Runs
    * before the client unassigns them, so the resume is applied while they are
-   * still assigned; the client keeps its own paused set across rebalances and
+   * still assigned; the client keeps paused partitions across rebalances and
    * would otherwise leave a re-assigned partition paused.
    */
   private onRebalance(

@@ -48,7 +48,7 @@ export interface TracingOptions {
   enabled?: boolean;
   /** Custom tracer name. Default: '@loipv/nestjs-kafka' */
   tracerName?: string;
-  /** Custom tracer version. */
+  /** Custom tracer version. Default: '0.0.1' */
   tracerVersion?: string;
 }
 
@@ -72,7 +72,10 @@ export interface SslOptions {
 }
 
 export interface KafkaModuleOptions {
-  /** Connection name for multi-connection support. Default: 'default' */
+  /**
+   * Connection name; call forRoot() once per name. A second registration of
+   * the same name with different options fails at startup. Default: 'default'
+   */
   name?: string;
   clientId: string;
   brokers: string[];
@@ -82,7 +85,10 @@ export interface KafkaModuleOptions {
   sasl?: SASLOptions;
   /**
    * Raw librdkafka properties for this connection's producer, consumers and
-   * admin clients. Applied last, so they override keys the library generates.
+   * admin clients. They override the keys built from `ssl` and the kafkaJS
+   * options, but not the consumer keys the library sets itself
+   * (`js.consumer.max.batch.size`, `rebalance_cb`). Consumer-only keys also
+   * reach the producer and admin clients, where librdkafka warns and ignores them.
    * @example { 'socket.keepalive.enable': true, 'ssl.endpoint.identification.algorithm': 'none' }
    */
   rdkafka?: Record<string, string | number | boolean>;
@@ -105,7 +111,7 @@ export interface KafkaModuleAsyncOptions extends Pick<
   ModuleMetadata,
   'imports'
 > {
-  /** Connection name for multi-connection support. Default: 'default' */
+  /** Connection name (see KafkaModuleOptions.name). Default: 'default' */
   name?: string;
   useFactory?: (
     ...args: any[]

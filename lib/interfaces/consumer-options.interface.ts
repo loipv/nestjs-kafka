@@ -30,7 +30,7 @@ export interface DlqOptions {
   includeErrorInfo?: boolean;
   /**
    * Max time for a DLQ send in ms; a timeout counts as a failed send and the
-   * message is retried. Default: 30000
+   * message is retried. At most 2147483647. Default: 30000
    */
   sendTimeout?: number;
 }
@@ -41,9 +41,12 @@ export interface ConsumerRetryOptions {
    * message is retried indefinitely. Default: 3
    */
   retries?: number;
-  /** Cap for every retry delay in ms (also caps the DLQ backoff). Default: 30000 */
+  /**
+   * Cap for every retry delay in ms (also caps the DLQ backoff).
+   * At most 2147483647. Default: 30000
+   */
   maxRetryTime?: number;
-  /** Delay before the first retry in ms. Default: 1000 */
+  /** Delay before the first retry in ms. At most 2147483647. Default: 1000 */
   initialRetryTime?: number;
   /** Exponential factor for the retry delay. Default: 2 */
   multiplier?: number;
@@ -69,28 +72,44 @@ export interface ConsumerOptions {
   /** Auto-deserialize message value (JSON parse or string). Default: true */
   deserialize?: boolean;
 
+  /** Consumer group. Default: `${topic}-group` */
   groupId?: string;
+  /** Group session timeout in ms. Default: the client's (librdkafka `session.timeout.ms`) */
   sessionTimeout?: number;
+  /** Heartbeat interval in ms. Default: the client's (librdkafka `heartbeat.interval.ms`) */
   heartbeatInterval?: number;
+  /** Rebalance timeout in ms. Default: the client's */
   rebalanceTimeout?: number;
 
+  /** Deliver messages to the handler in arrays (batch consumer). Default: false */
   batch?: boolean;
   /** Max messages per handler call (batch consumers). Default: 100 */
   batchSize?: number;
 
+  /** Batch consumers: group each chunk by message key. Default: false */
   groupByKey?: boolean;
 
+  /** Partitions processed in parallel by this consumer. Default: 1 */
   partitionsConsumedConcurrently?: number;
 
+  /** Extracts the key that identifies a duplicate; enables idempotency */
   idempotencyKey?: (message: KafkaMessage) => string | undefined;
+  /** How long a processed key is remembered, in ms. Default: 3600000 */
   idempotencyTtl?: number;
 
   dlq?: DlqOptions;
 
+  /**
+   * Commit offsets in the background every `autoCommitInterval`. When false,
+   * the library commits synchronously after each handled message (or batch
+   * chunk): fewer redeliveries after a crash, lower throughput. Default: true
+   */
   autoCommit?: boolean;
+  /** Auto-commit interval in ms. Default: the client's (librdkafka `auto.commit.interval.ms`) */
   autoCommitInterval?: number;
   // Note: autoCommitThreshold is NOT supported in confluent-kafka-javascript
 
+  /** Start from the earliest offset when the group has no committed offset. Default: false */
   fromBeginning?: boolean;
 
   /** Allow auto creation of topic if it doesn't exist. Default: false */
@@ -107,7 +126,10 @@ export interface ConsumerOptions {
    */
   partitionAssigners?: PartitionAssigner[];
 
-  /** In-process retry of a failing handler (see skipMessageOnMaxRetries) */
+  /**
+   * Retry of a failing handler: the partition is paused and the message
+   * redelivered after a capped exponential backoff (see skipMessageOnMaxRetries)
+   */
   retry?: ConsumerRetryOptions;
 
   /** Partitions for auto-created topics. Default: 1 */

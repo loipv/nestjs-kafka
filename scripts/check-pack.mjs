@@ -62,6 +62,17 @@ for (const p of files) {
   if (p.split('/').includes('__mocks__')) violations.push(`test mock shipped in tarball: ${p}`);
 }
 
+// 4a. Published declarations keep their JSDoc (IDE hover docs, defaults).
+{
+  const dts = 'dist/interfaces/consumer-options.interface.d.ts';
+  const phrase = 'Skip message after max retries exceeded';
+  if (!fileSet.has(dts)) {
+    violations.push(`declaration missing from tarball: ${dts}`);
+  } else if (!readFileSync(join(root, dts), 'utf8').includes(phrase)) {
+    violations.push(`JSDoc stripped from ${dts} (expected "${phrase}"); keep removeComments off`);
+  }
+}
+
 // 4. Sourcemaps are self-contained: `lib/` does not ship, so every source must be inlined
 //    (`sourcesContent`).
 for (const p of files) {
