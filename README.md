@@ -278,8 +278,30 @@ async handleEvent(message: KafkaMessagePayload) {}
 | `fromBeginning` | `boolean` | Start consuming from beginning |
 | `retry` | `ConsumerRetryOptions` | Default retry options |
 | `idempotencyMaxKeys` | `number` | Max idempotency keys kept in memory, oldest evicted first (default: 100000) |
+| `autoStart` | `boolean` | Start consumers at bootstrap (default: `true`); `false` waits for `startAll()` |
 
-Consumers start in `onApplicationBootstrap`, after every provider's `onModuleInit`, so a handler never runs before your database pools or caches are ready.
+### Startup and shutdown order
+
+Consumers start in `ConsumerModule`'s `onApplicationBootstrap`. Every provider's `onModuleInit` has run by then, but `ConsumerModule` is global and Nest bootstraps global modules **first**: other modules' `onApplicationBootstrap` may still be running when the first message arrives. Prepare what handlers need in `onModuleInit`, or start consumers yourself:
+
+```typescript
+ConsumerModule.forRoot({ autoStart: false });
+
+// main.ts
+const app = await NestFactory.create(AppModule);
+await app.listen(3000);
+await app.get(ConsumerRegistryService).startAll();
+```
+
+With `autoStart: false`, discovery and option checks still run at bootstrap (a bad option still fails startup). `startAll()` can be called more than once; if starting fails it closes what it started (consumers and producers) and rejects.
+
+With the default `autoStart: true`, exit the process when bootstrap fails (`bootstrap().catch(() => process.exit(1))`): Nest skips shutdown hooks after a failed initialisation, so started consumers would keep the process alive.
+
+On shutdown, consumers stop in `onModuleDestroy` and producers disconnect in `onApplicationShutdown`, so consumers always stop first. Nest destroys global modules **last**, so your own `onModuleDestroy` runs while consumers still run: release resources handlers use (database pools, HTTP clients) in `beforeApplicationShutdown` or `onApplicationShutdown`.
+
+### Consumer discovery
+
+Every `@Consumer` method on a singleton provider is discovered, including methods inherited from a base class (a subclass override without `@Consumer` is not a consumer). A provider also exposed under another token (`useExisting`) is registered once. Request-scoped providers cannot consume: they are skipped with a warning.
 
 ### Multi-Connection (Multiple Kafka Clusters)
 
@@ -307,7 +329,7 @@ Connect to multiple Kafka clusters simultaneously:
 export class AppModule {}
 ```
 
-Each connection name is registered once: a second `forRoot()` with the same name and different options fails at startup (`Kafka connection "<name>" is already registered with different options (<keys>)`). All connections share one `KafkaClient` and one consumer registry, so a consumer or a send can target any of them by name. Inject per-connection options with `@Inject(getKafkaOptionsToken('analytics'))`; the `KAFKA_MODULE_OPTIONS` token is ambiguous once there are several connections.
+Each connection name is registered once: a second `forRoot()` with the same name and different options fails at startup (`Kafka connection "<name>" is already registered with different options (<keys>)`). All connections share one `KafkaClient` and one consumer registry, so a consumer or a send can target any of them by name. Inject per-connection options with `@Inject(getKafkaOptionsToken('analytics'))` (`getKafkaOptionsToken()` for the default connection).
 
 **Using named connections in Consumer:**
 
@@ -424,9 +446,9 @@ async handlePayment(message: KafkaMessagePayload) {
 
 Retries work as described in [Retry Mechanism](#retry-mechanism): the partition is paused between attempts. The DLQ backoff is capped by `retry.maxRetryTime` (default 30s).
 
-The DLQ message carries the original value and key unchanged, so binary payloads (Avro, Protobuf) arrive byte-for-byte. A batch consumer dead-letters the failing chunk in one send, without messages the idempotency check filtered out.
+The DLQ message carries the original value and key unchanged, so binary payloads (Avro, Protobuf) arrive byte-for-byte. A batch consumer dead-letters the failing chunk (one send per message, batched by librdkafka), without messages the idempotency check filtered out.
 
-If sending to the DLQ fails or exceeds `sendTimeout`, the message is not acknowledged: it is retried with the same backoff. Nothing is dropped. A send that timed out may still land later, so the DLQ can hold a duplicate (at-least-once).
+If sending to the DLQ fails or exceeds `sendTimeout`, the message is not acknowledged: it is retried with the same backoff. Nothing is dropped. A retry only sends the messages of the chunk that did not reach the DLQ yet. The DLQ can still hold a duplicate (at-least-once): a send that timed out may land later, and a process that stops between the DLQ send and the offset commit dead-letters the message again after the restart (`autoCommit: false` narrows that window).
 
 **DLQ Headers:**
 
@@ -772,6 +794,8 @@ export class HealthController {
 }
 ```
 
+`checkBrokers(key, connection?)` and `checkConsumerLag(key, groupId, maxLag = 1000, connection?)` use one admin client per connection, connected on first use and kept between probes (closed on shutdown). Pass a connection name to probe a named connection. A topic whose latest offsets cannot be read is listed in `unreadableTopics` (and logged) instead of silently counting as lag 0.
+
 Use `isHealthy` for a **readiness** probe. Do not restart the app (liveness) on a Kafka outage: librdkafka reconnects by itself and consumption resumes when the brokers are back, while the producer flag can stay `true` during an outage. `checkBrokers` probes broker reachability when you need it.
 
 ## OpenTelemetry Tracing
@@ -998,12 +1022,12 @@ export {
   ConnectionBoundClient, // what @InjectKafkaClient('<name>') injects
   TracingService,
   KafkaHealthIndicator,
+  ConsumerRegistryService, // startAll() with ConsumerModule.forRoot({ autoStart: false })
 } from '@loipv/nestjs-kafka';
 
 // Tokens and constants
 export {
   DEFAULT_KAFKA_CONNECTION,
-  KAFKA_MODULE_OPTIONS,
   CONSUMER_MODULE_OPTIONS,
   MAX_RETRY_DELAY_MS,
   getKafkaOptionsToken,
@@ -1058,6 +1082,11 @@ v2.0.0 removes features that did not work as documented or added risk without be
 - Consumer discovery no longer reads provider getters (it could trigger their side effects).
 - Producers of several connections disconnect in parallel on shutdown.
 - The published type declarations keep their JSDoc (descriptions and defaults show in the editor).
+- A consumer provider also exposed through `useExisting` no longer fails startup with "already has a handler for topic".
+- `@Consumer` methods declared on a base class are discovered (they were silently ignored); request-scoped consumer providers are skipped with a warning instead of registering a handler without its dependencies.
+- Consumers always stop before producers disconnect, whatever the import order of `KafkaModule` and `ConsumerModule`.
+- A partially failed DLQ send only re-sends the messages that did not arrive.
+- A synchronous commit (`autoCommit: false`) waits at most 10s (a hung commit used to block the worker and `app.close()`), and a partition revoked during a delivery is not committed by the old owner.
 
 ### Changed behaviour
 
@@ -1071,7 +1100,10 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | Two `@Consumer`s for the same topic in one group: the last one silently won | Fails at startup |
 | Idempotency keys were global and unbounded; a batch also recorded keys of dead-lettered or skipped chunks | Scoped per connection, group and topic; at most `idempotencyMaxKeys` (a positive integer, default 100000) kept; recorded only after the handler succeeds |
 | A throwing `idempotencyKey` extractor redelivered the message in a tight loop | It is handled like a handler failure (pause, backoff, skip/DLQ) |
-| Consumers started in `onModuleInit` | Consumers start in `onApplicationBootstrap`, after every provider's `onModuleInit` |
+| Consumers started in `onModuleInit` | Consumers start in `onApplicationBootstrap`, after every provider's `onModuleInit`; `ConsumerModule.forRoot({ autoStart: false })` leaves starting to `ConsumerRegistryService.startAll()` |
+| The consumer registry stopped in `onApplicationShutdown` | It stops in `onModuleDestroy`, before producers disconnect |
+| A DLQ chunk was sent in one `sendBatch`; a partial failure re-sent the whole chunk | One send per message; a retry sends only what did not arrive. `DlqService.handleFailure()` / `sendToDlq()` take an optional `sent` set |
+| Health probes created and connected an admin client per call, on the default connection only | One shared admin per connection; `checkBrokers` / `checkConsumerLag` take an optional connection name; lag details list `unreadableTopics` |
 | `isHealthy` checked one producer, connected on the first send | Producers connect at startup; `isHealthy` covers every producer and every consumer group, with per-part details (`connected` is replaced by `producers` / `consumers`) |
 | `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties (except `enable.auto.commit`: use `autoCommit`) |
 | `DlqService.handleFailure(message, ...)` / `sendToDlq(message, ...)`; `handleFailure` rejected on a failed send | Both take `messages: KafkaMessage[]`; `handleFailure` never rejects (it returns a retry verdict) |
@@ -1089,6 +1121,7 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | DLQ metrics (`getMetrics()`) | None |
 | `KafkaClient.sendQueued()` | `send()` / `sendBatch()`; librdkafka batches internally (`linger.ms`) |
 | `KafkaModule.forRootMultiple([a, b])` | `KafkaModule.forRoot(a), KafkaModule.forRoot(b)` |
+| `KAFKA_MODULE_OPTIONS` token (ambiguous with several connections) | `@Inject(getKafkaOptionsToken(name))` (`getKafkaOptionsToken()` for the default connection) |
 | `KafkaClient.forConnection(name)` | `send(topic, message, { connection: name })` or `@InjectKafkaClient(name)` |
 | `SendOptionsWithConnection` | `SendOptions` (now `{ connection?: string }`); `ConnectionBoundClient` methods take no options |
 | `backPressureThreshold`, `maxQueueSize`, `maxConcurrency`, and the `PressureState` / `PressureManagerOptions` types | None (they had no effect) |
