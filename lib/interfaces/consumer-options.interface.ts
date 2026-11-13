@@ -153,6 +153,14 @@ export interface ConsumerMetadata {
  */
 export interface ConsumerModuleOptions {
   /**
+   * Start consumers in onApplicationBootstrap. With false, discovery and
+   * option checks still run at bootstrap, and consumers start when the
+   * application calls `app.get(ConsumerRegistryService).startAll()` (for
+   * example after `app.listen()`). Default: true
+   */
+  autoStart?: boolean;
+
+  /**
    * Max idempotency keys kept in memory; the oldest are evicted.
    * Default: 100000
    */

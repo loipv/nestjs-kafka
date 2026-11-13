@@ -79,6 +79,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   private consumerGroups = new Map<string, ConsumerGroup>();
   private isShuttingDown = false;
   private shutdownPromise?: Promise<void>;
+  private startPromise?: Promise<void>;
   private readonly retryTracker = new PartitionRetryTracker();
 
   constructor(
@@ -234,10 +235,19 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   }
 
   /**
-   * Start every group. Waits for all of them to settle before rejecting with
-   * the first error, so a caller cleaning up never races a group still starting.
+   * Start every registered group. Called by ConsumerModule at bootstrap, or by
+   * the application with `ConsumerModule.forRoot({ autoStart: false })`.
+   * Concurrent and repeated calls share one start. Waits for every group to
+   * settle; on failure closes the started groups and the producers
+   * (abortStartup) before rejecting with the first error.
    */
   async startAll(): Promise<void> {
+    this.startPromise ??= this.start();
+    return this.startPromise;
+  }
+
+  /** Start every group once; on failure close what started, then reject. */
+  private async start(): Promise<void> {
     const results = await Promise.allSettled(
       Array.from(this.consumerGroups.values()).map((group) =>
         this.startConsumerGroup(group),
@@ -246,7 +256,12 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     const failed = results.find(
       (r): r is PromiseRejectedResult => r.status === 'rejected',
     );
-    if (failed) throw failed.reason;
+    if (failed) {
+      await this.abortStartup().catch((error: unknown) =>
+        this.logger.error('Cleanup after a failed start failed', error),
+      );
+      throw failed.reason;
+    }
   }
 
   /**

@@ -11,6 +11,8 @@ export {
   ConnectionBoundClient,
 } from './services/kafka-client.service';
 export { TracingService } from './services/tracing.service';
+// startAll() for ConsumerModule.forRoot({ autoStart: false })
+export { ConsumerRegistryService } from './services/consumer-registry.service';
 
 // Health
 export { KafkaHealthIndicator } from './health/kafka-health-indicator';

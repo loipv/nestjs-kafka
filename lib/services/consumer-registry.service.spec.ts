@@ -219,6 +219,7 @@ describe('consumer groups', () => {
     const consumerFactory = jest.fn().mockReturnValue(consumer);
     const core = {
       setConsumerStatus: jest.fn(),
+      disconnectAll: jest.fn().mockResolvedValue(undefined),
       getKafka: jest.fn().mockReturnValue({
         consumer: consumerFactory,
         admin: jest.fn().mockReturnValue({
@@ -922,6 +923,35 @@ describe('consumer groups', () => {
     expect(consumer.disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('a failing cleanup does not hide the start error', async () => {
+    const { registry, core } = makeHarness(
+      jest.fn().mockRejectedValue(new Error('run failed')),
+    );
+    core.disconnectAll.mockRejectedValue(new Error('cleanup failed'));
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await expect(registry.startAll()).rejects.toThrow('run failed');
+  });
+
+  it('startAll is shared by concurrent callers', async () => {
+    const { registry, consumer } = makeHarness();
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await Promise.all([registry.startAll(), registry.startAll()]);
+    await registry.startAll();
+    expect(consumer.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failing startAll aborts startup before rejecting', async () => {
+    const { registry, consumer, core } = makeHarness(
+      jest.fn().mockRejectedValue(new Error('run failed')),
+    );
+    registry.registerConsumers([consumerMeta('t', {})]);
+    const abort = jest.spyOn(registry, 'abortStartup');
+    await expect(registry.startAll()).rejects.toThrow('run failed');
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(core.disconnectAll).toHaveBeenCalledTimes(1);
+    expect(consumer.disconnect).toHaveBeenCalled();
+  });
+
   it('onModuleDestroy runs the memoised graceful shutdown', async () => {
     const { registry, consumer } = makeHarness();
     registry.registerConsumers([consumerMeta('t', {})]);
@@ -983,6 +1013,7 @@ describe('consumer groups', () => {
       {
         setConsumerStatus: jest.fn(),
         getKafka: () => ({ consumer: factory }),
+        disconnectAll: jest.fn().mockResolvedValue(undefined),
       } as any,
       new BatchProcessorService(),
       { stopCleanup: jest.fn() } as any,

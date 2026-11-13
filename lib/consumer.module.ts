@@ -5,6 +5,8 @@ import {
   OnApplicationShutdown,
   Global,
   Provider,
+  Inject,
+  Optional,
 } from '@nestjs/common';
 import { DiscoveryModule, DiscoveryService } from '@nestjs/core';
 import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service';
@@ -68,6 +70,9 @@ export class ConsumerModule
     private readonly discoveryService: ConsumerDiscoveryService,
     private readonly registryService: ConsumerRegistryService,
     private readonly nestDiscoveryService: DiscoveryService,
+    @Optional()
+    @Inject(CONSUMER_MODULE_OPTIONS)
+    private readonly options?: ConsumerModuleOptions,
   ) {}
 
   /**
@@ -132,14 +137,16 @@ export class ConsumerModule
         .map((wrapper): unknown => wrapper.instance),
     );
 
-    if (consumers.length > 0) {
-      try {
-        this.registryService.registerConsumers(consumers);
-        await this.registryService.startAll();
-      } catch (error) {
-        await this.registryService.abortStartup();
-        throw error;
-      }
+    if (consumers.length === 0) return;
+    try {
+      this.registryService.registerConsumers(consumers);
+    } catch (error) {
+      await this.registryService.abortStartup();
+      throw error;
+    }
+    // startAll() closes what it started before rejecting
+    if (this.options?.autoStart !== false) {
+      await this.registryService.startAll();
     }
   }
 

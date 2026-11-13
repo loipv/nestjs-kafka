@@ -259,6 +259,62 @@ describe('ConsumerModule', () => {
     );
   });
 
+  describe('autoStart: false', () => {
+    @Injectable()
+    class Later {
+      @Consumer('later')
+      async handle() {}
+    }
+    const compileWith = (providers: any[]) =>
+      Test.createTestingModule({
+        imports: [
+          KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+          ConsumerModule.forRoot({ autoStart: false }),
+        ],
+        providers,
+      }).compile();
+    const lastClient = () =>
+      (KafkaJS.Kafka as unknown as jest.Mock).mock.results.at(-1)!.value;
+
+    it('registers but does not start', async () => {
+      const mod = await compileWith([Later]);
+      try {
+        await mod.init();
+        const client = lastClient();
+        expect(client.consumer).not.toHaveBeenCalled();
+        const registry = mod.get(ConsumerRegistryService);
+        expect([...(registry as any).consumerGroups.keys()]).toEqual([
+          'default:later-group',
+        ]);
+        await registry.startAll();
+        expect(client.consumer.mock.results[0].value.run).toHaveBeenCalledTimes(
+          1,
+        );
+      } finally {
+        await mod.close();
+      }
+    });
+
+    it('still fails init on an invalid option', async () => {
+      @Injectable()
+      class Invalid {
+        @Consumer('invalid', { retry: { multiplier: 0 } })
+        async handle() {}
+      }
+      const mod = await compileWith([Invalid]);
+      await expect(mod.init()).rejects.toThrow(
+        'Consumer "invalid": retry.multiplier must be a finite number >= 1',
+      );
+    });
+
+    it('closes cleanly without startAll', async () => {
+      const mod = await compileWith([Later]);
+      await mod.init();
+      await expect(mod.close()).resolves.toBeUndefined();
+      expect(lastClient().consumer).not.toHaveBeenCalled();
+    });
+  });
+
   it('no longer exposes the static clearConsumers()', () => {
     expect((ConsumerModule as any).clearConsumers).toBeUndefined();
   });

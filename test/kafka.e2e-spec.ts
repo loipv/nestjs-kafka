@@ -8,6 +8,7 @@ import {
   Consumer,
   KafkaClient,
   KafkaHealthIndicator,
+  ConsumerRegistryService,
 } from '../lib';
 
 let kafka: Awaited<ReturnType<GenericContainer['start']>>;
@@ -633,6 +634,42 @@ describe('Kafka e2e (testcontainers)', () => {
       await app.get(KafkaClient).send('e2e-alias', { value: { id: 'x' } });
       await waitFor(() => received.length >= 1);
       await new Promise((r) => setTimeout(r, 1500));
+      expect(received).toEqual(['x']);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('autoStart false starts on startAll', async () => {
+    const received: string[] = [];
+
+    @Injectable()
+    class LateConsumer {
+      @Consumer('e2e-autostart', {
+        groupId: 'e2e-autostart-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+      })
+      async handle(msg: any) {
+        received.push(msg.value?.id);
+      }
+    }
+
+    const app = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'e2e', brokers: [bootstrap] }),
+        ConsumerModule.forRoot({ autoStart: false }),
+      ],
+      providers: [LateConsumer],
+    }).compile();
+    await app.init();
+    try {
+      await app.get(KafkaClient).send('e2e-autostart', { value: { id: 'x' } });
+      await new Promise((r) => setTimeout(r, 2000));
+      expect(received).toEqual([]);
+
+      await app.get(ConsumerRegistryService).startAll();
+      await waitFor(() => received.length >= 1);
       expect(received).toEqual(['x']);
     } finally {
       await app.close();
