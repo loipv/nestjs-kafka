@@ -23,9 +23,24 @@ const SEMATTRS_MESSAGING_KAFKA_CONSUMER_GROUP =
   'messaging.kafka.consumer.group';
 const SEMATTRS_MESSAGING_BATCH_MESSAGE_COUNT = 'messaging.batch.message_count';
 
-// W3C Trace Context header names
-const TRACEPARENT_HEADER = 'traceparent';
-const TRACESTATE_HEADER = 'tracestate';
+/** Reads Kafka headers for the propagator: string, Buffer, or the first array item. */
+const kafkaHeaderGetter: import('@opentelemetry/api').TextMapGetter<IHeaders> =
+  {
+    keys: (headers) => Object.keys(headers),
+    get: (headers, key) => {
+      const raw = headers[key];
+      const value = Array.isArray(raw) ? raw[0] : raw;
+      if (Buffer.isBuffer(value)) return value.toString('utf-8');
+      return typeof value === 'string' ? value : undefined;
+    },
+  };
+
+const kafkaHeaderSetter: import('@opentelemetry/api').TextMapSetter<IHeaders> =
+  {
+    set: (headers, key, value) => {
+      headers[key] = value;
+    },
+  };
 
 interface ProduceSpanOptions {
   topic: string;
@@ -361,86 +376,26 @@ export class TracingService {
   }
 
   /**
-   * Inject trace context into Kafka headers (W3C Trace Context format)
+   * Inject the trace context (and baggage) into Kafka headers through the
+   * application's registered propagator (W3C Trace Context by default).
    */
   private injectContext(context: Context, headers: IHeaders): void {
-    if (!this.otel) return;
-
-    const spanContext = this.otel.trace.getSpan(context)?.spanContext();
-    if (!spanContext || !this.otel.isSpanContextValid(spanContext)) {
-      return;
-    }
-
-    // W3C Trace Context format: version-traceId-spanId-flags
-    const traceparent = `00-${spanContext.traceId}-${spanContext.spanId}-${spanContext.traceFlags.toString(16).padStart(2, '0')}`;
-    headers[TRACEPARENT_HEADER] = traceparent;
-
-    if (spanContext.traceState) {
-      headers[TRACESTATE_HEADER] = spanContext.traceState.serialize();
-    }
+    this.otel?.propagation.inject(context, headers, kafkaHeaderSetter);
   }
 
   /**
-   * Extract trace context from Kafka headers
+   * Extract the producer's trace context (and baggage) from Kafka headers
+   * through the application's registered propagator.
    */
   private extractContext(headers: IHeaders): Context {
     // this.otel is non-null when callers check isEnabled() first, but guard defensively
     if (!this.otel) {
       return {} as Context;
     }
-
-    const traceparent = this.getHeaderValue(headers, TRACEPARENT_HEADER);
-    if (!traceparent) {
-      return this.otel.context.active();
-    }
-
-    // Parse W3C Trace Context: version-traceId-spanId-flags
-    const parts = traceparent.split('-');
-    if (parts.length !== 4) {
-      return this.otel.context.active();
-    }
-
-    const [, traceId, spanId, flags] = parts;
-
-    const spanContext: import('@opentelemetry/api').SpanContext = {
-      traceId,
-      spanId,
-      traceFlags: parseInt(flags, 16),
-      isRemote: true,
-    };
-
-    if (!this.otel.isSpanContextValid(spanContext)) {
-      return this.otel.context.active();
-    }
-
-    // Parse tracestate if present
-    const tracestate = this.getHeaderValue(headers, TRACESTATE_HEADER);
-    const finalSpanContext: import('@opentelemetry/api').SpanContext =
-      tracestate
-        ? { ...spanContext, traceState: this.otel.createTraceState(tracestate) }
-        : spanContext;
-
-    return this.otel.trace.setSpanContext(
+    return this.otel.propagation.extract(
       this.otel.context.active(),
-      finalSpanContext,
+      headers,
+      kafkaHeaderGetter,
     );
-  }
-
-  /**
-   * Get header value as string
-   */
-  private getHeaderValue(headers: IHeaders, key: string): string | undefined {
-    const value = headers[key];
-    if (!value) return undefined;
-
-    if (Buffer.isBuffer(value)) {
-      return value.toString('utf-8');
-    }
-
-    if (typeof value === 'string') {
-      return value;
-    }
-
-    return undefined;
   }
 }
