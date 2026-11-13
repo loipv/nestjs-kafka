@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, Logger } from '@nestjs/common';
 import { KAFKA_CONSUMER_METADATA } from '../decorators/constants';
@@ -11,32 +10,49 @@ export class ConsumerDiscoveryService {
   private discoveredConsumers: ConsumerMetadata[] = [];
 
   /**
-   * Discover consumers from an array of provider instances.
-   * Call this with your consumer service instances.
+   * Discover @Consumer methods on provider instances (one pass). Skips
+   * non-objects, prototype-less objects and prototypes that throw on
+   * inspection; only own data properties are read, never getters (some
+   * providers, e.g. Nest's HttpAdapterHost, have getters with side effects).
    */
-  discoverFromProviders(providers: any[]): ConsumerMetadata[] {
-    for (const instance of providers) {
-      if (!instance) continue;
+  discoverFromProviders(instances: unknown[]): ConsumerMetadata[] {
+    for (const instance of instances) {
+      if (!instance || typeof instance !== 'object') continue;
+      const prototype = Object.getPrototypeOf(instance) as Record<
+        string,
+        unknown
+      > | null;
+      if (!prototype) continue;
 
-      const prototype = Object.getPrototypeOf(instance);
-      const methodNames = Object.getOwnPropertyNames(prototype).filter(
-        (name) =>
-          name !== 'constructor' && typeof prototype[name] === 'function',
-      );
+      let methodNames: string[];
+      try {
+        methodNames = Object.getOwnPropertyNames(prototype).filter((name) => {
+          if (name === 'constructor') return false;
+          const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+          return (
+            !!descriptor &&
+            !descriptor.get &&
+            typeof descriptor.value === 'function'
+          );
+        });
+      } catch {
+        continue;
+      }
 
       for (const methodName of methodNames) {
-        const methodRef = prototype[methodName];
-
-        // Check for @Consumer decorator metadata
         const metadata: ConsumerMethodMetadata | undefined =
-          Reflect.getMetadata(KAFKA_CONSUMER_METADATA, methodRef);
-
+          Reflect.getMetadata(
+            KAFKA_CONSUMER_METADATA,
+            prototype[methodName] as object,
+          );
         if (!metadata) continue;
+
+        const className = instance.constructor?.name;
 
         // Skip disabled consumers
         if (metadata.options.disabled) {
           this.logger.log(
-            `Skipping disabled consumer: ${instance.constructor?.name}.${methodName} for topic: ${metadata.topic}`,
+            `Skipping disabled consumer: ${className}.${methodName} for topic: ${metadata.topic}`,
           );
           continue;
         }
@@ -44,17 +60,15 @@ export class ConsumerDiscoveryService {
         const connection =
           metadata.options.connection || DEFAULT_KAFKA_CONNECTION;
 
-        const consumerMetadata: ConsumerMetadata = {
+        this.discoveredConsumers.push({
           topic: metadata.topic,
           connection,
           options: { ...metadata.options, connection },
           target: instance,
           methodName,
-        };
-
-        this.discoveredConsumers.push(consumerMetadata);
+        });
         this.logger.log(
-          `Discovered consumer: ${instance.constructor?.name}.${methodName} for topic: ${metadata.topic} (connection: ${connection})`,
+          `Discovered consumer: ${className}.${methodName} for topic: ${metadata.topic} (connection: ${connection})`,
         );
       }
     }

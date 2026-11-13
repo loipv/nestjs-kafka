@@ -139,8 +139,7 @@ describe('ConsumerModule', () => {
       abortStartup: jest.fn().mockResolvedValue(undefined),
     };
     const discovery = {
-      discoverFromProviders: jest.fn(),
-      getConsumers: () => [{ topic: 't' }],
+      discoverFromProviders: jest.fn(() => [{ topic: 't' }]),
     };
     const nestDiscovery = { getProviders: () => [] };
     const mod = new ConsumerModule(

@@ -32,6 +32,29 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
     expect(merged.retry).toEqual({ retries: 7 });
   });
 
+  it('applies each module default only when the decorator leaves it undefined', () => {
+    const keys = [
+      'partitionAssigners',
+      'allowAutoTopicCreation',
+      'sessionTimeout',
+      'heartbeatInterval',
+      'rebalanceTimeout',
+      'autoCommit',
+      'autoCommitInterval',
+      'fromBeginning',
+      'autoCreateTopicPartitions',
+      'autoCreateTopicReplicationFactor',
+    ];
+    for (const key of keys) {
+      const registry = makeRegistry({ [key]: 'D' });
+      const merge = (options: any) =>
+        (registry as any).mergeWithDefaults(options)[key];
+      expect([key, merge({})]).toEqual([key, 'D']);
+      expect([key, merge({ [key]: undefined })]).toEqual([key, 'D']);
+      expect([key, merge({ [key]: 'X' })]).toEqual([key, 'X']);
+    }
+  });
+
   it('merges auto-create topic sizing defaults per field', () => {
     const registry = makeRegistry({
       autoCreateTopicPartitions: 3,

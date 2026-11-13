@@ -19,4 +19,32 @@ describe('ConsumerDiscoveryService', () => {
     expect((svc as any).registerHandler).toBeUndefined();
     expect((svc as any).clearConsumers).toBeUndefined();
   });
+
+  it('skips non-object and prototype-less instances', () => {
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([
+      undefined,
+      null,
+      42,
+      'x',
+      Object.create(null),
+      new TestConsumers(),
+    ]);
+    expect(svc.getConsumers().map((c) => c.topic)).toEqual(['a']);
+  });
+
+  it('never invokes prototype getters', () => {
+    const getter = jest.fn(() => {
+      throw new Error('side effect');
+    });
+    class WithGetter {
+      @Consumer('g') async g() {}
+    }
+    Object.defineProperty(WithGetter.prototype, 'boom', { get: getter });
+
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([new WithGetter()]);
+    expect(svc.getConsumers().map((c) => c.topic)).toEqual(['g']);
+    expect(getter).not.toHaveBeenCalled();
+  });
 });

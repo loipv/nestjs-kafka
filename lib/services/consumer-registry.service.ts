@@ -39,6 +39,21 @@ interface TopicHandler {
 const ERR_REVOKE_PARTITIONS = -174;
 /** Default chunk size, shared with BatchProcessorService.splitIntoBatches */
 const DEFAULT_BATCH_SIZE = 100;
+/** Consumer options that ConsumerModule.forRoot() may default */
+const DEFAULTABLE_KEYS = [
+  'partitionAssigners',
+  'allowAutoTopicCreation',
+  'sessionTimeout',
+  'heartbeatInterval',
+  'rebalanceTimeout',
+  'autoCommit',
+  'autoCommitInterval',
+  'fromBeginning',
+  'autoCreateTopicPartitions',
+  'autoCreateTopicReplicationFactor',
+] as const satisfies readonly (keyof ConsumerOptions &
+  keyof ConsumerModuleOptions)[];
+
 /** Largest delay setTimeout honours; Node turns anything above it into 1 ms */
 const MAX_TIMER_MS = 2147483647;
 
@@ -86,52 +101,13 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
 
     const defaults = this.moduleOptions;
 
-    const merged: ConsumerOptions = {
-      // Module defaults (applied if decorator doesn't specify)
-      ...(defaults.partitionAssigners !== undefined &&
-        options.partitionAssigners === undefined && {
-          partitionAssigners: defaults.partitionAssigners,
-        }),
-      ...(defaults.allowAutoTopicCreation !== undefined &&
-        options.allowAutoTopicCreation === undefined && {
-          allowAutoTopicCreation: defaults.allowAutoTopicCreation,
-        }),
-      ...(defaults.sessionTimeout !== undefined &&
-        options.sessionTimeout === undefined && {
-          sessionTimeout: defaults.sessionTimeout,
-        }),
-      ...(defaults.heartbeatInterval !== undefined &&
-        options.heartbeatInterval === undefined && {
-          heartbeatInterval: defaults.heartbeatInterval,
-        }),
-      ...(defaults.rebalanceTimeout !== undefined &&
-        options.rebalanceTimeout === undefined && {
-          rebalanceTimeout: defaults.rebalanceTimeout,
-        }),
-      ...(defaults.autoCommit !== undefined &&
-        options.autoCommit === undefined && {
-          autoCommit: defaults.autoCommit,
-        }),
-      ...(defaults.autoCommitInterval !== undefined &&
-        options.autoCommitInterval === undefined && {
-          autoCommitInterval: defaults.autoCommitInterval,
-        }),
-      ...(defaults.fromBeginning !== undefined &&
-        options.fromBeginning === undefined && {
-          fromBeginning: defaults.fromBeginning,
-        }),
-      ...(defaults.autoCreateTopicPartitions !== undefined &&
-        options.autoCreateTopicPartitions === undefined && {
-          autoCreateTopicPartitions: defaults.autoCreateTopicPartitions,
-        }),
-      ...(defaults.autoCreateTopicReplicationFactor !== undefined &&
-        options.autoCreateTopicReplicationFactor === undefined && {
-          autoCreateTopicReplicationFactor:
-            defaults.autoCreateTopicReplicationFactor,
-        }),
-      // Decorator options (always applied, overrides defaults)
-      ...options,
-    };
+    // Decorator values win; an undefined decorator value never hides a default
+    const merged: ConsumerOptions = { ...options };
+    for (const key of DEFAULTABLE_KEYS) {
+      if (merged[key] === undefined && defaults[key] !== undefined) {
+        (merged as Record<string, unknown>)[key] = defaults[key];
+      }
+    }
 
     // Deep-merge retry per field (decorator wins per field) — must happen
     // after the spread above, which would otherwise clobber with options.retry

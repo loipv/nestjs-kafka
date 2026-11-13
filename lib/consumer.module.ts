@@ -1,6 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
 import {
   Module,
   DynamicModule,
@@ -16,7 +13,6 @@ import { BatchProcessorService } from './services/batch-processor.service';
 import { IdempotencyService } from './services/idempotency.service';
 import { DlqService } from './services/dlq.service';
 import { ConsumerModuleOptions, CONSUMER_MODULE_OPTIONS } from './interfaces';
-import { KAFKA_CONSUMER_METADATA } from './decorators/constants';
 
 // All consumer-related providers (moved from KafkaModule)
 const CONSUMER_PROVIDERS: Provider[] = [
@@ -121,16 +117,13 @@ export class ConsumerModule
     }
     this.isStarted = true;
 
-    // Auto-discover all providers with @Consumer() decorated methods
-    // using NestJS DiscoveryService. Consumers are resolved in their own
-    // module scope with all their dependencies already injected.
-    const consumerInstances = this.discoverConsumers();
-
-    if (consumerInstances.length > 0) {
-      this.discoveryService.discoverFromProviders(consumerInstances);
-    }
-
-    const consumers = this.discoveryService.getConsumers();
+    // Auto-discover @Consumer() methods on every provider (resolved in its
+    // own module scope with its dependencies already injected).
+    const consumers = this.discoveryService.discoverFromProviders(
+      this.nestDiscoveryService
+        .getProviders()
+        .map((wrapper): unknown => wrapper.instance),
+    );
 
     if (consumers.length > 0) {
       try {
@@ -141,58 +134,6 @@ export class ConsumerModule
         throw error;
       }
     }
-  }
-
-  /**
-   * Discover all providers in the application that have methods
-   * decorated with @Consumer(). Uses NestJS DiscoveryService to scan
-   * all registered providers across all modules.
-   */
-  private discoverConsumers(): any[] {
-    const consumerInstances: any[] = [];
-    const providers = this.nestDiscoveryService.getProviders();
-
-    for (const wrapper of providers) {
-      const instance = wrapper.instance;
-      if (!instance || typeof instance !== 'object') continue;
-
-      // Check if any method has @Consumer metadata
-      const prototype = Object.getPrototypeOf(instance);
-      if (!prototype) continue;
-
-      try {
-        const methodNames = Object.getOwnPropertyNames(prototype).filter(
-          (name) => {
-            if (name === 'constructor') return false;
-            // Use property descriptor to safely check if it's a method
-            // without triggering getter side effects (e.g. HttpAdapterHost.listen$)
-            const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
-            return (
-              descriptor &&
-              typeof descriptor.value === 'function' &&
-              !descriptor.get
-            );
-          },
-        );
-
-        const hasConsumerDecorator = methodNames.some((methodName) => {
-          const metadata = Reflect.getMetadata(
-            KAFKA_CONSUMER_METADATA,
-            prototype[methodName],
-          );
-          return !!metadata;
-        });
-
-        if (hasConsumerDecorator) {
-          consumerInstances.push(instance);
-        }
-      } catch {
-        // Skip providers that throw errors when inspecting their prototype
-        continue;
-      }
-    }
-
-    return consumerInstances;
   }
 
   // Only resets the start guard. ConsumerRegistryService disconnects the
