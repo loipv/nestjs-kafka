@@ -124,9 +124,8 @@ describe('KafkaModule', () => {
       );
     });
 
-    it('forRootMultiple registers every connection', async () => {
-      const mod = await compile([KafkaModule.forRootMultiple([A, B])]);
-      expect(names(mod)).toEqual(['analytics', 'default']);
+    it('no longer exposes forRootMultiple', () => {
+      expect((KafkaModule as any).forRootMultiple).toBeUndefined();
     });
 
     it('two forRootAsync() calls register into one KafkaCoreService', async () => {
@@ -137,10 +136,19 @@ describe('KafkaModule', () => {
       expect(names(mod)).toEqual(['analytics', 'default']);
     });
 
-    it('two unnamed forRoot() calls boot with one connection', async () => {
+    it('fails when two forRoot() calls use one name with different options', async () => {
+      await expect(
+        compile([
+          KafkaModule.forRoot(A),
+          KafkaModule.forRoot({ ...A, clientId: 'a2' }),
+        ]),
+      ).rejects.toThrow('Kafka connection "default" is already registered');
+    });
+
+    it('collapses two forRoot() calls with identical options', async () => {
       const mod = await compile([
         KafkaModule.forRoot(A),
-        KafkaModule.forRoot({ ...A, clientId: 'a2' }),
+        KafkaModule.forRoot(A),
       ]);
       expect(names(mod)).toEqual(['default']);
     });

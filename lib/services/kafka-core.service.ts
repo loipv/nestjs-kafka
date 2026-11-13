@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import {
@@ -62,11 +63,12 @@ export class KafkaCoreService implements OnApplicationBootstrap {
       );
     }
 
-    if (this.connections.has(name)) {
-      this.logger.warn(
-        `Kafka connection "${name}" already registered, skipping`,
-      );
-      return;
+    // The same options registered twice (e.g. one config object passed to two
+    // forRoot() calls) are harmless; different options under one name conflict.
+    const existing = this.connections.get(name);
+    if (existing) {
+      if (isDeepStrictEqual(existing.options, options)) return;
+      throw new Error(`Kafka connection "${name}" is already registered`);
     }
 
     // Build Kafka config with only defined values to avoid undefined property issues
@@ -316,26 +318,36 @@ export class KafkaCoreService implements OnApplicationBootstrap {
    */
   async disconnectAll(): Promise<void> {
     this.isShutDown = true;
-    for (const [name, connection] of this.connections) {
-      try {
-        // A connect still in flight (e.g. the one started at bootstrap) must be
-        // torn down too, or it finishes after shutdown and keeps the process
-        // alive. Let it finish if it can, but never wait on it unbounded:
-        // against an unreachable broker it hangs.
-        if (connection.connectingPromise) {
-          await this.settleWithin(
-            connection.connectingPromise,
-            IN_FLIGHT_CONNECT_WAIT_MS,
-          );
-        }
-        if (connection.isProducerConnected || connection.connectingPromise) {
-          await connection.producer.disconnect();
-          connection.isProducerConnected = false;
-          this.logger.log(`Producer disconnected for "${name}"`);
-        }
-      } catch (error) {
-        this.logger.error(`Error disconnecting producer for "${name}"`, error);
+    // In parallel: the in-flight connect wait is bounded once, not per connection
+    await Promise.all(
+      [...this.connections].map(([name, connection]) =>
+        this.disconnectProducer(name, connection),
+      ),
+    );
+  }
+
+  private async disconnectProducer(
+    name: string,
+    connection: KafkaConnection,
+  ): Promise<void> {
+    try {
+      // A connect still in flight (e.g. the one started at bootstrap) must be
+      // torn down too, or it finishes after shutdown and keeps the process
+      // alive. Let it finish if it can, but never wait on it unbounded:
+      // against an unreachable broker it hangs.
+      if (connection.connectingPromise) {
+        await this.settleWithin(
+          connection.connectingPromise,
+          IN_FLIGHT_CONNECT_WAIT_MS,
+        );
       }
+      if (connection.isProducerConnected || connection.connectingPromise) {
+        await connection.producer.disconnect();
+        connection.isProducerConnected = false;
+        this.logger.log(`Producer disconnected for "${name}"`);
+      }
+    } catch (error) {
+      this.logger.error(`Error disconnecting producer for "${name}"`, error);
     }
   }
 
@@ -376,7 +388,7 @@ export class KafkaCoreService implements OnApplicationBootstrap {
         : COMPRESSION_CODECS.find((c) => c === compression);
     if (!codec) {
       throw new Error(
-        `Kafka connection "${connectionName}": unsupported compression ${String(compression)}`,
+        `Kafka connection "${connectionName}": unsupported compression ${typeof compression === 'string' ? `"${compression}"` : String(compression)}`,
       );
     }
     return {

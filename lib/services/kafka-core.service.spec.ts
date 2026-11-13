@@ -25,10 +25,19 @@ describe('KafkaCoreService', () => {
     );
   });
 
-  it('skips duplicate connection names', () => {
+  it('throws when the same name is registered with different options', () => {
     const core = new KafkaCoreService();
     core.registerConnection({ ...opts });
+    expect(() => core.registerConnection({ ...opts, clientId: 'c2' })).toThrow(
+      'Kafka connection "default" is already registered',
+    );
+    expect(core.getConnectionNames()).toEqual(['default']);
+  });
+
+  it('ignores the same options registered twice', () => {
+    const core = new KafkaCoreService();
     core.registerConnection({ ...opts });
+    expect(() => core.registerConnection({ ...opts })).not.toThrow();
     expect(core.getConnectionNames()).toEqual(['default']);
   });
 
@@ -114,6 +123,16 @@ describe('KafkaCoreService', () => {
           producer: { compression: 7 as any },
         }),
       ).toThrow('Kafka connection "a": unsupported compression 7');
+    });
+
+    it('quotes an unknown string compression value', () => {
+      expect(() =>
+        core.registerConnection({
+          ...opts,
+          name: 'a',
+          producer: { compression: '1' as any },
+        }),
+      ).toThrow('Kafka connection "a": unsupported compression "1"');
     });
   });
 
@@ -246,6 +265,37 @@ describe('KafkaCoreService', () => {
         await closing;
 
         expect(producer.disconnect).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('waits at most 5s overall for in-flight connects', async () => {
+      jest.useFakeTimers();
+      try {
+        const hanging = () => ({
+          connect: jest.fn(() => new Promise<void>(() => {})),
+          disconnect: jest.fn().mockResolvedValue(undefined),
+        });
+        const a = hanging();
+        const b = hanging();
+        (KafkaJS.Kafka as unknown as jest.Mock)
+          .mockImplementationOnce(() => ({ producer: () => a }))
+          .mockImplementationOnce(() => ({ producer: () => b }));
+        const core = new KafkaCoreService();
+        core.registerConnection({ ...opts });
+        core.registerConnection({ ...opts, name: 'second' });
+
+        core.onApplicationBootstrap();
+        let done = false;
+        const closing = core.disconnectAll().then(() => {
+          done = true;
+        });
+        await jest.advanceTimersByTimeAsync(5000);
+        expect(done).toBe(true);
+        await closing;
+        expect(a.disconnect).toHaveBeenCalledTimes(1);
+        expect(b.disconnect).toHaveBeenCalledTimes(1);
       } finally {
         jest.useRealTimers();
       }

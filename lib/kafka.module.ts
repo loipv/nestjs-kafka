@@ -20,28 +20,15 @@ import { TracingService } from './services/tracing.service';
 @Module({})
 export class KafkaModule {
   /**
-   * Register a single Kafka connection. Can be called several times with
-   * different `name`s; all connections share one KafkaCoreService.
+   * Register one Kafka connection. Call once per connection, each with its own
+   * `name`; all connections share one KafkaCoreService. A second call with the
+   * same name and different options fails at startup.
    */
   static forRoot(options: KafkaModuleOptions): DynamicModule {
     const name = options.name || DEFAULT_KAFKA_CONNECTION;
     return this.build(
       [name],
       [{ provide: getKafkaOptionsToken(name), useValue: options }],
-    );
-  }
-
-  /**
-   * Register several Kafka connections at once
-   */
-  static forRootMultiple(optionsArray: KafkaModuleOptions[]): DynamicModule {
-    const names = optionsArray.map((o) => o.name || DEFAULT_KAFKA_CONNECTION);
-    return this.build(
-      names,
-      optionsArray.map((options, i) => ({
-        provide: getKafkaOptionsToken(names[i]),
-        useValue: options,
-      })),
     );
   }
 

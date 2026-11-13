@@ -724,10 +724,12 @@ describe('DLQ on a separate cluster (dlq.connection)', () => {
 
     const moduleRef = await Test.createTestingModule({
       imports: [
-        KafkaModule.forRootMultiple([
-          { clientId: 'e2e', brokers: [bootstrap] },
-          { name: 'dlq', clientId: 'e2e-dlq', brokers: [dlqBootstrap] },
-        ]),
+        KafkaModule.forRoot({ clientId: 'e2e', brokers: [bootstrap] }),
+        KafkaModule.forRoot({
+          name: 'dlq',
+          clientId: 'e2e-dlq',
+          brokers: [dlqBootstrap],
+        }),
         ConsumerModule.forRoot(),
       ],
       providers: [CrossClusterConsumer],
