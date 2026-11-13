@@ -126,8 +126,6 @@ export interface KafkaOptionsFactory {
   createKafkaOptions(): Promise<KafkaModuleOptions> | KafkaModuleOptions;
 }
 
-export const KAFKA_MODULE_OPTIONS = Symbol('KAFKA_MODULE_OPTIONS');
-
 /** Get the injection token for a specific Kafka connection */
 export function getKafkaOptionsToken(name?: string): string {
   return `KAFKA_OPTIONS_${name || DEFAULT_KAFKA_CONNECTION}`;

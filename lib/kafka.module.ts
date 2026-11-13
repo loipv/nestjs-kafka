@@ -3,7 +3,6 @@ import {
   KafkaModuleOptions,
   KafkaModuleAsyncOptions,
   KafkaOptionsFactory,
-  KAFKA_MODULE_OPTIONS,
   DEFAULT_KAFKA_CONNECTION,
   getKafkaOptionsToken,
   getKafkaClientToken,
@@ -46,10 +45,7 @@ export class KafkaModule {
     return module;
   }
 
-  /**
-   * Per-connection providers on top of the shared KafkaCoreModule.
-   * `names[0]` backs KAFKA_MODULE_OPTIONS.
-   */
+  /** Per-connection providers on top of the shared KafkaCoreModule. */
   private static build(
     names: string[],
     optionsProviders: Provider[],
@@ -63,15 +59,9 @@ export class KafkaModule {
       imports: [KafkaCoreModule],
       providers: [
         ...optionsProviders,
-        { provide: KAFKA_MODULE_OPTIONS, useExisting: optionsTokens[0] },
         ...names.flatMap((n) => this.connectionProviders(n)),
       ],
-      exports: [
-        KafkaCoreModule,
-        KAFKA_MODULE_OPTIONS,
-        ...optionsTokens,
-        ...clientTokens,
-      ],
+      exports: [KafkaCoreModule, ...optionsTokens, ...clientTokens],
     };
   }
 

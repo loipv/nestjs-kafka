@@ -98,6 +98,12 @@ describe('KafkaModule', () => {
       );
     });
 
+    it('no longer exports KAFKA_MODULE_OPTIONS', async () => {
+      expect(await import('./index')).not.toHaveProperty(
+        'KAFKA_MODULE_OPTIONS',
+      );
+    });
+
     it('no longer exposes forRootMultiple', () => {
       expect((KafkaModule as any).forRootMultiple).toBeUndefined();
     });
