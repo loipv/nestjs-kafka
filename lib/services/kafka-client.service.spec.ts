@@ -91,9 +91,10 @@ describe('KafkaClient', () => {
   describe('connections and shutdown', () => {
     const mkCore = () => ({
       connectProducer: jest.fn().mockResolvedValue(undefined),
-      getProducer: jest
-        .fn()
-        .mockReturnValue({ send: jest.fn().mockResolvedValue(undefined) }),
+      getProducer: jest.fn().mockReturnValue({
+        send: jest.fn().mockResolvedValue(undefined),
+        sendBatch: jest.fn().mockResolvedValue(undefined),
+      }),
       disconnectAll: jest.fn().mockResolvedValue(undefined),
     });
     let kafkaCore: ReturnType<typeof mkCore>;
@@ -120,6 +121,48 @@ describe('KafkaClient', () => {
         { value: 'v' },
       ]);
       expect(kafkaCore.getProducer).toHaveBeenCalledWith('analytics');
+    });
+
+    it('ConnectionBoundClient.sendMultiTopicBatch forwards its connection', async () => {
+      await new ConnectionBoundClient(client, 'analytics').sendMultiTopicBatch([
+        { topic: 't', messages: [{ value: 'v' }] },
+      ]);
+      expect(kafkaCore.connectProducer).toHaveBeenCalledWith('analytics');
+      expect(kafkaCore.getProducer).toHaveBeenCalledWith('analytics');
+    });
+
+    it('sendMultiTopicBatch serializes every topic into one producer.sendBatch call', async () => {
+      await client.sendMultiTopicBatch([
+        { topic: 'a', messages: [{ value: { n: 1 } }] },
+        { topic: 'b', messages: [{ key: '', value: 'x' }, { value: null }] },
+      ]);
+      const producer = kafkaCore.getProducer.mock.results[0].value;
+      expect(producer.sendBatch).toHaveBeenCalledTimes(1);
+      expect(producer.sendBatch).toHaveBeenCalledWith({
+        topicMessages: [
+          {
+            topic: 'a',
+            messages: [
+              expect.objectContaining({ key: null, value: '{"n":1}' }),
+            ],
+          },
+          {
+            topic: 'b',
+            messages: [
+              expect.objectContaining({ key: '', value: 'x' }),
+              expect.objectContaining({ key: null, value: null }),
+            ],
+          },
+        ],
+      });
+    });
+
+    it('send rejects when the producer cannot connect', async () => {
+      kafkaCore.connectProducer.mockRejectedValue(new Error('broker down'));
+      await expect(client.send('t', { value: 'v' })).rejects.toThrow(
+        'broker down',
+      );
+      expect(kafkaCore.getProducer).not.toHaveBeenCalled();
     });
 
     it('no longer exposes sendQueued or forConnection', () => {

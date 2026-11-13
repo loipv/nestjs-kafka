@@ -1,5 +1,7 @@
+import { Injectable, Module } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { KafkaModule } from './kafka.module';
+import { KafkaOptionsFactory } from './interfaces';
 import { KafkaCoreService } from './services/kafka-core.service';
 import {
   ConnectionBoundClient,
@@ -140,6 +142,57 @@ describe('KafkaModule', () => {
         }),
       ]);
       expect(tracingEnabled(mod)).toBe(true);
+    });
+  });
+
+  describe('forRootAsync with a class', () => {
+    let constructed = 0;
+
+    @Injectable()
+    class KafkaConfig implements KafkaOptionsFactory {
+      constructor() {
+        constructed++;
+      }
+      createKafkaOptions() {
+        return { clientId: 'cls', brokers: ['localhost:9092'] };
+      }
+    }
+
+    @Module({ providers: [KafkaConfig], exports: [KafkaConfig] })
+    class ConfigModule {}
+
+    let m: TestingModule | undefined;
+    beforeEach(() => {
+      constructed = 0;
+    });
+    afterEach(async () => {
+      await m?.close();
+      m = undefined;
+    });
+
+    it('registers the connection with useClass', async () => {
+      m = await Test.createTestingModule({
+        imports: [KafkaModule.forRootAsync({ useClass: KafkaConfig })],
+      }).compile();
+      expect(
+        m.get(KafkaCoreService, { strict: false }).getConnectionNames(),
+      ).toEqual(['default']);
+      expect(constructed).toBe(1);
+    });
+
+    it('reuses the imported factory with useExisting', async () => {
+      m = await Test.createTestingModule({
+        imports: [
+          KafkaModule.forRootAsync({
+            imports: [ConfigModule],
+            useExisting: KafkaConfig,
+          }),
+        ],
+      }).compile();
+      expect(
+        m.get(KafkaCoreService, { strict: false }).getConnectionNames(),
+      ).toEqual(['default']);
+      expect(constructed).toBe(1);
     });
   });
 

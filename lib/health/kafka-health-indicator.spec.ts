@@ -1,4 +1,6 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { HealthCheckService, TerminusModule } from '@nestjs/terminus';
 import { KafkaHealthIndicator } from './kafka-health-indicator';
 import { KafkaCoreService } from '../services/kafka-core.service';
 
@@ -199,6 +201,25 @@ describe('KafkaHealthIndicator', () => {
       });
     });
 
+    it('counts a topic whose latest offsets cannot be fetched as lag 0', async () => {
+      const admin = kafkaCore.getKafka().admin();
+      (admin.fetchOffsets as jest.Mock).mockResolvedValue([
+        { topic: 'gone', partitions: [{ partition: 0, offset: '0' }] },
+        { topic: 'ok', partitions: [{ partition: 0, offset: '0' }] },
+      ]);
+      (admin.fetchTopicOffsets as jest.Mock).mockImplementation((t: string) =>
+        t === 'gone'
+          ? Promise.reject(new Error('unknown topic'))
+          : Promise.resolve([{ partition: 0, offset: '7' }]),
+      );
+
+      const result = await healthIndicator.checkConsumerLag('lag', 'g', 1000);
+
+      expect(result).toEqual({
+        lag: { status: 'up', groupId: 'g', lag: 7, maxLag: 1000 },
+      });
+    });
+
     it('returns down when the fetch fails', async () => {
       const admin = kafkaCore.getKafka().admin();
       (admin.connect as jest.Mock).mockRejectedValue(new Error('Fetch failed'));
@@ -217,14 +238,47 @@ describe('KafkaHealthIndicator', () => {
     });
   });
 
-  describe('without TerminusModule (fallback)', () => {
-    it('works without HealthIndicatorService', () => {
-      // The test setup doesn't provide HealthIndicatorService
-      // so it should use the fallback implementation
+  describe('with Terminus HealthCheckService', () => {
+    const terminusCheck = async () => {
+      const mod = await Test.createTestingModule({
+        imports: [TerminusModule.forRoot({ logger: false })],
+        providers: [
+          KafkaHealthIndicator,
+          { provide: KafkaCoreService, useValue: kafkaCore },
+        ],
+      }).compile();
+      const health = mod.get(HealthCheckService);
+      const indicator = mod.get(KafkaHealthIndicator);
+      try {
+        return await health.check([() => indicator.isHealthy('kafka')]);
+      } finally {
+        await mod.close();
+      }
+    };
 
-      const result = healthIndicator.isHealthy('kafka');
+    it('reports ok when ready', async () => {
+      consumers = { 'default:g': 'running' };
+      await expect(terminusCheck()).resolves.toMatchObject({
+        status: 'ok',
+        info: { kafka: { status: 'up' } },
+      });
+    });
 
-      expect(result.kafka.status).toBe('up');
+    it('fails the check with the not-ready message', async () => {
+      producers = { default: false };
+      const error = await terminusCheck().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ServiceUnavailableException);
+      expect(
+        (error as ServiceUnavailableException).getResponse(),
+      ).toMatchObject({
+        status: 'error',
+        error: {
+          kafka: {
+            status: 'down',
+            message: 'Not ready: producer "default" not connected',
+          },
+        },
+      });
     });
   });
 });

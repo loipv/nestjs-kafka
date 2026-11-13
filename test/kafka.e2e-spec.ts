@@ -556,6 +556,60 @@ describe('Kafka e2e (testcontainers)', () => {
     }
   }, 120_000);
 
+  it('rebalance during a retry backoff resumes the partition', async () => {
+    let failures = 0;
+    let successes = 0;
+    const handle = (msg: any) => {
+      if (msg.value?.id !== 'A') return;
+      if (failures === 0) {
+        failures++;
+        throw new Error('first delivery fails');
+      }
+      successes++;
+    };
+    const options = {
+      groupId: 'e2e-rb-g',
+      fromBeginning: true,
+      allowAutoTopicCreation: true,
+      retry: { initialRetryTime: 30_000, maxRetryTime: 30_000 },
+    };
+
+    @Injectable()
+    class FirstMember {
+      @Consumer('e2e-rebalance', options)
+      async handle(msg: any) {
+        handle(msg);
+      }
+    }
+
+    // Same group, another topic: joining forces a rebalance that revokes and
+    // re-assigns e2e-rebalance to the first member (its only subscriber).
+    @Injectable()
+    class SecondMember {
+      @Consumer('e2e-rebalance-other', options)
+      async handle() {}
+    }
+
+    const app1 = await createApp([FirstMember]);
+    let app2: Awaited<ReturnType<typeof createApp>> | undefined;
+    try {
+      await app1.get(KafkaClient).send('e2e-rebalance', { value: { id: 'A' } });
+      await waitFor(() => failures === 1);
+      const t1 = Date.now();
+
+      // The revoke resumes the paused partition and drops its retry state, so
+      // after the re-assign A is redelivered without the 30s backoff.
+      app2 = await createApp([SecondMember]);
+      await waitFor(() => successes === 1, 25_000);
+      await new Promise((r) => setTimeout(r, 3000));
+      expect(successes).toBe(1);
+      expect(Date.now() - t1).toBeLessThan(30_000);
+    } finally {
+      await app2?.close();
+      await app1.close();
+    }
+  }, 90_000);
+
   it('dead-letters a non-UTF-8 payload byte-for-byte', async () => {
     const payload = Buffer.from([0xff, 0x00, 0xfe, 0x80]);
     const key = Buffer.from([0x80, 0x81]);

@@ -552,14 +552,22 @@ describe('consumer groups', () => {
         { idempotency },
       );
       const resolveOffset = jest.fn();
+      const pause = jest.fn(() => jest.fn());
 
       await expect(
         config().eachBatch(
-          batchPayload(['1', '2', '3', '4'].map(mkMsg), resolveOffset),
+          batchPayload(
+            ['1', '2', '3', '4'].map(mkMsg),
+            resolveOffset,
+            undefined,
+            pause,
+          ),
         ),
       ).rejects.toThrow('x');
       expect(handler).toHaveBeenCalledTimes(1);
       expect(resolveOffset.mock.calls).toEqual([['2']]);
+      // Only the failing second chunk pauses, never the all-duplicate first one
+      expect(pause).toHaveBeenCalledTimes(1);
     });
 
     it('eachBatch: DLQ complete dead-letters only the handled messages and resolves the chunk', async () => {
