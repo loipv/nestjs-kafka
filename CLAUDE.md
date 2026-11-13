@@ -96,7 +96,7 @@ scripts/check-specs.mjs              # One spec per source file (npm run check:s
   - Multi-connection: one `forRoot()`/`forRootAsync()` call per named connection; the same name registered again with different options fails at startup (identical options are accepted)
   - Producer options are passed to the client inside its `kafkaJS` block; numeric `compression` is mapped to a codec name
 - **ConsumerModule**: Auto-discovers and registers consumer methods on app startup (`autoStart: false` defers starting to `ConsumerRegistryService.startAll()`)
-  - Discovery: static (singleton) providers only, each instance once (a `useExisting` alias is the same instance), `@Consumer` methods along the prototype chain (nearest name wins), descriptor-only reads; request-scoped and transient providers with `@Consumer` are skipped with a warning (a transient wrapper's instance never ran its constructor)
+  - Discovery: static (singleton) providers only, each instance once (a `useExisting` alias is the same instance), `@Consumer` methods along the prototype chain (nearest name wins), descriptor-only reads; request-scoped, request-scoped-dependent and transient providers with `@Consumer` are skipped with a warning naming the reason (a transient wrapper's instance never ran its constructor)
   - Use `forRoot(options?)` in app module with optional default options
   - All `@Consumer()` decorated methods are automatically discovered via NestJS DiscoveryService
   - Default options are merged with `@Consumer` decorator options (decorator takes precedence)
@@ -174,7 +174,7 @@ async handleLogs(message: KafkaMessage) {
 
 ### Retry Mechanism With DLQ
 
-When **using DLQ**, failed messages are sent to the DLQ topic after `dlq.maxRetries` (batch consumers too: the exhausted chunk minus idempotency-filtered messages). `DlqService.sendToDlq` sends one message per `kafkaClient.send` in parallel and records each success in the delivery's `PartitionRetryTracker.deadLettered(attemptKey)` set, so a retry after a partial failure only sends what did not arrive. Values and keys are sent unchanged (Buffers byte-exact). The message is NOT skipped or dropped: if the DLQ send fails or times out, it is retried with the same backoff. Reprocessing the DLQ is the application's job (an ordinary `@Consumer` on the DLQ topic).
+When **using DLQ**, failed messages are sent to the DLQ topic after `dlq.maxRetries` (batch consumers too: the exhausted chunk minus idempotency-filtered messages). `DlqService.sendToDlq` sends one message per `kafkaClient.send` in parallel and records each success in the delivery's `PartitionRetryTracker.deadLettered(attemptKey)` set, so a retry after a partial failure only sends what did not arrive. The registry passes that set only to an attempt past `dlq.maxRetries` (`DEFAULT_DLQ_MAX_RETRIES` = 3), and DLQ sends use `KafkaClient.sendSilently` (no per-message error log; `DlqService` logs one aggregate error). Values and keys are sent unchanged (Buffers byte-exact). The message is NOT skipped or dropped: if the DLQ send fails or times out, it is retried with the same backoff. Reprocessing the DLQ is the application's job (an ordinary `@Consumer` on the DLQ topic).
 
 ### Graceful Shutdown
 

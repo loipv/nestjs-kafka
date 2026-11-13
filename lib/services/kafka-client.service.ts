@@ -37,6 +37,28 @@ export class KafkaClient implements OnApplicationShutdown {
     message: ProducerMessage,
     options?: SendOptions,
   ): Promise<void> {
+    return this.sendOne(topic, message, options, true);
+  }
+
+  /**
+   * `send()` without the error log: for callers that aggregate failures
+   * themselves (the DLQ logs one line per failed chunk).
+   * @internal
+   */
+  async sendSilently(
+    topic: string,
+    message: ProducerMessage,
+    options?: SendOptions,
+  ): Promise<void> {
+    return this.sendOne(topic, message, options, false);
+  }
+
+  private async sendOne(
+    topic: string,
+    message: ProducerMessage,
+    options: SendOptions | undefined,
+    logFailure: boolean,
+  ): Promise<void> {
     const connectionName = options?.connection || DEFAULT_KAFKA_CONNECTION;
     await this.kafkaCore.connectProducer(connectionName);
 
@@ -63,10 +85,12 @@ export class KafkaClient implements OnApplicationShutdown {
       this.logger.debug(`[${connectionName}] Message sent to topic: ${topic}`);
       this.tracingService?.endProduceSpan(span);
     } catch (error) {
-      this.logger.error(
-        `[${connectionName}] Failed to send message to topic: ${topic}`,
-        error,
-      );
+      if (logFailure) {
+        this.logger.error(
+          `[${connectionName}] Failed to send message to topic: ${topic}`,
+          error,
+        );
+      }
       this.tracingService?.endProduceSpan(span, error as Error);
       throw error;
     }

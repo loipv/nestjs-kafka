@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConnectionBoundClient, KafkaClient } from './kafka-client.service';
 
 // The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
@@ -155,6 +156,24 @@ describe('KafkaClient', () => {
           },
         ],
       });
+    });
+
+    it('sendSilently rejects without logging the failure', async () => {
+      const error = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        kafkaCore.getProducer.mockReturnValue({
+          send: jest.fn().mockRejectedValue(new Error('down')),
+        });
+        await expect(
+          client.sendSilently('t', { value: 'v' }, { connection: 'dlq' }),
+        ).rejects.toThrow('down');
+        expect(kafkaCore.getProducer).toHaveBeenCalledWith('dlq');
+        expect(error).not.toHaveBeenCalled();
+      } finally {
+        error.mockRestore();
+      }
     });
 
     it('send rejects when the producer cannot connect', async () => {

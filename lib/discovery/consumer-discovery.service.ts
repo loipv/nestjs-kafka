@@ -103,15 +103,17 @@ export class ConsumerDiscoveryService {
    * (a transient wrapper's instance never ran its constructor), so they are
    * not registered.
    */
-  warnSkipped(metatypes: unknown[]): void {
-    for (const metatype of new Set(metatypes)) {
-      if (typeof metatype !== 'function') continue;
+  warnSkipped(skipped: Array<{ metatype: unknown; reason: string }>): void {
+    const seen = new Set<unknown>();
+    for (const { metatype, reason } of skipped) {
+      if (typeof metatype !== 'function' || seen.has(metatype)) continue;
+      seen.add(metatype);
       const prototype = (metatype as { prototype?: unknown }).prototype;
       if (!prototype || typeof prototype !== 'object') continue;
       const className = this.className(prototype);
       for (const { methodName } of this.consumerMethods(prototype)) {
         this.logger.warn(
-          `Skipping consumer ${className}.${methodName}: request-scoped and transient providers cannot consume`,
+          `Skipping consumer ${className}.${methodName}: ${reason} cannot consume`,
         );
       }
     }

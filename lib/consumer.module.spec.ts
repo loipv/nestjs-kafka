@@ -215,7 +215,41 @@ describe('ConsumerModule', () => {
       const groups = (mod.get(ConsumerRegistryService) as any).consumerGroups;
       expect([...groups.keys()]).toEqual([]);
       expect(warn).toHaveBeenCalledWith(
-        'Skipping consumer Fleeting.h: request-scoped and transient providers cannot consume',
+        'Skipping consumer Fleeting.h: transient providers cannot consume',
+      );
+    } finally {
+      warn.mockRestore();
+      startAll.mockRestore();
+      await mod.close();
+    }
+  });
+
+  it('names a request-scoped dependency as the reason a consumer is skipped', async () => {
+    @Injectable({ scope: Scope.REQUEST })
+    class PerRequest {}
+    @Injectable()
+    class Dependent {
+      constructor(readonly perRequest: PerRequest) {}
+      @Consumer('dependent')
+      async h() {}
+    }
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const startAll = jest
+      .spyOn(ConsumerRegistryService.prototype, 'startAll')
+      .mockResolvedValue();
+    const mod = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [PerRequest, Dependent],
+    }).compile();
+    try {
+      await mod.init();
+      expect(warn).toHaveBeenCalledWith(
+        'Skipping consumer Dependent.h: providers that depend on a request-scoped provider cannot consume',
       );
     } finally {
       warn.mockRestore();
@@ -248,7 +282,7 @@ describe('ConsumerModule', () => {
       const groups = (mod.get(ConsumerRegistryService) as any).consumerGroups;
       expect([...groups.keys()]).toEqual([]);
       expect(warn).toHaveBeenCalledWith(
-        'Skipping consumer Scoped.h: request-scoped and transient providers cannot consume',
+        'Skipping consumer Scoped.h: request-scoped providers cannot consume',
       );
     } finally {
       warn.mockRestore();

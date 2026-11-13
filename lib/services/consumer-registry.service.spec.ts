@@ -356,6 +356,29 @@ describe('consumer groups', () => {
       expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
     });
 
+    it('creates no DLQ sent set while attempts are within dlq.maxRetries', async () => {
+      jest.useFakeTimers();
+      try {
+        const dlqService = {
+          handleFailure: jest
+            .fn()
+            .mockResolvedValue({ action: 'retry', delayMs: 10 }),
+        };
+        const { config, registry } = await started(
+          { dlq: { topic: 'd', maxRetries: 2 } },
+          jest.fn().mockRejectedValue(new Error('x')),
+          { dlqService },
+        );
+        await expect(config().eachMessage(messagePayload('5'))).rejects.toThrow(
+          'x',
+        );
+        expect(dlqService.handleFailure.mock.calls[0][8]).toBeUndefined();
+        expect((registry as any).retryTracker.sent.size).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('the DLQ path receives the tracker sent set for the delivery', async () => {
       jest.useFakeTimers();
       try {
@@ -365,7 +388,7 @@ describe('consumer groups', () => {
             .mockResolvedValue({ action: 'retry', delayMs: 10 }),
         };
         const { config } = await started(
-          { dlq: { topic: 'd' } },
+          { dlq: { topic: 'd', maxRetries: 0 } },
           jest.fn().mockRejectedValue(new Error('x')),
           { dlqService },
         );

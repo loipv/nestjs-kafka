@@ -7,6 +7,7 @@ import {
   Provider,
   Inject,
   Optional,
+  Scope,
 } from '@nestjs/common';
 import { DiscoveryModule, DiscoveryService } from '@nestjs/core';
 import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service';
@@ -112,8 +113,9 @@ export class ConsumerModule
   }
 
   /**
-   * Consumers start after every provider's onModuleInit (database pools,
-   * caches...), so the first message never reaches a half-initialised app.
+   * Discover and register consumers, then start them unless
+   * `autoStart: false`. Every provider's onModuleInit has run; other modules'
+   * onApplicationBootstrap may not have (Nest bootstraps global modules first).
    */
   async onApplicationBootstrap(): Promise<void> {
     // Only start once per instance
@@ -132,7 +134,14 @@ export class ConsumerModule
     this.discoveryService.warnSkipped(
       wrappers
         .filter((wrapper) => !isSingleton(wrapper))
-        .map((wrapper): unknown => wrapper.metatype),
+        .map((wrapper) => ({
+          metatype: wrapper.metatype as unknown,
+          reason: wrapper.isTransient
+            ? 'transient providers'
+            : wrapper.scope === Scope.REQUEST
+              ? 'request-scoped providers'
+              : 'providers that depend on a request-scoped provider',
+        })),
     );
     const consumers = this.discoveryService.discoverFromProviders(
       wrappers.filter(isSingleton).map((wrapper): unknown => wrapper.instance),
@@ -152,7 +161,7 @@ export class ConsumerModule
   }
 
   // Only resets the start guard. ConsumerRegistryService disconnects the
-  // consumers in its own onApplicationShutdown; nothing is restarted here.
+  // consumers earlier, in its own onModuleDestroy; nothing is restarted here.
   onApplicationShutdown(): void {
     this.isStarted = false;
   }

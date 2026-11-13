@@ -15,7 +15,7 @@ const mkMsg = (over: Record<string, unknown> = {}) =>
   }) as any;
 
 function makeService() {
-  const kafkaClient = { send: jest.fn().mockResolvedValue(undefined) };
+  const kafkaClient = { sendSilently: jest.fn().mockResolvedValue(undefined) };
   const svc = new DlqService(kafkaClient as any);
   return { svc, kafkaClient };
 }
@@ -76,7 +76,7 @@ describe('DlqService.handleFailure (verdict API)', () => {
       4,
     );
     expect(v).toEqual({ action: 'complete' });
-    expect(kafkaClient.send).toHaveBeenCalledWith(
+    expect(kafkaClient.sendSilently).toHaveBeenCalledWith(
       'orders-dlq',
       expect.objectContaining({
         headers: expect.objectContaining({
@@ -98,7 +98,7 @@ describe('DlqService.handleFailure (verdict API)', () => {
       'clusterA',
       1,
     );
-    expect(kafkaClient.send).toHaveBeenCalledWith(
+    expect(kafkaClient.sendSilently).toHaveBeenCalledWith(
       'orders-dlq',
       expect.anything(),
       { connection: 'dlqCluster' },
@@ -107,7 +107,7 @@ describe('DlqService.handleFailure (verdict API)', () => {
 
   it('returns retry, not a rejection, when the DLQ send fails', async () => {
     const { svc, kafkaClient } = makeService();
-    kafkaClient.send.mockRejectedValue(new Error('dlq down'));
+    kafkaClient.sendSilently.mockRejectedValue(new Error('dlq down'));
     const v = await svc.handleFailure(
       [mkMsg()],
       new Error('x'),
@@ -138,7 +138,7 @@ describe('DlqService.sendToDlq', () => {
       't',
       1,
     );
-    const sent = kafkaClient.send.mock.calls[0][1];
+    const sent = kafkaClient.sendSilently.mock.calls[0][1];
     expect(Buffer.isBuffer(sent.value)).toBe(true);
     expect(sent.value.equals(Buffer.from([0xff, 0x00, 0xfe]))).toBe(true);
     expect(Buffer.isBuffer(sent.key)).toBe(true);
@@ -154,8 +154,8 @@ describe('DlqService.sendToDlq', () => {
       't',
       1,
     );
-    expect(kafkaClient.send).toHaveBeenCalledTimes(2);
-    const sent = kafkaClient.send.mock.calls.map((call) => call[1]);
+    expect(kafkaClient.sendSilently).toHaveBeenCalledTimes(2);
+    const sent = kafkaClient.sendSilently.mock.calls.map((call) => call[1]);
     for (const m of sent) {
       expect(m.headers['x-dlq-original-topic']).toBe('t');
     }
@@ -164,7 +164,7 @@ describe('DlqService.sendToDlq', () => {
   it('times out a send that never settles', async () => {
     jest.useFakeTimers();
     const { svc, kafkaClient } = makeService();
-    kafkaClient.send.mockReturnValue(new Promise(() => {}));
+    kafkaClient.sendSilently.mockReturnValue(new Promise(() => {}));
     const p = svc.sendToDlq(
       [mkMsg()],
       new Error('x'),
@@ -196,7 +196,7 @@ describe('DlqService.sendToDlq', () => {
         mkMsg({ offset, value: Buffer.from(offset) }),
       );
       const offsetOf = (call: any[]) => String(call[1].value);
-      kafkaClient.send.mockImplementation((_t: string, record: any) =>
+      kafkaClient.sendSilently.mockImplementation((_t: string, record: any) =>
         String(record.value) === '2'
           ? Promise.reject(new Error('partition down'))
           : Promise.resolve(),
@@ -220,8 +220,8 @@ describe('DlqService.sendToDlq', () => {
         'DLQ send failed for 1 of 3 message(s): Error: partition down',
       );
 
-      kafkaClient.send.mockClear();
-      kafkaClient.send.mockResolvedValue(undefined);
+      kafkaClient.sendSilently.mockClear();
+      kafkaClient.sendSilently.mockResolvedValue(undefined);
       const second = await svc.handleFailure(
         messages,
         new Error('x'),
@@ -234,7 +234,7 @@ describe('DlqService.sendToDlq', () => {
         sent,
       );
       expect(second).toEqual({ action: 'complete' });
-      expect(kafkaClient.send.mock.calls.map(offsetOf)).toEqual(['2']);
+      expect(kafkaClient.sendSilently.mock.calls.map(offsetOf)).toEqual(['2']);
     } finally {
       error.mockRestore();
     }
@@ -254,6 +254,6 @@ describe('DlqService.sendToDlq', () => {
       new Set(['1', '2']),
     );
     expect(v).toEqual({ action: 'complete' });
-    expect(kafkaClient.send).not.toHaveBeenCalled();
+    expect(kafkaClient.sendSilently).not.toHaveBeenCalled();
   });
 });

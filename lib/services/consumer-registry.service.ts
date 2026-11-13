@@ -16,7 +16,7 @@ type EachBatchPayload = KafkaJS.EachBatchPayload;
 type EachMessagePayload = KafkaJS.EachMessagePayload;
 import { BatchProcessorService } from './batch-processor.service';
 import { IdempotencyService } from './idempotency.service';
-import { DlqService } from './dlq.service';
+import { DlqService, DEFAULT_DLQ_MAX_RETRIES } from './dlq.service';
 import { TracingService } from './tracing.service';
 import { PartitionRetryTracker } from './partition-retry-tracker';
 import {
@@ -129,6 +129,11 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     return merged;
   }
 
+  /**
+   * Register discovered consumers (ConsumerModule calls this at bootstrap).
+   * @internal Not for application use: a group registered after startAll()
+   * is never started.
+   */
   registerConsumers(consumers: ConsumerMetadata[]): void {
     this.registered = true;
     // Group consumers by groupId
@@ -279,6 +284,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
    * Startup failed: close the consumers that did start and every producer.
    * Nest skips shutdown hooks when initialisation fails, so without this the
    * open clients keep the process alive.
+   * @internal Closes the producers for good; startAll() calls it on failure.
    */
   async abortStartup(): Promise<void> {
     await this.gracefulShutdown();
@@ -901,7 +907,10 @@ export class ConsumerRegistryService implements OnModuleDestroy {
           group.connection,
           attempt,
           this.maxRetryDelay(options.retry),
-          this.retryTracker.deadLettered(attemptKey),
+          // Only an attempt that dead-letters needs the sent set
+          attempt > (options.dlq.maxRetries ?? DEFAULT_DLQ_MAX_RETRIES)
+            ? this.retryTracker.deadLettered(attemptKey)
+            : undefined,
         ) // never rejects: a failed DLQ send returns a retry verdict
       : this.evaluateRetry(attempt, options);
 
@@ -1018,7 +1027,10 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     return { action: 'complete' };
   }
 
-  /** Idempotent: every call returns the first call's promise. */
+  /**
+   * Idempotent: every call returns the first call's promise.
+   * @internal Runs from onModuleDestroy; consumers cannot be restarted after it.
+   */
   gracefulShutdown(): Promise<void> {
     this.shutdownPromise ??= this.shutdown();
     return this.shutdownPromise;

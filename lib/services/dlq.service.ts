@@ -18,6 +18,9 @@ export const DLQ_HEADERS = {
 const DEFAULT_SEND_TIMEOUT_MS = 30000;
 const MAX_HEADER_LENGTH = 1000;
 
+/** `dlq.maxRetries` when not set */
+export const DEFAULT_DLQ_MAX_RETRIES = 3;
+
 @Injectable()
 export class DlqService {
   private readonly logger = new Logger(DlqService.name);
@@ -44,7 +47,7 @@ export class DlqService {
     maxDelayMs: number = MAX_RETRY_DELAY_MS,
     sent: Set<string> = new Set(),
   ): Promise<RetryVerdict> {
-    const maxRetries = options.maxRetries ?? 3;
+    const maxRetries = options.maxRetries ?? DEFAULT_DLQ_MAX_RETRIES;
     const delayMs = this.retryDelay(attempt, options, maxDelayMs);
 
     if (attempt <= maxRetries) {
@@ -118,7 +121,7 @@ export class DlqService {
     const sendAll = async () => {
       const results = await Promise.allSettled(
         records.map((record) =>
-          this.kafkaClient.send(
+          this.kafkaClient.sendSilently(
             options.topic,
             record,
             target ? { connection: target } : undefined,

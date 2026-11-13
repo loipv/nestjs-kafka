@@ -7,7 +7,8 @@ Fix a startup failure with aliased consumer providers, make shutdown and startup
 Fixes:
 
 - A consumer provider also exposed through `useExisting` no longer fails startup with "already has a handler for topic".
-- `@Consumer` methods declared on a base class are discovered; request-scoped and transient consumer providers are skipped with a warning instead of registering a handler without its dependencies.
+- `@Consumer` methods declared on a base class are discovered (registering both a base class and its subclass as providers now fails at startup: they handle the same topic); request-scoped, request-scoped-dependent and transient consumer providers are skipped with a warning naming the reason instead of registering a handler without its dependencies.
+- A failed DLQ chunk logs one aggregate error instead of one error per message.
 - Consumers always stop before producers disconnect, whatever the import order of `KafkaModule` and `ConsumerModule`.
 - A partially failed DLQ send only re-sends the messages that did not arrive.
 - A synchronous commit (`autoCommit: false`) waits at most 10s.
