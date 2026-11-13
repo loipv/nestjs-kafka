@@ -293,7 +293,7 @@ await app.listen(3000);
 await app.get(ConsumerRegistryService).startAll();
 ```
 
-With `autoStart: false`, discovery and option checks still run at bootstrap (a bad option still fails startup). `startAll()` can be called more than once; if starting fails it closes what it started (consumers and producers) and rejects.
+With `autoStart: false`, discovery and option checks still run at bootstrap (a bad option still fails startup). `startAll()` can be called more than once; if starting fails it closes what it started (consumers and producers) and rejects. It rejects when called before the application is initialised (call it after `app.init()` / `app.listen()`, not right after `NestFactory.create()`) and once shutdown has begun; a shutdown that arrives while consumers are starting stops them.
 
 With the default `autoStart: true`, exit the process when bootstrap fails (`bootstrap().catch(() => process.exit(1))`): Nest skips shutdown hooks after a failed initialisation, so started consumers would keep the process alive.
 
@@ -301,7 +301,7 @@ On shutdown, consumers stop in `onModuleDestroy` and producers disconnect in `on
 
 ### Consumer discovery
 
-Every `@Consumer` method on a singleton provider is discovered, including methods inherited from a base class (a subclass override without `@Consumer` is not a consumer). A provider also exposed under another token (`useExisting`) is registered once. Request-scoped providers cannot consume: they are skipped with a warning.
+Every `@Consumer` method on a singleton provider is discovered, including methods inherited from a base class (a subclass override without `@Consumer` is not a consumer). A provider also exposed under another token (`useExisting`) is registered once. Request-scoped and transient providers cannot consume (Nest has no fully built instance for them at bootstrap): they are skipped with a warning.
 
 ### Multi-Connection (Multiple Kafka Clusters)
 
@@ -1083,10 +1083,10 @@ v2.0.0 removes features that did not work as documented or added risk without be
 - Producers of several connections disconnect in parallel on shutdown.
 - The published type declarations keep their JSDoc (descriptions and defaults show in the editor).
 - A consumer provider also exposed through `useExisting` no longer fails startup with "already has a handler for topic".
-- `@Consumer` methods declared on a base class are discovered (they were silently ignored); request-scoped consumer providers are skipped with a warning instead of registering a handler without its dependencies.
+- `@Consumer` methods declared on a base class are discovered (they were silently ignored); request-scoped and transient consumer providers are skipped with a warning instead of registering a handler without its dependencies.
 - Consumers always stop before producers disconnect, whatever the import order of `KafkaModule` and `ConsumerModule`.
 - A partially failed DLQ send only re-sends the messages that did not arrive.
-- A synchronous commit (`autoCommit: false`) waits at most 10s (a hung commit used to block the worker and `app.close()`), and a partition revoked during a delivery is not committed by the old owner.
+- A synchronous commit (`autoCommit: false`) waits at most 10s (a hung commit used to block the worker and `app.close()`).
 
 ### Changed behaviour
 

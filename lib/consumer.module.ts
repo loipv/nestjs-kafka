@@ -124,20 +124,21 @@ export class ConsumerModule
 
     // Auto-discover @Consumer() methods on every provider (resolved in its
     // own module scope with its dependencies already injected).
-    // Only static providers have a real instance at bootstrap.
+    // Only singletons have a real instance at bootstrap: request-scoped trees
+    // have none, and a transient wrapper's instance never ran its constructor.
     const wrappers = this.nestDiscoveryService.getProviders();
+    const isSingleton = (wrapper: (typeof wrappers)[number]) =>
+      wrapper.isDependencyTreeStatic() && !wrapper.isTransient;
     this.discoveryService.warnSkipped(
       wrappers
-        .filter((wrapper) => !wrapper.isDependencyTreeStatic())
+        .filter((wrapper) => !isSingleton(wrapper))
         .map((wrapper): unknown => wrapper.metatype),
     );
     const consumers = this.discoveryService.discoverFromProviders(
-      wrappers
-        .filter((wrapper) => wrapper.isDependencyTreeStatic())
-        .map((wrapper): unknown => wrapper.instance),
+      wrappers.filter(isSingleton).map((wrapper): unknown => wrapper.instance),
     );
 
-    if (consumers.length === 0) return;
+    // Always register (even nothing): startAll() refuses to run before it
     try {
       this.registryService.registerConsumers(consumers);
     } catch (error) {

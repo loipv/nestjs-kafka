@@ -7,10 +7,10 @@ Fix a startup failure with aliased consumer providers, make shutdown and startup
 Fixes:
 
 - A consumer provider also exposed through `useExisting` no longer fails startup with "already has a handler for topic".
-- `@Consumer` methods declared on a base class are discovered; request-scoped consumer providers are skipped with a warning instead of registering a handler without its dependencies.
+- `@Consumer` methods declared on a base class are discovered; request-scoped and transient consumer providers are skipped with a warning instead of registering a handler without its dependencies.
 - Consumers always stop before producers disconnect, whatever the import order of `KafkaModule` and `ConsumerModule`.
 - A partially failed DLQ send only re-sends the messages that did not arrive.
-- A synchronous commit (`autoCommit: false`) waits at most 10s, and a partition revoked during a delivery is not committed by the old owner.
+- A synchronous commit (`autoCommit: false`) waits at most 10s.
 - `checkConsumerLag` lists topics whose offsets cannot be read in `unreadableTopics` instead of counting them as lag 0.
 
 Features:
@@ -22,5 +22,5 @@ Breaking changes:
 
 - `KAFKA_MODULE_OPTIONS` is removed: inject `getKafkaOptionsToken(name)` (`getKafkaOptionsToken()` for the default connection).
 - `ConsumerRegistryService` stops consumers in `onModuleDestroy` (was `onApplicationShutdown`).
-- `ConsumerRegistryService.startAll()` is memoised and closes started consumers and producers before rejecting.
+- `ConsumerRegistryService.startAll()` is memoised, closes started consumers and producers before rejecting, rejects before the application is initialised and once shutdown has begun (a start racing a shutdown stops instead of leaving a consumer running).
 - DLQ sends go out one message per send; `DlqService.handleFailure()` / `sendToDlq()` take an optional `sent` set.

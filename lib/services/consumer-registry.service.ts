@@ -82,8 +82,8 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   private isShuttingDown = false;
   private shutdownPromise?: Promise<void>;
   private startPromise?: Promise<void>;
-  /** Bumped per partition on revoke: a delivery that spans one skips its commit */
-  private readonly revokeGenerations = new Map<string, number>();
+  /** Set by registerConsumers(): startAll() before discovery is an error */
+  private registered = false;
   private readonly retryTracker = new PartitionRetryTracker();
 
   constructor(
@@ -130,6 +130,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   }
 
   registerConsumers(consumers: ConsumerMetadata[]): void {
+    this.registered = true;
     // Group consumers by groupId
     for (const metadata of consumers) {
       this.registerConsumer(metadata);
@@ -246,12 +247,18 @@ export class ConsumerRegistryService implements OnModuleDestroy {
    * (abortStartup) before rejecting with the first error.
    */
   async startAll(): Promise<void> {
+    if (!this.registered) {
+      throw new Error(
+        'startAll() called before the application was initialised (call app.init() or app.listen() first)',
+      );
+    }
     this.startPromise ??= this.start();
     return this.startPromise;
   }
 
   /** Start every group once; on failure close what started, then reject. */
   private async start(): Promise<void> {
+    if (this.isShuttingDown) throw new Error('Consumers are shutting down');
     const results = await Promise.allSettled(
       Array.from(this.consumerGroups.values()).map((group) =>
         this.startConsumerGroup(group),
@@ -380,12 +387,6 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       PartitionRetryTracker.partitionKey(group.groupKey, topic, partition),
     );
     this.retryTracker.revoke(partitionKeys);
-    for (const key of partitionKeys) {
-      this.revokeGenerations.set(
-        key,
-        (this.revokeGenerations.get(key) ?? 0) + 1,
-      );
-    }
 
     const byTopic = new Map<string, number[]>();
     for (const { topic, partition } of assignment) {
@@ -410,6 +411,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
 
     try {
       await consumer.connect();
+      this.throwIfShuttingDown();
 
       // Subscribe to all topics in this group
       const topicList = Array.from(topics.keys());
@@ -440,6 +442,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
         await consumer.subscribe({ topic });
         // Note: fromBeginning is configured at consumer level in confluent-kafka-javascript
       }
+      this.throwIfShuttingDown();
 
       this.logger.log(
         `Consumer group "${groupId}" subscribed to topics: ${topicList.join(', ')}`,
@@ -451,13 +454,21 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       } else {
         await this.startMessageGroupConsumer(group);
       }
+      this.throwIfShuttingDown();
 
       group.isRunning = true;
       this.kafkaCore.setConsumerStatus(group.groupKey, 'running');
       this.logger.log(`Started consumer group: ${groupId}`);
     } catch (error) {
-      this.logger.error(`Failed to start consumer group: ${groupId}`, error);
-      this.kafkaCore.setConsumerStatus(group.groupKey, 'failed');
+      if (this.isShuttingDown) {
+        this.logger.warn(
+          `Start of consumer group "${groupId}" stopped by shutdown`,
+        );
+        this.kafkaCore.setConsumerStatus(group.groupKey, 'stopped');
+      } else {
+        this.logger.error(`Failed to start consumer group: ${groupId}`, error);
+        this.kafkaCore.setConsumerStatus(group.groupKey, 'failed');
+      }
       try {
         await consumer.disconnect();
       } catch (disconnectError) {
@@ -466,8 +477,15 @@ export class ConsumerRegistryService implements OnModuleDestroy {
           disconnectError,
         );
       }
+      // Already disconnected: shutdown() must not touch it (or its status) again
+      group.consumer = undefined;
       throw error;
     }
+  }
+
+  /** A start racing a shutdown stops at its next step (no orphan consumer). */
+  private throwIfShuttingDown(): void {
+    if (this.isShuttingDown) throw new Error('Consumers are shutting down');
   }
 
   /** Run config shared by message and batch groups. */
@@ -493,26 +511,12 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       // commits on close — the message would be lost.
       if (this.isShuttingDown) throw new Error('Consumer is shutting down');
 
-      const { topic, partition, message } = payload;
-      const partitionKey = PartitionRetryTracker.partitionKey(
-        group.groupKey,
-        topic,
-        partition,
-      );
-      const generation = this.revokeGenerations.get(partitionKey) ?? 0;
-
       // Throws (after pausing the partition) when the message must be retried
       await this.processMessage(group, payload);
 
       // With auto-commit off the client never commits on its own
       if (group.options.autoCommit === false) {
-        // Revoked meanwhile: the new owner commits; ours could move it back
-        if ((this.revokeGenerations.get(partitionKey) ?? 0) !== generation) {
-          this.logger.debug(
-            `Skipping commit of ${topic}[${partition}]@${message.offset}: partition revoked during delivery`,
-          );
-          return;
-        }
+        const { topic, partition, message } = payload;
         await this.commitMessageOffset(
           consumer,
           topic,
@@ -1030,9 +1034,11 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     const shutdownPromises = Array.from(this.consumerGroups.values()).map(
       async (group) => {
         try {
-          if (group.isRunning) {
+          // Also a group still starting: startConsumerGroup stops at its
+          // next step, and this disconnect covers a connect already done.
+          if (group.consumer) {
             // Note: stop() is not supported in confluent-kafka-javascript, use disconnect() directly
-            await group.consumer?.disconnect();
+            await group.consumer.disconnect();
             this.kafkaCore.setConsumerStatus(group.groupKey, 'stopped');
           }
         } catch (error) {

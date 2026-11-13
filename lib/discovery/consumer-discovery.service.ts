@@ -98,9 +98,10 @@ export class ConsumerDiscoveryService {
   }
 
   /**
-   * Warn about @Consumer methods on non-static providers (request-scoped, or
-   * depending on one): Nest has no real instance for them at bootstrap, so
-   * they are not registered.
+   * Warn about @Consumer methods on request-scoped (or depending on one) and
+   * transient providers: Nest has no real instance for them at bootstrap
+   * (a transient wrapper's instance never ran its constructor), so they are
+   * not registered.
    */
   warnSkipped(metatypes: unknown[]): void {
     for (const metatype of new Set(metatypes)) {
@@ -110,7 +111,7 @@ export class ConsumerDiscoveryService {
       const className = this.className(prototype);
       for (const { methodName } of this.consumerMethods(prototype)) {
         this.logger.warn(
-          `Skipping consumer ${className}.${methodName}: request-scoped providers cannot consume`,
+          `Skipping consumer ${className}.${methodName}: request-scoped and transient providers cannot consume`,
         );
       }
     }

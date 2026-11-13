@@ -191,6 +191,39 @@ describe('ConsumerModule', () => {
     }
   });
 
+  it('skips a transient consumer provider with a warning', async () => {
+    @Injectable({ scope: Scope.TRANSIENT })
+    class Fleeting {
+      @Consumer('fleeting')
+      async h() {}
+    }
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const startAll = jest
+      .spyOn(ConsumerRegistryService.prototype, 'startAll')
+      .mockResolvedValue();
+    const mod = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [Fleeting],
+    }).compile();
+    try {
+      await mod.init();
+      const groups = (mod.get(ConsumerRegistryService) as any).consumerGroups;
+      expect([...groups.keys()]).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        'Skipping consumer Fleeting.h: request-scoped and transient providers cannot consume',
+      );
+    } finally {
+      warn.mockRestore();
+      startAll.mockRestore();
+      await mod.close();
+    }
+  });
+
   it('skips a request-scoped consumer provider with a warning', async () => {
     @Injectable({ scope: Scope.REQUEST })
     class Scoped {
@@ -215,7 +248,7 @@ describe('ConsumerModule', () => {
       const groups = (mod.get(ConsumerRegistryService) as any).consumerGroups;
       expect([...groups.keys()]).toEqual([]);
       expect(warn).toHaveBeenCalledWith(
-        'Skipping consumer Scoped.h: request-scoped providers cannot consume',
+        'Skipping consumer Scoped.h: request-scoped and transient providers cannot consume',
       );
     } finally {
       warn.mockRestore();
@@ -305,6 +338,18 @@ describe('ConsumerModule', () => {
       await expect(mod.init()).rejects.toThrow(
         'Consumer "invalid": retry.multiplier must be a finite number >= 1',
       );
+    });
+
+    it('startAll resolves when there are no consumers', async () => {
+      const mod = await compileWith([]);
+      try {
+        await mod.init();
+        await expect(
+          mod.get(ConsumerRegistryService).startAll(),
+        ).resolves.toBeUndefined();
+      } finally {
+        await mod.close();
+      }
     });
 
     it('closes cleanly without startAll', async () => {

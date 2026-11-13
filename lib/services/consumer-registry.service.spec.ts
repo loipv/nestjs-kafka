@@ -592,17 +592,16 @@ describe('consumer groups', () => {
       });
     });
 
-    it('eachMessage skips the commit when its partition was revoked during the handler', async () => {
+    it('a rebalance during a delivery does not skip its commit', async () => {
+      // The client applies a revoke only after its workers settle, so the
+      // old owner's commit always lands before the unassign.
       let release!: () => void;
-      const handler = jest
-        .fn()
-        .mockImplementationOnce(
-          () =>
-            new Promise<void>((r) => {
-              release = r;
-            }),
-        )
-        .mockResolvedValue(undefined);
+      const handler = jest.fn().mockImplementationOnce(
+        () =>
+          new Promise<void>((r) => {
+            release = r;
+          }),
+      );
       const { config, consumer, consumerConfig } = await started(
         { autoCommit: false },
         handler,
@@ -614,10 +613,7 @@ describe('consumer groups', () => {
       ]);
       release();
       await delivery;
-      expect(consumer.commitOffsets).not.toHaveBeenCalled();
-
-      await config().eachMessage(messagePayload('6'));
-      expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('7')]);
+      expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
     });
 
     it('eachBatch does not commit under auto-commit', async () => {
@@ -1058,6 +1054,45 @@ describe('consumer groups', () => {
     core.disconnectAll.mockRejectedValue(new Error('cleanup failed'));
     registry.registerConsumers([consumerMeta('t', {})]);
     await expect(registry.startAll()).rejects.toThrow('run failed');
+  });
+
+  it('startAll before registration rejects and is not memoised', async () => {
+    const { registry, consumer } = makeHarness();
+    await expect(registry.startAll()).rejects.toThrow(
+      'startAll() called before the application was initialised (call app.init() or app.listen() first)',
+    );
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.startAll();
+    expect(consumer.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('startAll after shutdown rejects without creating a consumer', async () => {
+    const { registry, consumerConfig } = makeHarness();
+    registry.registerConsumers([consumerMeta('t', {})]);
+    await registry.gracefulShutdown();
+    await expect(registry.startAll()).rejects.toThrow(
+      'Consumers are shutting down',
+    );
+    expect(() => consumerConfig()).toThrow();
+  });
+
+  it('a shutdown during startAll stops the starting group', async () => {
+    const { registry, consumer } = makeHarness();
+    let connected!: () => void;
+    consumer.connect.mockReturnValue(
+      new Promise<void>((r) => {
+        connected = r;
+      }),
+    );
+    registry.registerConsumers([consumerMeta('t', {})]);
+    const starting = registry.startAll();
+    await Promise.resolve();
+    const stopping = registry.gracefulShutdown();
+    connected();
+    await expect(starting).rejects.toThrow('Consumers are shutting down');
+    await stopping;
+    expect(consumer.run).not.toHaveBeenCalled();
+    expect(consumer.disconnect).toHaveBeenCalled();
   });
 
   it('startAll is shared by concurrent callers', async () => {
