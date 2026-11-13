@@ -356,6 +356,35 @@ describe('consumer groups', () => {
       expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
     });
 
+    it('the DLQ path receives the tracker sent set for the delivery', async () => {
+      jest.useFakeTimers();
+      try {
+        const dlqService = {
+          handleFailure: jest
+            .fn()
+            .mockResolvedValue({ action: 'retry', delayMs: 10 }),
+        };
+        const { config } = await started(
+          { dlq: { topic: 'd' } },
+          jest.fn().mockRejectedValue(new Error('x')),
+          { dlqService },
+        );
+        await expect(config().eachMessage(messagePayload('5'))).rejects.toThrow(
+          'x',
+        );
+        await expect(config().eachMessage(messagePayload('5'))).rejects.toThrow(
+          'x',
+        );
+        const [first, second] = dlqService.handleFailure.mock.calls.map(
+          (call) => call[8],
+        );
+        expect(first).toBeInstanceOf(Set);
+        expect(second).toBe(first);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('eachMessage commits a duplicate skipped by idempotency', async () => {
       const handler = jest.fn();
       const { config, consumer } = await started(

@@ -42,6 +42,7 @@ export class DlqService {
     connection: string | undefined,
     attempt: number,
     maxDelayMs: number = MAX_RETRY_DELAY_MS,
+    sent: Set<string> = new Set(),
   ): Promise<RetryVerdict> {
     const maxRetries = options.maxRetries ?? 3;
     const delayMs = this.retryDelay(attempt, options, maxDelayMs);
@@ -62,6 +63,7 @@ export class DlqService {
         originalTopic,
         attempt,
         connection,
+        sent,
       );
       return { action: 'complete' };
     } catch (dlqError) {
@@ -71,9 +73,11 @@ export class DlqService {
   }
 
   /**
-   * Dead-letter `messages` in one batch. Values and keys pass through as
-   * received (Buffers stay byte-exact). Rejects on a send error or when the
-   * send exceeds `options.sendTimeout`.
+   * Dead-letter `messages`, one send per message in parallel (librdkafka
+   * batches them). Values and keys pass through as received (Buffers stay
+   * byte-exact). Offsets in `sent` are skipped and each success is added to
+   * it, so a retry never re-sends what already arrived. Rejects when any send
+   * fails or the sends exceed `options.sendTimeout`.
    */
   async sendToDlq(
     messages: KafkaMessage[],
@@ -82,9 +86,13 @@ export class DlqService {
     originalTopic: string,
     retryCount: number,
     connection?: string,
+    sent: Set<string> = new Set(),
   ): Promise<void> {
+    const pending = messages.filter((message) => !sent.has(message.offset));
+    if (pending.length === 0) return;
+
     const timestamp = new Date().toISOString();
-    const records = messages.map((message) => ({
+    const records = pending.map((message) => ({
       key: message.key ?? null,
       value: message.value ?? null,
       headers: this.buildHeaders(
@@ -107,21 +115,36 @@ export class DlqService {
       );
     });
 
-    try {
-      await Promise.race([
-        this.kafkaClient.sendBatch(
-          options.topic,
-          records,
-          target ? { connection: target } : undefined,
+    const sendAll = async () => {
+      const results = await Promise.allSettled(
+        records.map((record) =>
+          this.kafkaClient.send(
+            options.topic,
+            record,
+            target ? { connection: target } : undefined,
+          ),
         ),
-        timeout,
-      ]);
+      );
+      const failures: unknown[] = [];
+      results.forEach((result, i) => {
+        if (result.status === 'fulfilled') sent.add(pending[i].offset);
+        else failures.push(result.reason);
+      });
+      if (failures.length > 0) {
+        throw new Error(
+          `DLQ send failed for ${failures.length} of ${pending.length} message(s): ${String(failures[0])}`,
+        );
+      }
+    };
+
+    try {
+      await Promise.race([sendAll(), timeout]);
     } finally {
       clearTimeout(timer);
     }
 
     this.logger.warn(
-      `${messages.length} message(s) sent to DLQ: ${options.topic} after ${retryCount} attempts`,
+      `${pending.length} message(s) sent to DLQ: ${options.topic} after ${retryCount} attempts`,
     );
   }
 

@@ -846,6 +846,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
           group.connection,
           attempt,
           this.maxRetryDelay(options.retry),
+          this.retryTracker.deadLettered(attemptKey),
         ) // never rejects: a failed DLQ send returns a retry verdict
       : this.evaluateRetry(attempt, options);
 

@@ -12,6 +12,8 @@ export class PartitionRetryTracker {
   private readonly logger = new Logger(PartitionRetryTracker.name);
   private readonly attempts = new Map<string, number>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  /** Offsets of a delivery already dead-lettered, keyed by attempt key */
+  private readonly sent = new Map<string, Set<string>>();
   /** Set by close(): no timer is created afterwards */
   private closed = false;
 
@@ -41,6 +43,20 @@ export class PartitionRetryTracker {
 
   clear(attemptKey: string): void {
     this.attempts.delete(attemptKey);
+    this.sent.delete(attemptKey);
+  }
+
+  /**
+   * Offsets of this delivery that already reached the DLQ (created on first
+   * use), so a retried DLQ send skips them. Dropped with the attempt counter.
+   */
+  deadLettered(attemptKey: string): Set<string> {
+    let set = this.sent.get(attemptKey);
+    if (!set) {
+      set = new Set();
+      this.sent.set(attemptKey, set);
+    }
+    return set;
   }
 
   /** Calls `resume` after `delayMs`, replacing a pending resume for the same partition. */
@@ -71,6 +87,9 @@ export class PartitionRetryTracker {
       for (const key of [...this.attempts.keys()]) {
         if (key.startsWith(prefix)) this.attempts.delete(key);
       }
+      for (const key of [...this.sent.keys()]) {
+        if (key.startsWith(prefix)) this.sent.delete(key);
+      }
     }
   }
 
@@ -80,6 +99,7 @@ export class PartitionRetryTracker {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.attempts.clear();
+    this.sent.clear();
   }
 
   private cancelTimer(partitionKey: string): void {

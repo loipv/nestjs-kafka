@@ -109,4 +109,22 @@ describe('PartitionRetryTracker', () => {
     const timer = (tracker as any).timers.get('p');
     expect(timer.hasRef()).toBe(false);
   });
+
+  it('deadLettered sets are dropped by clear, revoke and close', () => {
+    const key = PartitionRetryTracker.attemptKey('g', 't', 1, '5');
+    const set = tracker.deadLettered(key);
+    set.add('5');
+    expect(tracker.deadLettered(key)).toBe(set);
+
+    tracker.clear(key);
+    expect(tracker.deadLettered(key).size).toBe(0);
+
+    tracker.deadLettered(key).add('5');
+    tracker.revoke([PartitionRetryTracker.partitionKey('g', 't', 1)]);
+    expect(tracker.deadLettered(key).size).toBe(0);
+
+    tracker.deadLettered(key).add('5');
+    tracker.close();
+    expect(tracker.deadLettered(key).size).toBe(0);
+  });
 });
