@@ -9,7 +9,7 @@ describe('PartitionRetryTracker', () => {
   });
 
   afterEach(() => {
-    tracker.clearAll();
+    tracker.close();
     jest.useRealTimers();
   });
 
@@ -82,13 +82,25 @@ describe('PartitionRetryTracker', () => {
     expect(tracker.nextAttempt('g|t|10|5')).toBe(2);
   });
 
-  it('clearAll cancels everything', () => {
+  it('close cancels everything', () => {
     tracker.scheduleResume('a', 100, jest.fn());
     tracker.scheduleResume('b', 100, jest.fn());
     tracker.nextAttempt('a|1');
-    tracker.clearAll();
+    tracker.close();
     expect(jest.getTimerCount()).toBe(0);
     expect(tracker.nextAttempt('a|1')).toBe(1);
+  });
+
+  it('close cancels everything and ignores later scheduleResume', () => {
+    const before = jest.fn();
+    const after = jest.fn();
+    tracker.scheduleResume('a', 100, before);
+    tracker.close();
+    tracker.scheduleResume('b', 100, after);
+    jest.advanceTimersByTime(10_000);
+    expect(before).not.toHaveBeenCalled();
+    expect(after).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   it('does not keep the process alive', () => {

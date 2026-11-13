@@ -39,6 +39,8 @@ interface TopicHandler {
 const ERR_REVOKE_PARTITIONS = -174;
 /** Default chunk size, shared with BatchProcessorService.splitIntoBatches */
 const DEFAULT_BATCH_SIZE = 100;
+/** Largest delay setTimeout honours; Node turns anything above it into 1 ms */
+const MAX_TIMER_MS = 2147483647;
 
 interface ConsumerGroup {
   groupId: string;
@@ -154,15 +156,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     const groupId = options.groupId || `${topic}-group`;
     const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
 
-    const sendTimeout = options.dlq?.sendTimeout;
-    if (
-      sendTimeout !== undefined &&
-      !(Number.isFinite(sendTimeout) && sendTimeout > 0)
-    ) {
-      throw new Error(
-        `Consumer "${topic}": dlq.sendTimeout must be a positive number`,
-      );
-    }
+    this.validateTimerOptions(topic, options);
 
     // Fail fast on a mistyped DLQ connection instead of at the first failure
     if (options.dlq?.connection) {
@@ -216,6 +210,28 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
     this.logger.log(
       `Registered topic "${topic}" in group "${groupId}" (connection: ${connectionName})`,
     );
+  }
+
+  /** Timer options must be positive and within setTimeout's range. */
+  private validateTimerOptions(topic: string, options: ConsumerOptions): void {
+    const timers: Array<[string, number | undefined]> = [
+      ['retry.maxRetryTime', options.retry?.maxRetryTime],
+      ['retry.initialRetryTime', options.retry?.initialRetryTime],
+      ['dlq.sendTimeout', options.dlq?.sendTimeout],
+    ];
+    for (const [name, value] of timers) {
+      if (value === undefined) continue;
+      if (!(Number.isFinite(value) && value > 0)) {
+        throw new Error(
+          `Consumer "${topic}": ${name} must be a positive number`,
+        );
+      }
+      if (value > MAX_TIMER_MS) {
+        throw new Error(
+          `Consumer "${topic}": ${name} must be at most ${MAX_TIMER_MS} ms`,
+        );
+      }
+    }
   }
 
   /**
@@ -937,7 +953,7 @@ export class ConsumerRegistryService implements OnApplicationShutdown {
   private async shutdown(): Promise<void> {
     this.isShuttingDown = true;
     // Pending resumes are dropped; paused partitions are redelivered next boot
-    this.retryTracker.clearAll();
+    this.retryTracker.close();
 
     this.logger.log('Starting graceful shutdown of consumers...');
 

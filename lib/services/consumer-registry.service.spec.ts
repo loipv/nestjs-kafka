@@ -97,6 +97,56 @@ describe('retry logic', () => {
   });
 });
 
+describe('timer option bounds', () => {
+  const makeRegistry = () =>
+    new ConsumerRegistryService(
+      { getKafka: jest.fn() } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      undefined,
+      undefined,
+    );
+  const register = (options: any) =>
+    makeRegistry().registerConsumers([
+      {
+        topic: 't',
+        connection: 'default',
+        options,
+        target: { h: jest.fn() },
+        methodName: 'h',
+      } as any,
+    ]);
+  const withOption = (path: string, value: number) =>
+    path === 'retry.maxRetryTime'
+      ? { retry: { maxRetryTime: value } }
+      : path === 'retry.initialRetryTime'
+        ? { retry: { initialRetryTime: value } }
+        : { dlq: { topic: 'd', sendTimeout: value } };
+
+  describe.each([
+    'retry.maxRetryTime',
+    'retry.initialRetryTime',
+    'dlq.sendTimeout',
+  ])('%s', (path) => {
+    it('accepts 2147483647', () => {
+      expect(() => register(withOption(path, 2147483647))).not.toThrow();
+    });
+
+    it('rejects 2147483648', () => {
+      expect(() => register(withOption(path, 2147483648))).toThrow(
+        `Consumer "t": ${path} must be at most 2147483647 ms`,
+      );
+    });
+
+    it.each([0, -1, NaN])('rejects %p', (value) => {
+      expect(() => register(withOption(path, value))).toThrow(
+        `Consumer "t": ${path} must be a positive number`,
+      );
+    });
+  });
+});
+
 describe('consumer groups', () => {
   const mkMsg = (offset: string) => ({
     offset,
@@ -682,7 +732,7 @@ describe('consumer groups', () => {
     const { registry, consumerConfig } = makeHarness();
     registry.registerConsumers([
       consumerMeta('t', {
-        retry: { maxRetryTime: 600000, initialRetryTime: 0 },
+        retry: { maxRetryTime: 600000, initialRetryTime: 1 },
       }),
     ]);
     await registry.startAll();

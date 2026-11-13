@@ -12,6 +12,8 @@ export class PartitionRetryTracker {
   private readonly logger = new Logger(PartitionRetryTracker.name);
   private readonly attempts = new Map<string, number>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  /** Set by close(): no timer is created afterwards */
+  private closed = false;
 
   static partitionKey(
     groupKey: string,
@@ -47,6 +49,7 @@ export class PartitionRetryTracker {
     delayMs: number,
     resume: () => void,
   ): void {
+    if (this.closed) return;
     this.cancelTimer(partitionKey);
     const timer = setTimeout(() => {
       this.timers.delete(partitionKey);
@@ -71,7 +74,9 @@ export class PartitionRetryTracker {
     }
   }
 
-  clearAll(): void {
+  /** Shutdown: cancels every timer and counter; later scheduleResume calls are ignored. */
+  close(): void {
+    this.closed = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.attempts.clear();

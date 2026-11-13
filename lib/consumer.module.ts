@@ -195,8 +195,8 @@ export class ConsumerModule
     return consumerInstances;
   }
 
-  // ConsumerRegistryService shuts the consumers down in its own
-  // onApplicationShutdown; this only allows a restarted app to start again.
+  // Only resets the start guard. ConsumerRegistryService disconnects the
+  // consumers in its own onApplicationShutdown; nothing is restarted here.
   onApplicationShutdown(): void {
     this.isStarted = false;
   }
