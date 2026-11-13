@@ -39,6 +39,8 @@ interface TopicHandler {
 const ERR_REVOKE_PARTITIONS = -174;
 /** librdkafka ERR__NO_OFFSET: a commit with nothing stored to commit */
 const ERR_NO_OFFSET = -168;
+/** Upper bound for one synchronous commit (autoCommit: false) */
+const COMMIT_TIMEOUT_MS = 10000;
 /** Default chunk size, shared with BatchProcessorService.splitIntoBatches */
 const DEFAULT_BATCH_SIZE = 100;
 /** Consumer options that ConsumerModule.forRoot() may default */
@@ -80,6 +82,8 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   private isShuttingDown = false;
   private shutdownPromise?: Promise<void>;
   private startPromise?: Promise<void>;
+  /** Bumped per partition on revoke: a delivery that spans one skips its commit */
+  private readonly revokeGenerations = new Map<string, number>();
   private readonly retryTracker = new PartitionRetryTracker();
 
   constructor(
@@ -372,11 +376,16 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   ): void {
     if (err.code !== ERR_REVOKE_PARTITIONS || assignment.length === 0) return;
 
-    this.retryTracker.revoke(
-      assignment.map(({ topic, partition }) =>
-        PartitionRetryTracker.partitionKey(group.groupKey, topic, partition),
-      ),
+    const partitionKeys = assignment.map(({ topic, partition }) =>
+      PartitionRetryTracker.partitionKey(group.groupKey, topic, partition),
     );
+    this.retryTracker.revoke(partitionKeys);
+    for (const key of partitionKeys) {
+      this.revokeGenerations.set(
+        key,
+        (this.revokeGenerations.get(key) ?? 0) + 1,
+      );
+    }
 
     const byTopic = new Map<string, number[]>();
     for (const { topic, partition } of assignment) {
@@ -484,12 +493,26 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       // commits on close — the message would be lost.
       if (this.isShuttingDown) throw new Error('Consumer is shutting down');
 
+      const { topic, partition, message } = payload;
+      const partitionKey = PartitionRetryTracker.partitionKey(
+        group.groupKey,
+        topic,
+        partition,
+      );
+      const generation = this.revokeGenerations.get(partitionKey) ?? 0;
+
       // Throws (after pausing the partition) when the message must be retried
       await this.processMessage(group, payload);
 
       // With auto-commit off the client never commits on its own
       if (group.options.autoCommit === false) {
-        const { topic, partition, message } = payload;
+        // Revoked meanwhile: the new owner commits; ours could move it back
+        if ((this.revokeGenerations.get(partitionKey) ?? 0) !== generation) {
+          this.logger.debug(
+            `Skipping commit of ${topic}[${partition}]@${message.offset}: partition revoked during delivery`,
+          );
+          return;
+        }
         await this.commitMessageOffset(
           consumer,
           topic,
@@ -609,10 +632,46 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     offset: string,
   ): Promise<void> {
     const next = (BigInt(offset) + 1n).toString();
-    try {
-      await consumer.commitOffsets([{ topic, partition, offset: next }]);
-    } catch (error) {
-      this.logCommitFailure(topic, partition, next, error);
+    await this.boundedCommit(
+      () => consumer.commitOffsets([{ topic, partition, offset: next }]),
+      topic,
+      partition,
+      next,
+    );
+  }
+
+  /**
+   * Run one commit, waiting at most COMMIT_TIMEOUT_MS: a commit can hang while
+   * the group coordinator is unavailable, and app.close() waits for workers.
+   * Never rejects; a failure (other than ERR__NO_OFFSET) or a timeout is
+   * logged, and a commit settling later is ignored.
+   */
+  private async boundedCommit(
+    commit: () => Promise<void>,
+    topic: string,
+    partition: number,
+    offset: string,
+  ): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([
+      commit().then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      ),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), COMMIT_TIMEOUT_MS);
+        timer.unref();
+      }),
+    ]);
+    clearTimeout(timer);
+    if (outcome === 'timeout') {
+      this.logger.warn(`Commit timed out for ${topic}[${partition}]@${offset}`);
+    } else if (
+      !outcome.ok &&
+      // Nothing new stored (another partition's commit covered it)
+      (outcome.error as { code?: number } | null)?.code !== ERR_NO_OFFSET
+    ) {
+      this.logCommitFailure(topic, partition, offset, outcome.error);
     }
   }
 
@@ -666,20 +725,12 @@ export class ConsumerRegistryService implements OnModuleDestroy {
 
         // With auto-commit off the client never commits on its own
         if (options.autoCommit === false) {
-          try {
-            await payload.commitOffsetsIfNecessary();
-          } catch (error) {
-            // Nothing new stored (another partition's commit already covered
-            // it): the client rejects with ERR__NO_OFFSET, which is not a failure
-            if ((error as { code?: number }).code !== ERR_NO_OFFSET) {
-              this.logCommitFailure(
-                topic,
-                payload.batch.partition,
-                (BigInt(lastOffset) + 1n).toString(),
-                error,
-              );
-            }
-          }
+          await this.boundedCommit(
+            () => payload.commitOffsetsIfNecessary(),
+            topic,
+            payload.batch.partition,
+            (BigInt(lastOffset) + 1n).toString(),
+          );
         }
       }
     };

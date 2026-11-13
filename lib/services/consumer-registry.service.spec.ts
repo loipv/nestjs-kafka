@@ -521,6 +521,105 @@ describe('consumer groups', () => {
       }
     });
 
+    describe('bounded commits', () => {
+      let warn: jest.SpyInstance;
+      beforeEach(() => {
+        jest.useFakeTimers();
+        warn = jest
+          .spyOn(Logger.prototype, 'warn')
+          .mockImplementation(() => undefined);
+      });
+      afterEach(() => {
+        warn.mockRestore();
+        jest.useRealTimers();
+      });
+
+      it('eachMessage gives up on a commit after 10s and continues', async () => {
+        const { config, consumer } = await started(
+          { autoCommit: false },
+          jest.fn(),
+        );
+        consumer.commitOffsets.mockReturnValue(new Promise(() => {}));
+        let done = false;
+        const delivery = config()
+          .eachMessage(messagePayload('5'))
+          .then(() => {
+            done = true;
+          });
+        await jest.advanceTimersByTimeAsync(9_999);
+        expect(done).toBe(false);
+        await jest.advanceTimersByTimeAsync(1);
+        await delivery;
+        expect(warn).toHaveBeenCalledWith('Commit timed out for t[0]@6');
+      });
+
+      it('eachBatch gives up on a commit after 10s', async () => {
+        const { config } = await started(
+          { batch: true, batchSize: 2, autoCommit: false },
+          jest.fn(),
+        );
+        const payload = batchPayload(['1', '2'].map(mkMsg), jest.fn());
+        payload.commitOffsetsIfNecessary.mockReturnValue(new Promise(() => {}));
+        const delivery = config().eachBatch(payload);
+        await jest.advanceTimersByTimeAsync(10_000);
+        await delivery;
+        expect(warn).toHaveBeenCalledWith('Commit timed out for t[0]@3');
+      });
+
+      it('a commit settling after the timeout is ignored', async () => {
+        const unhandled = jest.fn();
+        process.on('unhandledRejection', unhandled);
+        try {
+          const { config, consumer } = await started(
+            { autoCommit: false },
+            jest.fn(),
+          );
+          consumer.commitOffsets.mockReturnValue(
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('late')), 15_000),
+            ),
+          );
+          const delivery = config().eachMessage(messagePayload('5'));
+          await jest.advanceTimersByTimeAsync(10_000);
+          await delivery;
+          await jest.advanceTimersByTimeAsync(5_000);
+          await Promise.resolve();
+          expect(unhandled).not.toHaveBeenCalled();
+          expect(warn.mock.calls).toEqual([['Commit timed out for t[0]@6']]);
+        } finally {
+          process.off('unhandledRejection', unhandled);
+        }
+      });
+    });
+
+    it('eachMessage skips the commit when its partition was revoked during the handler', async () => {
+      let release!: () => void;
+      const handler = jest
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((r) => {
+              release = r;
+            }),
+        )
+        .mockResolvedValue(undefined);
+      const { config, consumer, consumerConfig } = await started(
+        { autoCommit: false },
+        handler,
+      );
+      const delivery = config().eachMessage(messagePayload('5'));
+      await Promise.resolve();
+      consumerConfig().rebalance_cb({ code: -174 }, [
+        { topic: 't', partition: 0 },
+      ]);
+      release();
+      await delivery;
+      expect(consumer.commitOffsets).not.toHaveBeenCalled();
+
+      await config().eachMessage(messagePayload('6'));
+      expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('7')]);
+    });
+
     it('eachBatch does not commit under auto-commit', async () => {
       const { config } = await started(
         { batch: true, batchSize: 2 },
