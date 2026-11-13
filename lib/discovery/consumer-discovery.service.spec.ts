@@ -74,4 +74,48 @@ describe('ConsumerDiscoveryService', () => {
     svc.discoverFromProviders([Object.create(hostile), new TestConsumers()]);
     expect(svc.getConsumers().map((c) => c.topic)).toEqual(['a']);
   });
+
+  it('registers an instance listed twice once', () => {
+    const instance = new TestConsumers();
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([instance, instance]);
+    expect(svc.getConsumers().map((c) => c.topic)).toEqual(['a']);
+  });
+
+  class Base {
+    @Consumer('base') async h() {}
+  }
+
+  it('discovers @Consumer methods declared on a base class', () => {
+    class Child extends Base {}
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([new Child()]);
+    expect(svc.getConsumers().map((c) => [c.topic, c.methodName])).toEqual([
+      ['base', 'h'],
+    ]);
+  });
+
+  it('an override without @Consumer hides the decorated base method', () => {
+    class Child extends Base {
+      async h() {}
+    }
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([new Child()]);
+    expect(svc.getConsumers()).toEqual([]);
+  });
+
+  it('stops the walk at a level that throws on inspection', () => {
+    class Own {
+      @Consumer('own') async own() {}
+    }
+    const hostile = new Proxy(Object.create(Base.prototype) as object, {
+      ownKeys: () => {
+        throw new Error('no keys');
+      },
+    });
+    Object.setPrototypeOf(Own.prototype, hostile);
+    const svc = new ConsumerDiscoveryService();
+    svc.discoverFromProviders([new Own()]);
+    expect(svc.getConsumers().map((c) => c.topic)).toEqual(['own']);
+  });
 });

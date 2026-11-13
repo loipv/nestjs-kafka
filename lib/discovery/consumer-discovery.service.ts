@@ -10,50 +10,22 @@ export class ConsumerDiscoveryService {
   private discoveredConsumers: ConsumerMetadata[] = [];
 
   /**
-   * Discover @Consumer methods on provider instances (one pass). Skips
-   * non-objects, prototype-less objects and prototypes that throw on
-   * inspection; only own data properties are read, never getters (some
-   * providers, e.g. Nest's HttpAdapterHost, have getters with side effects).
+   * Discover @Consumer methods on provider instances (one pass). Each
+   * instance is scanned once, even when Nest lists it under several tokens
+   * (`useExisting` aliases). Skips non-objects and prototype-less objects.
    */
   discoverFromProviders(instances: unknown[]): ConsumerMetadata[] {
+    const seen = new Set<object>();
     for (const instance of instances) {
-      if (!instance || typeof instance !== 'object') continue;
-      const prototype = Object.getPrototypeOf(instance) as Record<
-        string,
-        unknown
-      > | null;
-      if (!prototype) continue;
-
-      // [name, function] pairs from data descriptors only: never a property
-      // read through the prototype, so no getter or proxy trap runs.
-      let methods: Array<[string, object]>;
-      let className: string | undefined;
-      try {
-        className = (
-          Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value as
-            | { name?: string }
-            | undefined
-        )?.name;
-        methods = Object.getOwnPropertyNames(prototype).flatMap(
-          (name): Array<[string, object]> => {
-            if (name === 'constructor') return [];
-            const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
-            return descriptor &&
-              !descriptor.get &&
-              typeof descriptor.value === 'function'
-              ? [[name, descriptor.value as object]]
-              : [];
-          },
-        );
-      } catch {
+      if (!instance || typeof instance !== 'object' || seen.has(instance)) {
         continue;
       }
+      seen.add(instance);
+      const prototype = Object.getPrototypeOf(instance) as object | null;
+      if (!prototype) continue;
 
-      for (const [methodName, method] of methods) {
-        const metadata: ConsumerMethodMetadata | undefined =
-          Reflect.getMetadata(KAFKA_CONSUMER_METADATA, method);
-        if (!metadata) continue;
-
+      const className = this.className(prototype);
+      for (const { methodName, metadata } of this.consumerMethods(prototype)) {
         // Skip disabled consumers
         if (metadata.options.disabled) {
           this.logger.log(
@@ -79,6 +51,63 @@ export class ConsumerDiscoveryService {
     }
 
     return this.discoveredConsumers;
+  }
+
+  /**
+   * @Consumer methods along the prototype chain, up to (excluding)
+   * Object.prototype. Each name counts once, at the nearest class, so an
+   * override without @Consumer hides a decorated base method. Only data
+   * descriptors are read (no getters, no proxy traps); a level that throws on
+   * inspection ends the walk.
+   */
+  consumerMethods(
+    prototype: object,
+  ): Array<{ methodName: string; metadata: ConsumerMethodMetadata }> {
+    const found: Array<{
+      methodName: string;
+      metadata: ConsumerMethodMetadata;
+    }> = [];
+    const visited = new Set<string>(['constructor']);
+    let level: object | null = prototype;
+    while (level && level !== Object.prototype) {
+      try {
+        for (const name of Object.getOwnPropertyNames(level)) {
+          if (visited.has(name)) continue;
+          visited.add(name);
+          const descriptor = Object.getOwnPropertyDescriptor(level, name);
+          if (
+            !descriptor ||
+            descriptor.get ||
+            typeof descriptor.value !== 'function'
+          ) {
+            continue;
+          }
+          const metadata: ConsumerMethodMetadata | undefined =
+            Reflect.getMetadata(
+              KAFKA_CONSUMER_METADATA,
+              descriptor.value as object,
+            );
+          if (metadata) found.push({ methodName: name, metadata });
+        }
+        level = Object.getPrototypeOf(level) as object | null;
+      } catch {
+        break;
+      }
+    }
+    return found;
+  }
+
+  /** Class name from the prototype's own `constructor` descriptor (no reads). */
+  private className(prototype: object): string | undefined {
+    try {
+      return (
+        Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value as
+          | { name?: string }
+          | undefined
+      )?.name;
+    } catch {
+      return undefined;
+    }
   }
 
   getConsumers(): ConsumerMetadata[] {

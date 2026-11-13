@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Module } from '@nestjs/common';
 import { ConsumerModule } from './consumer.module';
 import { KafkaModule } from './kafka.module';
 import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service';
@@ -152,6 +152,41 @@ describe('ConsumerModule', () => {
       'Kafka connection "missing" not found',
     );
     expect(registry.abortStartup).toHaveBeenCalledTimes(1);
+  });
+
+  it('boots when a consumer provider is also exposed through useExisting', async () => {
+    @Injectable()
+    class Orders {
+      @Consumer('orders')
+      async handle() {}
+    }
+    @Module({
+      providers: [Orders, { provide: 'ORDERS_ALIAS', useExisting: Orders }],
+      exports: ['ORDERS_ALIAS'],
+    })
+    class FeatureModule {}
+
+    const startAll = jest
+      .spyOn(ConsumerRegistryService.prototype, 'startAll')
+      .mockResolvedValue();
+    const mod = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+        ConsumerModule.forRoot(),
+        FeatureModule,
+      ],
+    }).compile();
+    try {
+      await mod.init();
+      const groups = (mod.get(ConsumerRegistryService) as any).consumerGroups;
+      expect([...groups.keys()]).toEqual(['default:orders-group']);
+      expect([...groups.get('default:orders-group').topics.keys()]).toEqual([
+        'orders',
+      ]);
+    } finally {
+      startAll.mockRestore();
+      await mod.close();
+    }
   });
 
   it('no longer exposes the static clearConsumers()', () => {

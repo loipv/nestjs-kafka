@@ -610,6 +610,35 @@ describe('Kafka e2e (testcontainers)', () => {
     }
   }, 90_000);
 
+  it('boots and consumes with a consumer also exposed through useExisting', async () => {
+    const received: string[] = [];
+
+    @Injectable()
+    class AliasedConsumer {
+      @Consumer('e2e-alias', {
+        groupId: 'e2e-alias-g',
+        fromBeginning: true,
+        allowAutoTopicCreation: true,
+      })
+      async handle(msg: any) {
+        received.push(msg.value?.id);
+      }
+    }
+
+    const app = await createApp([
+      AliasedConsumer,
+      { provide: 'ALIASED_CONSUMER', useExisting: AliasedConsumer },
+    ]);
+    try {
+      await app.get(KafkaClient).send('e2e-alias', { value: { id: 'x' } });
+      await waitFor(() => received.length >= 1);
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(received).toEqual(['x']);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('dead-letters a non-UTF-8 payload byte-for-byte', async () => {
     const payload = Buffer.from([0xff, 0x00, 0xfe, 0x80]);
     const key = Buffer.from([0x80, 0x81]);
