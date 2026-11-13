@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { Injectable, Module } from '@nestjs/common';
+import { Injectable, Logger, Module, Scope } from '@nestjs/common';
 import { ConsumerModule } from './consumer.module';
 import { KafkaModule } from './kafka.module';
 import { ConsumerDiscoveryService } from './discovery/consumer-discovery.service';
@@ -140,6 +140,7 @@ describe('ConsumerModule', () => {
     };
     const discovery = {
       discoverFromProviders: jest.fn(() => [{ topic: 't' }]),
+      warnSkipped: jest.fn(),
     };
     const nestDiscovery = { getProviders: () => [] };
     const mod = new ConsumerModule(
@@ -184,6 +185,39 @@ describe('ConsumerModule', () => {
         'orders',
       ]);
     } finally {
+      startAll.mockRestore();
+      await mod.close();
+    }
+  });
+
+  it('skips a request-scoped consumer provider with a warning', async () => {
+    @Injectable({ scope: Scope.REQUEST })
+    class Scoped {
+      @Consumer('scoped')
+      async h() {}
+    }
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const startAll = jest
+      .spyOn(ConsumerRegistryService.prototype, 'startAll')
+      .mockResolvedValue();
+    const mod = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+        ConsumerModule.forRoot(),
+      ],
+      providers: [Scoped],
+    }).compile();
+    try {
+      await mod.init();
+      const groups = (mod.get(ConsumerRegistryService) as any).consumerGroups;
+      expect([...groups.keys()]).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        'Skipping consumer Scoped.h: request-scoped providers cannot consume',
+      );
+    } finally {
+      warn.mockRestore();
       startAll.mockRestore();
       await mod.close();
     }

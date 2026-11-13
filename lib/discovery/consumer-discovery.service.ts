@@ -97,6 +97,25 @@ export class ConsumerDiscoveryService {
     return found;
   }
 
+  /**
+   * Warn about @Consumer methods on non-static providers (request-scoped, or
+   * depending on one): Nest has no real instance for them at bootstrap, so
+   * they are not registered.
+   */
+  warnSkipped(metatypes: unknown[]): void {
+    for (const metatype of new Set(metatypes)) {
+      if (typeof metatype !== 'function') continue;
+      const prototype = (metatype as { prototype?: unknown }).prototype;
+      if (!prototype || typeof prototype !== 'object') continue;
+      const className = this.className(prototype);
+      for (const { methodName } of this.consumerMethods(prototype)) {
+        this.logger.warn(
+          `Skipping consumer ${className}.${methodName}: request-scoped providers cannot consume`,
+        );
+      }
+    }
+  }
+
   /** Class name from the prototype's own `constructor` descriptor (no reads). */
   private className(prototype: object): string | undefined {
     try {

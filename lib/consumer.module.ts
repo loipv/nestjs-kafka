@@ -119,9 +119,16 @@ export class ConsumerModule
 
     // Auto-discover @Consumer() methods on every provider (resolved in its
     // own module scope with its dependencies already injected).
+    // Only static providers have a real instance at bootstrap.
+    const wrappers = this.nestDiscoveryService.getProviders();
+    this.discoveryService.warnSkipped(
+      wrappers
+        .filter((wrapper) => !wrapper.isDependencyTreeStatic())
+        .map((wrapper): unknown => wrapper.metatype),
+    );
     const consumers = this.discoveryService.discoverFromProviders(
-      this.nestDiscoveryService
-        .getProviders()
+      wrappers
+        .filter((wrapper) => wrapper.isDependencyTreeStatic())
         .map((wrapper): unknown => wrapper.instance),
     );
 
