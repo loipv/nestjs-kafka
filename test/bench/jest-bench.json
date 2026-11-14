@@ -1,0 +1,11 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "../..",
+  "roots": ["<rootDir>/lib", "<rootDir>/test/bench"],
+  "testEnvironment": "node",
+  "testRegex": "consume\\.bench\\.ts$",
+  "testTimeout": 300000,
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  }
+}
