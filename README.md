@@ -184,7 +184,7 @@ KafkaModule.forRoot({
 | `passphrase` | `ssl.key.password` |
 | `rejectUnauthorized: false` | `enable.ssl.certificate.verification: false` |
 
-Any other key in the `ssl` object fails at startup. For anything else, pass raw [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md) through `rdkafka`. They apply to the connection's producer, consumers and admin clients, and override the properties built from `ssl` and the other connection options. Two consumer properties the library sets itself win over `rdkafka`: `js.consumer.max.batch.size` (from `batchSize`) and `rebalance_cb`. A consumer-only property also reaches the producer and admin clients, where librdkafka logs a warning and ignores it. `enable.auto.commit` is rejected at startup: set `autoCommit` on the consumer instead, so the library knows when to commit itself:
+Any other key in the `ssl` object fails at startup. For anything else, pass raw [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md) through `rdkafka`. They apply to the connection's producer, consumers and admin clients, and override the properties built from `ssl` and the other connection options. Two consumer properties the library sets itself win over `rdkafka`: `js.consumer.max.batch.size` (from `batchSize`) and `rebalance_cb`. A consumer-only property also reaches the producer and admin clients, where librdkafka logs a warning and ignores it. `enable.auto.commit` is rejected at startup: set `commitMode` on the consumer instead, so the library knows when to commit itself:
 
 ```typescript
 KafkaModule.forRoot({
@@ -230,7 +230,7 @@ ConsumerModule.forRoot({
   rebalanceTimeout: 60000,
 
   // Commit settings
-  autoCommit: true,
+  commitMode: 'background',
   autoCommitInterval: 5000,
   fromBeginning: false,
 
@@ -273,8 +273,9 @@ async handleEvent(message: KafkaMessagePayload) {}
 | `sessionTimeout` | `number` | Session timeout in ms |
 | `heartbeatInterval` | `number` | Heartbeat interval in ms |
 | `rebalanceTimeout` | `number` | Rebalance timeout in ms |
-| `autoCommit` | `boolean` | Commit in the background (default `true`); `false` commits synchronously after each handled message or chunk |
-| `autoCommitInterval` | `number` | Auto commit interval in ms |
+| `commitMode` | `'background' \| 'sync'` | `'background'` (default): librdkafka commits stored offsets every `autoCommitInterval` and on close. `'sync'`: the library commits each handled message or chunk synchronously. The application never commits by itself |
+| `autoCommit` | `boolean` | Deprecated: use `commitMode` (`true` = `'background'`, `false` = `'sync'`; `false` logs a warning). Unlike KafkaJS, `false` does not mean manual commits. Conflicting `autoCommit` and `commitMode` fail at startup |
+| `autoCommitInterval` | `number` | Background commit interval in ms (`commitMode: 'background'`) |
 | `fromBeginning` | `boolean` | Start consuming from beginning |
 | `retry` | `ConsumerRetryOptions` | Default retry options |
 | `idempotencyMaxKeys` | `number` | Max idempotency keys kept in memory, oldest evicted first (default: 100000) |
@@ -450,7 +451,7 @@ Retries work as described in [Retry Mechanism](#retry-mechanism): the partition 
 
 The DLQ message carries the original value and key unchanged, so binary payloads (Avro, Protobuf) arrive byte-for-byte. A batch consumer dead-letters the failing chunk (one send per message, batched by librdkafka), without messages the idempotency check filtered out.
 
-If sending to the DLQ fails or exceeds `sendTimeout`, the message is not acknowledged: it is retried with the same backoff. Nothing is dropped. A retry only sends the messages of the chunk that did not reach the DLQ yet. The DLQ can still hold a duplicate (at-least-once): a send that timed out may land later, and a process that stops between the DLQ send and the offset commit dead-letters the message again after the restart (`autoCommit: false` narrows that window).
+If sending to the DLQ fails or exceeds `sendTimeout`, the message is not acknowledged: it is retried with the same backoff. Nothing is dropped. A retry only sends the messages of the chunk that did not reach the DLQ yet. The DLQ can still hold a duplicate (at-least-once): a send that timed out may land later, and a process that stops between the DLQ send and the offset commit dead-letters the message again after the restart (`commitMode: 'sync'` narrows that window).
 
 **DLQ Headers:**
 
@@ -598,7 +599,7 @@ async handleLogs(message: KafkaMessagePayload) {
 - **Infra failures** (lost broker connection) never stop the consumer: librdkafka reconnects on its own and consumption resumes. An error while starting a consumer (connect, subscribe) fails application startup.
 - **Shutdown** while a partition is paused never commits the failing message: it is redelivered on the next start.
 - **Timer limits**: `retry.initialRetryTime`, `retry.maxRetryTime`, `dlq.sendTimeout` and `dlq.retryDelay` must be positive and at most 2147483647 ms (Node's `setTimeout` limit); `retry.multiplier` and `dlq.retryBackoffMultiplier` must be finite and >= 1. Other values fail at startup.
-- **`autoCommit: false`** commits each handled message (or batch chunk) synchronously, including skipped and dead-lettered ones. A failed commit is logged, not retried: that partition's next successful commit covers it; if none follows (a quiet partition), the message is redelivered after a restart (at-least-once). Each message waits for its own commit round trip, so this costs throughput: against a single local broker it consumed about 7× fewer messages per second than the default `autoCommit: true` (about 21k against 150k msg/s for a no-op handler). Commits of different partitions overlap, so more partitions with `partitionsConsumedConcurrently` raise it (about 2× with 4 partitions in the same test).
+- **`commitMode: 'sync'`** commits each handled message (or batch chunk) synchronously, including skipped and dead-lettered ones. A failed commit is logged, not retried: that partition's next successful commit covers it; if none follows (a quiet partition), the message is redelivered after a restart (at-least-once). Each message waits for its own commit round trip, so this costs throughput: against a single local broker it consumed about 7× fewer messages per second than the default `commitMode: 'background'` (about 21k against 150k msg/s for a no-op handler). Commits of different partitions overlap, so more partitions with `partitionsConsumedConcurrently` raise it (about 2× with 4 partitions in the same test).
 
 Attempt counters live in memory: a restart or a rebalance that moves the partition restarts the backoff ladder (the message itself is never lost). Each failed attempt is logged twice: once by this library, once by the Kafka client ("The same message may be reprocessed").
 
@@ -648,9 +649,11 @@ interface ConsumerOptions {
   };
 
   // Commit settings
-  autoCommit?: boolean;           // Default: true. false: commit synchronously after each
-                                  // handled message / batch chunk (fewer redeliveries, lower throughput)
-  autoCommitInterval?: number;
+  commitMode?: 'background' | 'sync'; // Default: 'background'. 'sync': the library commits each
+                                  // handled message / batch chunk synchronously (fewer redeliveries,
+                                  // lower throughput). The application never commits by itself.
+  autoCommit?: boolean;           // Deprecated: use commitMode (true = 'background', false = 'sync')
+  autoCommitInterval?: number;    // Background commit interval (commitMode: 'background')
   fromBeginning?: boolean;        // Default: false
 
   // Topic creation
@@ -1107,7 +1110,7 @@ v2.0.0 removes features that did not work as documented or added risk without be
 | A DLQ chunk was sent in one `sendBatch`; a partial failure re-sent the whole chunk | One send per message; a retry sends only what did not arrive. `DlqService.handleFailure()` / `sendToDlq()` take an optional `sent` set |
 | Health probes created and connected an admin client per call, on the default connection only | One shared admin per connection; `checkBrokers` / `checkConsumerLag` take an optional connection name; lag details list `unreadableTopics` |
 | `isHealthy` checked one producer, connected on the first send | Producers connect at startup; `isHealthy` covers every producer and every consumer group, with per-part details (`connected` is replaced by `producers` / `consumers`) |
-| `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties (except `enable.auto.commit`: use `autoCommit`) |
+| `ssl` object silently ignored | Applied as librdkafka properties; unknown keys fail at startup. New `rdkafka` option passes raw librdkafka properties (except `enable.auto.commit`: use `commitMode`) |
 | `DlqService.handleFailure(message, ...)` / `sendToDlq(message, ...)`; `handleFailure` rejected on a failed send | Both take `messages: KafkaMessage[]`; `handleFailure` never rejects (it returns a retry verdict) |
 | `IdempotencyService` methods took `(message, keyExtractor)` | They take a `namespace` argument as well |
 | A second `forRoot()` with an existing connection name was ignored with a warning | It fails at startup when its options differ (the same options twice are still accepted) |
