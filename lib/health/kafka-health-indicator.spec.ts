@@ -228,6 +228,80 @@ describe('KafkaHealthIndicator', () => {
       });
     });
 
+    it('fetches the latest offsets of every topic concurrently', async () => {
+      const admin = kafkaCore.getKafka().admin();
+      (admin.fetchOffsets as jest.Mock).mockResolvedValue([
+        { topic: 'a', partitions: [{ partition: 0, offset: '1' }] },
+        { topic: 'b', partitions: [{ partition: 0, offset: '2' }] },
+      ]);
+      const pending = new Map<string, (offsets: unknown) => void>();
+      (admin.fetchTopicOffsets as jest.Mock).mockImplementation(
+        (t: string) =>
+          new Promise((resolve) => {
+            pending.set(t, resolve);
+          }),
+      );
+
+      const result = healthIndicator.checkConsumerLag('lag', 'g', 1000);
+      await new Promise((r) => setImmediate(r));
+
+      expect([...pending.keys()]).toEqual(['a', 'b']);
+      pending.get('b')!([{ partition: 0, offset: '12' }]);
+      pending.get('a')!([{ partition: 0, offset: '11' }]);
+      expect(await result).toEqual({
+        lag: { status: 'up', groupId: 'g', lag: 20, maxLag: 1000 },
+      });
+    });
+
+    it('lists unreadable topics in committed order when fetches settle out of order', async () => {
+      const admin = kafkaCore.getKafka().admin();
+      (admin.fetchOffsets as jest.Mock).mockResolvedValue([
+        { topic: 'a', partitions: [{ partition: 0, offset: '0' }] },
+        { topic: 'b', partitions: [{ partition: 0, offset: '0' }] },
+        { topic: 'c', partitions: [{ partition: 0, offset: '0' }] },
+      ]);
+      (admin.fetchTopicOffsets as jest.Mock).mockImplementation((t: string) => {
+        if (t === 'b') return Promise.resolve([{ partition: 0, offset: '4' }]);
+        // c rejects before a
+        const delay = t === 'a' ? 20 : 1;
+        return new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`no ${t}`)), delay),
+        );
+      });
+
+      expect(await healthIndicator.checkConsumerLag('lag', 'g', 1000)).toEqual({
+        lag: {
+          status: 'up',
+          groupId: 'g',
+          lag: 4,
+          maxLag: 1000,
+          unreadableTopics: ['a', 'c'],
+        },
+      });
+    });
+
+    it('lists a topic whose offset fetch throws synchronously as unreadable', async () => {
+      const admin = kafkaCore.getKafka().admin();
+      (admin.fetchOffsets as jest.Mock).mockResolvedValue([
+        { topic: 'bad', partitions: [{ partition: 0, offset: '0' }] },
+        { topic: 'ok', partitions: [{ partition: 0, offset: '0' }] },
+      ]);
+      (admin.fetchTopicOffsets as jest.Mock).mockImplementation((t: string) => {
+        if (t === 'bad') throw new Error('not connected');
+        return Promise.resolve([{ partition: 0, offset: '3' }]);
+      });
+
+      expect(await healthIndicator.checkConsumerLag('lag', 'g', 1000)).toEqual({
+        lag: {
+          status: 'up',
+          groupId: 'g',
+          lag: 3,
+          maxLag: 1000,
+          unreadableTopics: ['bad'],
+        },
+      });
+    });
+
     it('returns down when the fetch fails', async () => {
       const admin = kafkaCore.getKafka().admin();
       (admin.fetchOffsets as jest.Mock).mockRejectedValue(

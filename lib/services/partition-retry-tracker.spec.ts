@@ -82,6 +82,32 @@ describe('PartitionRetryTracker', () => {
     expect(tracker.nextAttempt('g|t|10|5')).toBe(2);
   });
 
+  it('revoke of several partitions clears each of them and keeps prefix neighbours', () => {
+    const pk = (p: number) => PartitionRetryTracker.partitionKey('g', 't', p);
+    const ak = (p: number) =>
+      PartitionRetryTracker.attemptKey('g', 't', p, '5');
+    const resumes = new Map<number, jest.Mock>();
+    for (const p of [1, 2, 10]) {
+      tracker.nextAttempt(ak(p));
+      tracker.deadLettered(ak(p)).add('5');
+      resumes.set(p, jest.fn());
+      tracker.scheduleResume(pk(p), 100, resumes.get(p)!);
+    }
+
+    tracker.revoke([pk(1), pk(2)]);
+    jest.advanceTimersByTime(100);
+
+    expect(resumes.get(1)).not.toHaveBeenCalled();
+    expect(resumes.get(2)).not.toHaveBeenCalled();
+    expect(resumes.get(10)).toHaveBeenCalledTimes(1);
+    expect(tracker.deadLettered(ak(1)).size).toBe(0);
+    expect(tracker.deadLettered(ak(2)).size).toBe(0);
+    expect(tracker.deadLettered(ak(10)).has('5')).toBe(true);
+    expect(tracker.nextAttempt(ak(1))).toBe(1);
+    expect(tracker.nextAttempt(ak(2))).toBe(1);
+    expect(tracker.nextAttempt(ak(10))).toBe(2);
+  });
+
   it('close cancels everything', () => {
     tracker.scheduleResume('a', 100, jest.fn());
     tracker.scheduleResume('b', 100, jest.fn());
