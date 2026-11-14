@@ -266,7 +266,7 @@ describe('consumer groups', () => {
    */
   const makeHarness = (
     run = jest.fn().mockResolvedValue(undefined),
-    deps: { dlqService?: any; idempotency?: any } = {},
+    deps: { dlqService?: any; idempotency?: any; moduleOptions?: any } = {},
   ) => {
     const consumer = {
       connect: jest.fn(),
@@ -302,7 +302,7 @@ describe('consumer groups', () => {
         } as any),
       deps.dlqService ?? ({} as any),
       undefined,
-      undefined,
+      deps.moduleOptions,
     );
     const config = () => run.mock.calls[0][0];
     const consumerConfig = () => consumerFactory.mock.calls[0][0];
@@ -409,6 +409,29 @@ describe('consumer groups', () => {
           consumerMeta('b', { groupId: 'g', commitMode: 'sync' }),
         ]);
         expect(warn.mock.calls.filter(([m]) => m === WARNING)).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('names ConsumerModule.forRoot when the deprecated autoCommit: false is a module default', () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => {});
+      try {
+        const { registry } = makeHarness(undefined, {
+          moduleOptions: { autoCommit: false },
+        });
+        registry.registerConsumers([
+          consumerMeta('a', { groupId: 'g' }),
+          consumerMeta('b', { groupId: 'g2', commitMode: 'background' }),
+        ]);
+        const deprecations = warn.mock.calls
+          .map(([m]) => String(m))
+          .filter((m) => m.includes('deprecated'));
+        expect(deprecations).toEqual([
+          `${WARNING} (set in ConsumerModule.forRoot)`,
+        ]);
       } finally {
         warn.mockRestore();
       }

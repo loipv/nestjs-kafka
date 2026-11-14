@@ -144,7 +144,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   private resolveCommitMode(
     options: ConsumerOptions,
     topic: string,
-  ): { mode: CommitMode; viaAutoCommitFalse: boolean } {
+  ): { mode: CommitMode; viaAutoCommitFalse: boolean; fromModule: boolean } {
     const levels: Array<[string, Partial<ConsumerOptions> | undefined]> = [
       [`Consumer "${topic}"`, options],
       ['ConsumerModule', this.moduleOptions],
@@ -157,10 +157,11 @@ export class ConsumerRegistryService implements OnModuleDestroy {
         return {
           mode,
           viaAutoCommitFalse: levels[i][1]?.autoCommit === false,
+          fromModule: i === 1,
         };
       }
     }
-    return { mode: 'background', viaAutoCommitFalse: false };
+    return { mode: 'background', viaAutoCommitFalse: false, fromModule: false };
   }
 
   /** One level's commit mode, or undefined when it sets neither key. */
@@ -252,7 +253,8 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       if (commit.viaAutoCommitFalse) {
         this.logger.warn(
           `Consumer group "${groupId}": autoCommit: false is deprecated; use commitMode: 'sync' ` +
-            '(the library commits each message synchronously; it does not mean manual commits)',
+            '(the library commits each message synchronously; it does not mean manual commits)' +
+            (commit.fromModule ? ' (set in ConsumerModule.forRoot)' : ''),
         );
       }
     }
