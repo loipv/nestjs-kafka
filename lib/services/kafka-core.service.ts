@@ -87,11 +87,11 @@ export class KafkaCoreService implements OnApplicationBootstrap {
       );
     }
 
-    // librdkafka would override kafkaJS.autoCommit, and the library only
-    // commits itself when it knows auto-commit is off.
+    // librdkafka would override the consumer's commitMode, and the library
+    // only commits itself when it knows background commits are off.
     if (options.rdkafka && 'enable.auto.commit' in options.rdkafka) {
       throw new Error(
-        `Kafka connection "${name}": set autoCommit on the consumer instead of rdkafka "enable.auto.commit"`,
+        `Kafka connection "${name}": set commitMode on the consumer instead of rdkafka "enable.auto.commit"`,
       );
     }
 

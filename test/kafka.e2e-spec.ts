@@ -401,7 +401,7 @@ describe('Kafka e2e (testcontainers)', () => {
     }
   });
 
-  it('autoCommit false commits: a restarted group does not re-read handled messages', async () => {
+  it('commitMode sync commits: a restarted group does not re-read handled messages', async () => {
     const first: string[] = [];
 
     @Injectable()
@@ -410,7 +410,7 @@ describe('Kafka e2e (testcontainers)', () => {
         groupId: 'e2e-ac-g',
         fromBeginning: true,
         allowAutoTopicCreation: true,
-        autoCommit: false,
+        commitMode: 'sync',
       })
       async handle(msg: any) {
         first.push(msg.value?.id);
@@ -435,7 +435,7 @@ describe('Kafka e2e (testcontainers)', () => {
         groupId: 'e2e-ac-g',
         fromBeginning: true,
         allowAutoTopicCreation: true,
-        autoCommit: false,
+        commitMode: 'sync',
       })
       async handle(msg: any) {
         second.push(msg.value?.id);

@@ -1,5 +1,5 @@
 /**
- * What `autoCommit: false` (one synchronous commit per message) costs against
+ * What `commitMode: 'sync'` (one synchronous commit per message) costs against
  * a real broker. Manual only: needs Docker and the native librdkafka binding.
  * Run: `npm run bench:kafka`. With Colima, point testcontainers at its socket:
  * `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
@@ -137,20 +137,24 @@ const scenarios: Array<{
   topic: string;
   options: Partial<ConsumerOptions>;
 }> = [
-  { name: 'autoCommit:true', topic: 'bench-1p', options: {} },
   {
-    name: 'autoCommit:false',
+    name: 'commitMode:background',
     topic: 'bench-1p',
-    options: { autoCommit: false },
+    options: { commitMode: 'background' },
   },
   {
-    name: 'autoCommit:false x4',
+    name: 'commitMode:sync',
+    topic: 'bench-1p',
+    options: { commitMode: 'sync' },
+  },
+  {
+    name: 'commitMode:sync x4',
     topic: 'bench-4p',
-    options: { autoCommit: false, partitionsConsumedConcurrently: 4 },
+    options: { commitMode: 'sync', partitionsConsumedConcurrently: 4 },
   },
 ];
 
-describe('autoCommit cost on Kafka', () => {
+describe('commitMode cost on Kafka', () => {
   beforeAll(async () => {
     Logger.overrideLogger(['error']);
     kafka = await startKafka();
