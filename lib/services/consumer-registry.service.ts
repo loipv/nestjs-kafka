@@ -23,6 +23,7 @@ import {
   ConsumerMetadata,
   ConsumerModuleOptions,
   ConsumerOptions,
+  CommitMode,
   CONSUMER_MODULE_OPTIONS,
   DEFAULT_KAFKA_CONNECTION,
   deserializeMessage,
@@ -39,7 +40,7 @@ interface TopicHandler {
 const ERR_REVOKE_PARTITIONS = -174;
 /** librdkafka ERR__NO_OFFSET: a commit with nothing stored to commit */
 const ERR_NO_OFFSET = -168;
-/** Upper bound for one synchronous commit (autoCommit: false) */
+/** Upper bound for one synchronous commit (commitMode: 'sync') */
 const COMMIT_TIMEOUT_MS = 10000;
 /** Default chunk size, shared with BatchProcessorService.splitIntoBatches */
 const DEFAULT_BATCH_SIZE = 100;
@@ -50,7 +51,6 @@ const DEFAULTABLE_KEYS = [
   'sessionTimeout',
   'heartbeatInterval',
   'rebalanceTimeout',
-  'autoCommit',
   'autoCommitInterval',
   'fromBeginning',
   'autoCreateTopicPartitions',
@@ -99,17 +99,24 @@ export class ConsumerRegistryService implements OnModuleDestroy {
 
   /**
    * Merge module default options with decorator options.
-   * Decorator options take precedence over module defaults.
+   * Decorator options take precedence over module defaults. The result always
+   * has `commitMode` set and never `autoCommit` (resolved into commitMode).
    */
-  private mergeWithDefaults(options: ConsumerOptions): ConsumerOptions {
+  private mergeWithDefaults(
+    options: ConsumerOptions,
+    topic: string,
+    commitMode: CommitMode = this.resolveCommitMode(options, topic).mode,
+  ): ConsumerOptions {
+    const merged: ConsumerOptions = { ...options, commitMode };
+    delete merged.autoCommit;
+
     if (!this.moduleOptions) {
-      return options;
+      return merged;
     }
 
     const defaults = this.moduleOptions;
 
     // Decorator values win; an undefined decorator value never hides a default
-    const merged: ConsumerOptions = { ...options };
     for (const key of DEFAULTABLE_KEYS) {
       if (merged[key] === undefined && defaults[key] !== undefined) {
         (merged as Record<string, unknown>)[key] = defaults[key];
@@ -130,6 +137,64 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   }
 
   /**
+   * The effective commit mode: the decorator level (commitMode, else the
+   * deprecated autoCommit) beats the module level, then 'background'. Throws on
+   * an invalid commitMode or when one level sets both keys in conflict.
+   */
+  private resolveCommitMode(
+    options: ConsumerOptions,
+    topic: string,
+  ): { mode: CommitMode; viaAutoCommitFalse: boolean } {
+    const levels: Array<[string, Partial<ConsumerOptions> | undefined]> = [
+      [`Consumer "${topic}"`, options],
+      ['ConsumerModule', this.moduleOptions],
+    ];
+    const resolved = levels.map(([label, level]) =>
+      level ? this.commitModeOfLevel(label, level) : undefined,
+    );
+    for (const [i, mode] of resolved.entries()) {
+      if (mode !== undefined) {
+        return {
+          mode,
+          viaAutoCommitFalse: levels[i][1]?.autoCommit === false,
+        };
+      }
+    }
+    return { mode: 'background', viaAutoCommitFalse: false };
+  }
+
+  /** One level's commit mode, or undefined when it sets neither key. */
+  private commitModeOfLevel(
+    label: string,
+    level: Partial<ConsumerOptions>,
+  ): CommitMode | undefined {
+    const { commitMode, autoCommit } = level;
+    if (
+      commitMode !== undefined &&
+      commitMode !== 'background' &&
+      commitMode !== 'sync'
+    ) {
+      throw new Error(`${label}: commitMode must be 'background' or 'sync'`);
+    }
+    const fromAutoCommit: CommitMode | undefined =
+      autoCommit === undefined
+        ? undefined
+        : autoCommit === false
+          ? 'sync'
+          : 'background';
+    if (
+      commitMode !== undefined &&
+      fromAutoCommit !== undefined &&
+      commitMode !== fromAutoCommit
+    ) {
+      throw new Error(
+        `${label}: commitMode '${commitMode}' conflicts with autoCommit: ${String(autoCommit)}`,
+      );
+    }
+    return commitMode ?? fromAutoCommit;
+  }
+
+  /**
    * Register discovered consumers (ConsumerModule calls this at bootstrap).
    * @internal Not for application use: a group registered after startAll()
    * is never started.
@@ -145,7 +210,12 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   private registerConsumer(metadata: ConsumerMetadata): void {
     const { topic, connection, target, methodName } = metadata;
     // Merge module defaults with decorator options
-    const options = this.mergeWithDefaults(metadata.options);
+    const commit = this.resolveCommitMode(metadata.options, topic);
+    const options = this.mergeWithDefaults(
+      metadata.options,
+      topic,
+      commit.mode,
+    );
     const groupId = options.groupId || `${topic}-group`;
     const connectionName = connection || DEFAULT_KAFKA_CONNECTION;
 
@@ -178,6 +248,13 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       this.logger.log(
         `Created consumer group: ${groupId} (connection: ${connectionName})`,
       );
+      // Once per group: the group's client config comes from this registration
+      if (commit.viaAutoCommitFalse) {
+        this.logger.warn(
+          `Consumer group "${groupId}": autoCommit: false is deprecated; use commitMode: 'sync' ` +
+            '(the library commits each message synchronously; it does not mean manual commits)',
+        );
+      }
     }
 
     if (group.isBatch !== !!options.batch) {
@@ -521,7 +598,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       await this.processMessage(group, payload);
 
       // With auto-commit off the client never commits on its own
-      if (group.options.autoCommit === false) {
+      if (group.options.commitMode === 'sync') {
         const { topic, partition, message } = payload;
         await this.commitMessageOffset(
           consumer,
@@ -736,7 +813,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
         payload.resolveOffset(lastOffset);
 
         // With auto-commit off the client never commits on its own
-        if (options.autoCommit === false) {
+        if (options.commitMode === 'sync') {
           await this.boundedCommit(
             () => payload.commitOffsetsIfNecessary(),
             topic,
@@ -967,7 +1044,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     const consumerConfig: KafkaJS.ConsumerConfig = {
       groupId,
       maxBytesPerPartition: 1048576,
-      autoCommit: options.autoCommit !== false,
+      autoCommit: options.commitMode !== 'sync',
     };
 
     // Add optional settings only if defined

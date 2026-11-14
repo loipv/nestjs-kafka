@@ -10,6 +10,9 @@ type KafkaMessage = KafkaJS.KafkaMessage;
  */
 export type PartitionAssigner = 'roundrobin' | 'range' | 'cooperative-sticky';
 
+/** How handled offsets are committed (see ConsumerOptions.commitMode). */
+export type CommitMode = 'background' | 'sync';
+
 export interface DlqOptions {
   /** DLQ topic to send failed messages */
   topic: string;
@@ -100,9 +103,16 @@ export interface ConsumerOptions {
   dlq?: DlqOptions;
 
   /**
-   * Commit offsets in the background every `autoCommitInterval`. When false,
-   * the library commits synchronously after each handled message (or batch
-   * chunk): fewer redeliveries after a crash, lower throughput. Default: true
+   * How handled offsets are committed. The application never commits by itself.
+   * - `'background'` (default): librdkafka commits stored offsets every
+   *   `autoCommitInterval` and on close.
+   * - `'sync'`: the library commits each handled message (or resolved batch
+   *   chunk) synchronously: fewer redeliveries after a crash, lower throughput.
+   */
+  commitMode?: CommitMode;
+  /**
+   * @deprecated Use commitMode ('background' for true, 'sync' for false).
+   * Unlike KafkaJS, `false` does not mean manual commits; it logs a warning.
    */
   autoCommit?: boolean;
   /** Auto-commit interval in ms. Default: the client's (librdkafka `auto.commit.interval.ms`) */
@@ -198,8 +208,13 @@ export interface ConsumerModuleOptions {
   rebalanceTimeout?: number;
 
   /**
-   * Default auto commit setting.
-   * Applied when @Consumer decorator doesn't specify autoCommit.
+   * Default commit mode ('background' or 'sync').
+   * Applied when @Consumer decorator sets neither commitMode nor autoCommit.
+   */
+  commitMode?: CommitMode;
+
+  /**
+   * @deprecated Use commitMode ('background' for true, 'sync' for false).
    */
   autoCommit?: boolean;
 

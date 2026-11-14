@@ -50,7 +50,6 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
       'sessionTimeout',
       'heartbeatInterval',
       'rebalanceTimeout',
-      'autoCommit',
       'autoCommitInterval',
       'fromBeginning',
       'autoCreateTopicPartitions',
@@ -74,6 +73,66 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
     const merged = (registry as any).mergeWithDefaults({});
     expect(merged.autoCreateTopicPartitions).toBe(3);
     expect(merged.autoCreateTopicReplicationFactor).toBe(3);
+  });
+
+  it('resolves commitMode from commitMode or autoCommit, decorator level first', () => {
+    const rows: Array<[any, any, string]> = [
+      [undefined, {}, 'background'],
+      [undefined, { autoCommit: false }, 'sync'],
+      [undefined, { autoCommit: true }, 'background'],
+      [undefined, { commitMode: 'sync' }, 'sync'],
+      [{ autoCommit: false }, {}, 'sync'],
+      [{ commitMode: 'sync' }, {}, 'sync'],
+      [{ autoCommit: false }, { commitMode: 'background' }, 'background'],
+      [{ commitMode: 'sync' }, { autoCommit: true }, 'background'],
+      [{ commitMode: 'background' }, { autoCommit: false }, 'sync'],
+      [undefined, { commitMode: 'sync', autoCommit: false }, 'sync'],
+    ];
+    for (const [moduleOptions, decorator, expected] of rows) {
+      const merged = (makeRegistry(moduleOptions) as any).mergeWithDefaults(
+        decorator,
+        't',
+      );
+      expect([moduleOptions, decorator, merged.commitMode]).toEqual([
+        moduleOptions,
+        decorator,
+        expected,
+      ]);
+      expect(merged.autoCommit).toBeUndefined();
+    }
+  });
+
+  const meta = (topic: string, options: any) =>
+    ({
+      topic,
+      connection: 'default',
+      options,
+      target: { h: () => Promise.resolve() },
+      methodName: 'h',
+    }) as any;
+
+  it('throws when one level sets commitMode and autoCommit in conflict', () => {
+    expect(() =>
+      makeRegistry().registerConsumers([
+        meta('orders', { commitMode: 'background', autoCommit: false }),
+      ]),
+    ).toThrow(/Consumer "orders": commitMode .* conflicts with autoCommit/);
+    expect(() =>
+      makeRegistry({ commitMode: 'sync', autoCommit: true }).registerConsumers([
+        meta('orders', {}),
+      ]),
+    ).toThrow(/ConsumerModule: commitMode .* conflicts with autoCommit/);
+  });
+
+  it('throws on an invalid commitMode', () => {
+    for (const commitMode of ['manual', true]) {
+      expect(() =>
+        makeRegistry().registerConsumers([meta('orders', { commitMode })]),
+      ).toThrow(/commitMode must be 'background' or 'sync'/);
+      expect(() =>
+        makeRegistry({ commitMode }).registerConsumers([meta('orders', {})]),
+      ).toThrow(/commitMode must be 'background' or 'sync'/);
+    }
   });
 });
 
@@ -297,10 +356,99 @@ describe('consumer groups', () => {
     return h;
   };
 
-  describe('autoCommit: false', () => {
+  describe('commitMode: sync', () => {
     const commitOf = (offset: string, topic = 't') => [
       [{ topic, partition: 0, offset }],
     ];
+
+    const WARNING =
+      'Consumer group "g": autoCommit: false is deprecated; use commitMode: \'sync\' ' +
+      '(the library commits each message synchronously; it does not mean manual commits)';
+
+    it('commitMode sync: eachMessage commits offset + 1 after success', async () => {
+      const { config, consumer } = await started(
+        { commitMode: 'sync' },
+        jest.fn(),
+      );
+      await config().eachMessage(messagePayload('5'));
+      expect(consumer.commitOffsets.mock.calls).toEqual([commitOf('6')]);
+    });
+
+    it('commitMode sync: eachBatch commits after every resolved chunk', async () => {
+      const { config } = await started(
+        { batch: true, batchSize: 2, commitMode: 'sync' },
+        jest.fn(),
+      );
+      const payload = batchPayload(['1', '2', '3', '4'].map(mkMsg), jest.fn());
+      await config().eachBatch(payload);
+      expect(payload.commitOffsetsIfNecessary).toHaveBeenCalledTimes(2);
+    });
+
+    it('sets the client autoCommit from the resolved mode', async () => {
+      for (const [options, expected] of [
+        [{}, true],
+        [{ commitMode: 'background' }, true],
+        [{ commitMode: 'sync' }, false],
+      ] as const) {
+        const { consumerConfig } = await started(options, jest.fn());
+        expect([options, consumerConfig().kafkaJS.autoCommit]).toEqual([
+          options,
+          expected,
+        ]);
+      }
+    });
+
+    it('warns once per group when autoCommit: false is used', () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => {});
+      try {
+        const { registry } = makeHarness();
+        registry.registerConsumers([
+          consumerMeta('a', { groupId: 'g', autoCommit: false }),
+          consumerMeta('b', { groupId: 'g', commitMode: 'sync' }),
+        ]);
+        expect(warn.mock.calls.filter(([m]) => m === WARNING)).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('does not warn for autoCommit: true or commitMode', () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => {});
+      try {
+        const { registry } = makeHarness();
+        registry.registerConsumers([
+          consumerMeta('a', { groupId: 'g1', autoCommit: true }),
+          consumerMeta('b', { groupId: 'g2', commitMode: 'sync' }),
+          consumerMeta('c', { groupId: 'g3' }),
+        ]);
+        expect(
+          warn.mock.calls.filter(([m]) => String(m).includes('deprecated')),
+        ).toEqual([]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('warns for autoCommit: false without ConsumerModule options', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => {});
+      try {
+        const h = makeHarness();
+        h.registry.registerConsumers([
+          consumerMeta('t', { groupId: 'g', autoCommit: false }),
+        ]);
+        await h.registry.startAll();
+        expect(warn.mock.calls.filter(([m]) => m === WARNING)).toHaveLength(1);
+        expect(h.consumerConfig().kafkaJS.autoCommit).toBe(false);
+      } finally {
+        warn.mockRestore();
+      }
+    });
 
     it('eachMessage commits offset + 1 after success', async () => {
       const { config, consumer } = await started(
@@ -510,7 +658,7 @@ describe('consumer groups', () => {
         .mockImplementation(() => undefined);
       try {
         const { config } = await started(
-          { batch: true, batchSize: 2, autoCommit: false },
+          { batch: true, batchSize: 2, commitMode: 'sync' },
           jest.fn(),
         );
         const payload = batchPayload(['1', '2'].map(mkMsg), jest.fn());
@@ -596,7 +744,7 @@ describe('consumer groups', () => {
         process.on('unhandledRejection', unhandled);
         try {
           const { config, consumer } = await started(
-            { autoCommit: false },
+            { commitMode: 'sync' },
             jest.fn(),
           );
           consumer.commitOffsets.mockReturnValue(
