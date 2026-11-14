@@ -67,7 +67,8 @@
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
     "release": "changeset publish",
-    "bench": "jest --config test/bench/jest-bench.json --runInBand"
+    "bench": "jest --config test/bench/jest-bench.json --runInBand",
+    "bench:kafka": "jest --config test/bench/jest-kafka-bench.json --runInBand"
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.10.1"

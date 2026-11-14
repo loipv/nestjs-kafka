@@ -1,0 +1,11 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "../..",
+  "roots": ["<rootDir>/test/bench"],
+  "testEnvironment": "node",
+  "testRegex": "kafka-commit\\.bench\\.ts$",
+  "testTimeout": 600000,
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  }
+}

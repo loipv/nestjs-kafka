@@ -44,4 +44,21 @@ A second baseline run was within 3% of these numbers.
 
 ## autoCommit: false on Kafka
 
-_Filled in by `npm run bench:kafka`._
+`npm run bench:kafka`: one `confluentinc/cp-kafka:7.6.0` broker (KRaft, single node) in Colima
+(2 CPUs, 2 GiB) on the same machine. 20,000 messages (`{"id":<n>}`, 64 distinct keys) are produced
+to each topic first. Each scenario is a Nest app with one `@Consumer` (no-op handler, fresh
+`groupId`, `fromBeginning: true`). Throughput is measured from the first message received to the
+20,000th, so the group join is excluded.
+
+| Scenario | Topic | Run 1 (msg/s) | Run 2 (msg/s) |
+|----------|-------|--------------:|--------------:|
+| `autoCommit: true` (default) | 1 partition | 152,241 | 145,832 |
+| `autoCommit: false` | 1 partition | 21,130 | 21,941 |
+| `autoCommit: false`, `partitionsConsumedConcurrently: 4` | 4 partitions | 43,994 | 43,535 |
+
+On a local broker `autoCommit: false` is about 7× slower than the default: each message waits for
+its own commit round trip. Commits of different partitions overlap, so
+`partitionsConsumedConcurrently` with more partitions roughly doubles it here (4 partitions on a
+2-CPU broker). Against a remote broker the round trip is longer, so the gap grows. A coalesced
+commit model would remove most of this cost; it changes the redelivery window after a crash and is
+left for a separate feature.
