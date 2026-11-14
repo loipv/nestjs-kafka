@@ -4,6 +4,36 @@ import { KafkaCoreService } from '../services/kafka-core.service';
 // Type only: @nestjs/terminus is an optional peer dependency
 import type { HealthIndicatorResult } from '@nestjs/terminus';
 
+/** Offset fetches in flight at once: a group may read hundreds of topics */
+const MAX_PARALLEL_OFFSET_FETCHES = 10;
+
+/**
+ * `Promise.allSettled(items.map(fn))` with at most `limit` calls in flight.
+ * Results keep the order of `items`; a synchronous throw is a rejection.
+ */
+async function settleWithLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results = new Array<PromiseSettledResult<R>>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = { status: 'fulfilled', value: await fn(items[i]) };
+      } catch (reason: unknown) {
+        results[i] = { status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return results;
+}
+
 /**
  * Kafka Health Indicator for @nestjs/terminus
  *
@@ -131,12 +161,12 @@ export class KafkaHealthIndicator {
       let totalLag = 0;
       const unreadableTopics: string[] = [];
 
-      // Latest (high-watermark) offsets of every topic, fetched in parallel;
-      // the async callback turns a synchronous throw into a rejection
-      const latestByTopic = await Promise.allSettled(
-        committedOffsets.map(async (topicOffset) =>
-          admin.fetchTopicOffsets(topicOffset.topic),
-        ),
+      // Latest (high-watermark) offsets of every topic, a bounded number in
+      // parallel; a synchronous throw counts as a rejection
+      const latestByTopic = await settleWithLimit(
+        committedOffsets,
+        MAX_PARALLEL_OFFSET_FETCHES,
+        (topicOffset) => admin.fetchTopicOffsets(topicOffset.topic),
       );
 
       committedOffsets.forEach((topicOffset, i) => {

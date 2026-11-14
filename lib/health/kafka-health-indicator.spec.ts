@@ -253,6 +253,40 @@ describe('KafkaHealthIndicator', () => {
       });
     });
 
+    it('fetches at most 10 topics at a time', async () => {
+      const admin = kafkaCore.getKafka().admin();
+      const topics = Array.from({ length: 12 }, (_, i) => `t${i}`);
+      (admin.fetchOffsets as jest.Mock).mockResolvedValue(
+        topics.map((topic) => ({
+          topic,
+          partitions: [{ partition: 0, offset: '0' }],
+        })),
+      );
+      const pending = new Map<string, (offsets: unknown) => void>();
+      (admin.fetchTopicOffsets as jest.Mock).mockImplementation(
+        (t: string) =>
+          new Promise((resolve) => {
+            pending.set(t, resolve);
+          }),
+      );
+      const tick = () => new Promise((r) => setImmediate(r));
+
+      const result = healthIndicator.checkConsumerLag('lag', 'g', 1000);
+      await tick();
+      expect([...pending.keys()]).toEqual(topics.slice(0, 10));
+
+      pending.get('t0')!([{ partition: 0, offset: '1' }]);
+      await tick();
+      expect([...pending.keys()]).toEqual(topics.slice(0, 11));
+
+      for (const t of topics) pending.get(t)?.([{ partition: 0, offset: '1' }]);
+      await tick();
+      for (const t of topics) pending.get(t)?.([{ partition: 0, offset: '1' }]);
+      expect(await result).toEqual({
+        lag: { status: 'up', groupId: 'g', lag: 12, maxLag: 1000 },
+      });
+    });
+
     it('lists unreadable topics in committed order when fetches settle out of order', async () => {
       const admin = kafkaCore.getKafka().admin();
       (admin.fetchOffsets as jest.Mock).mockResolvedValue([
