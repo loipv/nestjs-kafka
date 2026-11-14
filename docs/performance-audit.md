@@ -15,8 +15,8 @@
 |---|---------|-------|--------|
 | 1 | `commitMode: 'sync'` (formerly `autoCommit: false`) commits synchronously after every message (one broker round trip per message, plus a timer and a `Promise.race`) | `consumer-registry.service.ts` (`commitMessageOffset`, `boundedCommit`) | Not fixed: changing the commit model changes delivery semantics. Measured below and documented in the README. |
 | 2 | `deserializeMessageValue` runs `JSON.parse` in a `try`/`catch` for every value; every non-JSON value throws | `interfaces/message.interface.ts` | Fixed (`f14b58b`): `JSON.parse` only runs when the first non-whitespace character can start a JSON value; the result is identical for every input. |
-| 3 | Idempotency calls the key extractor and builds the namespaced key twice per message (check, then mark); batch chunks do the same per message | `idempotency.service.ts`, `consumer-registry.service.ts` | Fixed (`85f3a88`): new `keyOf` / `has` / `mark`; the registry extracts each key once. `isProcessed`, `markProcessed` and `filterDuplicates` are unchanged. |
-| 4 | `checkConsumerLag` fetches the latest offsets one topic at a time and looks up partitions with `Array.find` | `health/kafka-health-indicator.ts` | Fixed (`81e9519`): offsets of all topics are fetched in parallel and partitions looked up in a `Map`; `unreadableTopics` keeps the committed order. |
+| 3 | Idempotency calls the key extractor and builds the namespaced key twice per message (check, then mark); batch chunks do the same per message | `idempotency.service.ts`, `consumer-registry.service.ts` | Fixed (`85f3a88`): new `keyOf` / `has` / `mark`; the registry extracts each key once. `isProcessed`, `markProcessed` and `filterDuplicates` keep their signatures and behaviour (they now delegate to the new methods). |
+| 4 | `checkConsumerLag` fetches the latest offsets one topic at a time and looks up partitions with `Array.find` | `health/kafka-health-indicator.ts` | Fixed (`81e9519`, capped at 10 in flight in `46852b1`): offsets of all topics are fetched in parallel and partitions looked up in a `Map`; `unreadableTopics` keeps the committed order. |
 | 5 | `PartitionRetryTracker.revoke` copies and scans every counter and DLQ set once per revoked partition | `services/partition-retry-tracker.ts` | Fixed (`4056ee2`): one pass over each map for all revoked partitions. |
 | 6 | `maxBytesPerPartition` is hardcoded at 1 MB | `consumer-registry.service.ts` (`buildConsumerConfig`) | Not fixed: a new option is out of scope. Raw librdkafka properties can be passed through `rdkafka`. |
 | 7 | `partitionsConsumedConcurrently` defaults to 1 (the client's default) | client default | Not fixed: a default, not a defect. The README points to it for `commitMode: 'sync'`. |
@@ -34,23 +34,26 @@ are `{"id":<n>,"status":"ok"}`, text values `order <n> processed`.
 
 | Scenario | Before (msg/s) | After (msg/s) | Change |
 |----------|---------------:|--------------:|-------:|
-| message/json | 424,124 | 418,820 | ≈ |
-| message/text | 157,334 | 521,475 | 3.3× |
-| message/json+idem | 266,450 | 257,961 | ≈ |
-| batch/json | 591,637 | 581,798 | ≈ |
-| batch/json+idem | 335,770 | 351,297 | ≈ |
+| message/json | 421,169 | 435,267 | ≈ |
+| message/text | 159,641 | 527,347 | 3.3× |
+| message/json+idem | 266,542 | 289,554 | +9% |
+| batch/json | 592,350 | 595,221 | ≈ |
+| batch/json+idem | 343,966 | 369,166 | +7% |
 
-"Before" is the first baseline run (a second one was within 3%); "after" is the median of three
-runs at `cc5710d`. Scenarios without `+idem` vary about 5% between runs. `+idem` scenarios vary
-more (up to 45% in one run), because the key map grows to about 510k entries over a scenario and
-garbage collection lands on different runs.
+Both columns are the median of three `npm run bench` runs, back to back on the same machine:
+"before" at `d25386b` (the baseline code plus the benchmark), "after" at `46852b1`. Scenarios
+without `+idem` vary about 5% between runs. `+idem` scenarios have varied far more in earlier runs
+(one outlier 45% low), because the key map grows to about 510k entries over a scenario and garbage
+collection lands on different runs.
 
 - **Non-JSON values** are the one large win: no exception per message, 3.3× faster.
-- **Idempotency**: the saved extraction is within the noise with this benchmark's cheap extractor
-  (`m.key.toString()`). It matters when the extractor is expensive (for example, parsing a header
-  or the value), since it now runs once per message instead of twice.
-- **Lag check and revoke** are not on the consume path. The lag check now waits for the slowest
-  topic instead of the sum of all topics; revoke work no longer grows with revoked partitions ×
+- **Idempotency**: +7–9% in this pairing, with this benchmark's cheap extractor
+  (`m.key.toString()`); treat that as indicative given the spread above. The gain grows with the
+  extractor's cost (for example, parsing a header or the value), since it now runs once per message
+  instead of twice.
+- **Lag check and revoke** are not on the consume path. The lag check now fetches up to 10 topics
+  at a time instead of one (`46852b1` caps it, so a group on hundreds of topics does not send them
+  all at once); revoke work no longer grows with revoked partitions ×
   stored counters.
 
 ## commitMode: 'sync' on Kafka
