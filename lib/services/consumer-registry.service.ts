@@ -785,7 +785,9 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     const keys: string[] = [];
     try {
       if (options.idempotencyKey) {
-        processable = [];
+        // Assigned only once every key is extracted: an extractor throwing
+        // mid-chunk must leave the whole chunk to the failure path (DLQ)
+        const kept: KafkaJS.KafkaMessage[] = [];
         for (const msg of chunk) {
           const key = this.idempotencyService.keyOf(
             msg,
@@ -793,12 +795,13 @@ export class ConsumerRegistryService implements OnModuleDestroy {
             namespace,
           );
           if (key === undefined) {
-            processable.push(msg);
+            kept.push(msg);
           } else if (!this.idempotencyService.has(key)) {
-            processable.push(msg);
+            kept.push(msg);
             keys.push(key);
           }
         }
+        processable = kept;
       }
       if (processable.length === 0) return;
       await this.invokeBatchHandler(

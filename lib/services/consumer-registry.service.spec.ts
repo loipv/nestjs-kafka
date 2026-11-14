@@ -928,6 +928,33 @@ describe('consumer groups', () => {
       });
       afterEach(() => idempotency.stopCleanup());
 
+      it('eachBatch dead-letters the whole chunk when the extractor throws mid-chunk', async () => {
+        const dlqService = {
+          handleFailure: jest.fn().mockResolvedValue({ action: 'complete' }),
+        };
+        const resolveOffset = jest.fn();
+        const { config } = await started(
+          {
+            batch: true,
+            batchSize: 10,
+            dlq: { topic: 'd' },
+            idempotencyKey: (m: any) => {
+              if (m.offset === '2') throw new Error('no id header');
+              return `k${m.offset}`;
+            },
+          },
+          jest.fn(),
+          { idempotency, dlqService },
+        );
+        await config().eachBatch(
+          batchPayload(['1', '2', '3'].map(mkMsg), resolveOffset),
+        );
+        expect(
+          dlqService.handleFailure.mock.calls[0][0].map((m: any) => m.offset),
+        ).toEqual(['1', '2', '3']);
+        expect(resolveOffset).toHaveBeenCalledWith('3');
+      });
+
       it('eachMessage calls the idempotency extractor once per message', async () => {
         const extractor = jest.fn(() => 'k1');
         const handler = jest.fn();
