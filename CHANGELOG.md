@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.0
+
+### Minor Changes
+
+- [`671def6`](https://github.com/loipv/nestjs-kafka/commit/671def6c8a3bdb56db66a5a6a7a36f03f6768e63) Thanks [@loipv](https://github.com/loipv)! - Add the `commitMode` consumer option (`'background'` default, `'sync'`). `autoCommit` is deprecated: `autoCommit: false` still commits each message synchronously but logs a warning, because in KafkaJS and confluent-kafka-javascript it means manual commits. Setting `commitMode` and `autoCommit` to conflicting values at the same level (decorator or `ConsumerModule.forRoot`) fails at startup, as does an invalid `commitMode`.
+
+### Patch Changes
+
+- [`ad0a291`](https://github.com/loipv/nestjs-kafka/commit/ad0a291a578993d1a4a73b402307a23dad1447de) Thanks [@loipv](https://github.com/loipv)! - Faster consume path: non-JSON message values no longer throw inside deserialization, the idempotency key is extracted once per message, the consumer-lag health check fetches topic offsets in parallel (at most 10 at a time), and revoking partitions clears retry state in one pass.
+
 ## 2.0.0
 
 ### Major Changes
