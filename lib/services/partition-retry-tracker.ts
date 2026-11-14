@@ -81,15 +81,18 @@ export class PartitionRetryTracker {
 
   /** Forgets the timers and counters of revoked partitions. */
   revoke(partitionKeys: string[]): void {
-    for (const partitionKey of partitionKeys) {
-      this.cancelTimer(partitionKey);
-      const prefix = `${partitionKey}|`;
-      for (const key of [...this.attempts.keys()]) {
-        if (key.startsWith(prefix)) this.attempts.delete(key);
-      }
-      for (const key of [...this.sent.keys()]) {
-        if (key.startsWith(prefix)) this.sent.delete(key);
-      }
+    for (const partitionKey of partitionKeys) this.cancelTimer(partitionKey);
+
+    // One pass over each map: an attempt key is `<partitionKey>|<offset>` and
+    // the offset never contains `|`. Deleting while iterating a Map is safe.
+    const revoked = new Set(partitionKeys);
+    const isRevoked = (attemptKey: string) =>
+      revoked.has(attemptKey.slice(0, attemptKey.lastIndexOf('|')));
+    for (const key of this.attempts.keys()) {
+      if (isRevoked(key)) this.attempts.delete(key);
+    }
+    for (const key of this.sent.keys()) {
+      if (isRevoked(key)) this.sent.delete(key);
     }
   }
 
