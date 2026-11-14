@@ -131,34 +131,39 @@ export class KafkaHealthIndicator {
       let totalLag = 0;
       const unreadableTopics: string[] = [];
 
-      for (const topicOffset of committedOffsets) {
-        let latestOffsets: Array<{ partition: number; offset: string }>;
-        try {
-          // Fetch the latest (high-watermark) offsets for each topic
-          latestOffsets = await admin.fetchTopicOffsets(topicOffset.topic);
-        } catch (error) {
+      // Latest (high-watermark) offsets of every topic, fetched in parallel;
+      // the async callback turns a synchronous throw into a rejection
+      const latestByTopic = await Promise.allSettled(
+        committedOffsets.map(async (topicOffset) =>
+          admin.fetchTopicOffsets(topicOffset.topic),
+        ),
+      );
+
+      committedOffsets.forEach((topicOffset, i) => {
+        const fetched = latestByTopic[i];
+        if (fetched.status === 'rejected') {
           unreadableTopics.push(topicOffset.topic);
           this.logger.warn(
-            `Lag of group "${groupId}" on topic "${topicOffset.topic}" is unknown: ${String(error)}`,
+            `Lag of group "${groupId}" on topic "${topicOffset.topic}" is unknown: ${String(fetched.reason)}`,
           );
-          continue;
+          return;
         }
+        const latestOffsets = new Map(
+          fetched.value.map((o) => [o.partition, o.offset]),
+        );
 
         for (const partition of topicOffset.partitions) {
           const committed = parseInt(partition.offset, 10);
           if (Number.isNaN(committed)) continue;
 
-          const latestPartition = latestOffsets.find(
-            (o) => o.partition === partition.partition,
-          );
-          const latest = latestPartition
-            ? parseInt(latestPartition.offset, 10)
-            : committed;
+          const latestOffset = latestOffsets.get(partition.partition);
+          const latest =
+            latestOffset !== undefined ? parseInt(latestOffset, 10) : committed;
           totalLag += Number.isNaN(latest)
             ? 0
             : Math.max(0, latest - committed);
         }
-      }
+      });
 
       const details = {
         groupId,
