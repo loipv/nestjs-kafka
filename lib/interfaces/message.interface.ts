@@ -14,8 +14,30 @@ export interface KafkaMessagePayload<T = any> {
 }
 
 /**
+ * Whether `s` can be a JSON document: its first non-whitespace character
+ * (JSON whitespace only) starts a JSON value. Anything else would make
+ * JSON.parse throw, which is costly on every plain-text message.
+ */
+function mayBeJson(s: string): boolean {
+  let i = 0;
+  let c = s.charCodeAt(i);
+  // space, \t, \n, \r
+  while (c === 32 || c === 9 || c === 10 || c === 13) c = s.charCodeAt(++i);
+  return (
+    c === 123 || // {
+    c === 91 || // [
+    c === 34 || // "
+    c === 45 || // -
+    (c >= 48 && c <= 57) || // 0-9
+    c === 116 || // t
+    c === 102 || // f
+    c === 110 // n
+  );
+}
+
+/**
  * Deserialize a Kafka message value
- * - Tries JSON.parse first
+ * - Tries JSON.parse first (only when the value can be JSON)
  * - Falls back to string conversion
  * - Returns null for null values
  */
@@ -25,6 +47,9 @@ export function deserializeMessageValue(value: Buffer | null): any {
   }
 
   const stringValue = value.toString('utf-8');
+  if (!mayBeJson(stringValue)) {
+    return stringValue;
+  }
 
   try {
     return JSON.parse(stringValue);
