@@ -274,7 +274,7 @@ async handleEvent(message: KafkaMessagePayload) {}
 | `heartbeatInterval` | `number` | Heartbeat interval in ms |
 | `rebalanceTimeout` | `number` | Rebalance timeout in ms |
 | `commitMode` | `'background' \| 'sync'` | `'background'` (default): librdkafka commits stored offsets every `autoCommitInterval` and on close. `'sync'`: the library commits each handled message or chunk synchronously. The application never commits by itself |
-| `autoCommit` | `boolean` | Deprecated: use `commitMode` (`true` = `'background'`, `false` = `'sync'`; `false` logs a warning). Unlike KafkaJS, `false` does not mean manual commits. Conflicting `autoCommit` and `commitMode` fail at startup |
+| `autoCommit` | `boolean` | Deprecated: use `commitMode` (`true` = `'background'`, `false` = `'sync'`; `false` logs a warning). Unlike KafkaJS, `false` does not mean manual commits. `autoCommit` and `commitMode` that conflict at the same level (decorator or `ConsumerModule.forRoot`) fail at startup; across levels the decorator wins. A later consumer in a group whose own mode differs from the group's (set by its first consumer) logs a warning |
 | `autoCommitInterval` | `number` | Background commit interval in ms (`commitMode: 'background'`) |
 | `fromBeginning` | `boolean` | Start consuming from beginning |
 | `retry` | `ConsumerRetryOptions` | Default retry options |

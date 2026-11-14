@@ -73,6 +73,8 @@ interface ConsumerGroup {
   isRunning: boolean;
   /** Set by the group's first consumer; every consumer in a group must match */
   isBatch: boolean;
+  /** The autoCommit: false deprecation was logged for this group */
+  autoCommitWarned?: boolean;
 }
 
 @Injectable()
@@ -144,7 +146,11 @@ export class ConsumerRegistryService implements OnModuleDestroy {
   private resolveCommitMode(
     options: ConsumerOptions,
     topic: string,
-  ): { mode: CommitMode; viaAutoCommitFalse: boolean; fromModule: boolean } {
+  ): {
+    mode: CommitMode;
+    viaAutoCommitFalse: boolean;
+    source: 'decorator' | 'module' | 'default';
+  } {
     const levels: Array<[string, Partial<ConsumerOptions> | undefined]> = [
       [`Consumer "${topic}"`, options],
       ['ConsumerModule', this.moduleOptions],
@@ -157,11 +163,11 @@ export class ConsumerRegistryService implements OnModuleDestroy {
         return {
           mode,
           viaAutoCommitFalse: levels[i][1]?.autoCommit === false,
-          fromModule: i === 1,
+          source: i === 0 ? 'decorator' : 'module',
         };
       }
     }
-    return { mode: 'background', viaAutoCommitFalse: false, fromModule: false };
+    return { mode: 'background', viaAutoCommitFalse: false, source: 'default' };
   }
 
   /** One level's commit mode, or undefined when it sets neither key. */
@@ -202,6 +208,10 @@ export class ConsumerRegistryService implements OnModuleDestroy {
    */
   registerConsumers(consumers: ConsumerMetadata[]): void {
     this.registered = true;
+    // Validate the module default once, even when no consumer uses it
+    if (this.moduleOptions) {
+      this.commitModeOfLevel('ConsumerModule', this.moduleOptions);
+    }
     // Group consumers by groupId
     for (const metadata of consumers) {
       this.registerConsumer(metadata);
@@ -233,6 +243,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     // Get or create consumer group
     let group = this.consumerGroups.get(groupKey);
 
+    const isNewGroup = !group;
     if (!group) {
       group = {
         groupId,
@@ -249,14 +260,30 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       this.logger.log(
         `Created consumer group: ${groupId} (connection: ${connectionName})`,
       );
-      // Once per group: the group's client config comes from this registration
-      if (commit.viaAutoCommitFalse) {
-        this.logger.warn(
-          `Consumer group "${groupId}": autoCommit: false is deprecated; use commitMode: 'sync' ` +
-            '(the library commits each message synchronously; it does not mean manual commits)' +
-            (commit.fromModule ? ' (set in ConsumerModule.forRoot)' : ''),
-        );
-      }
+    }
+
+    // Once per group, from whichever member uses the deprecated key
+    if (commit.viaAutoCommitFalse && !group.autoCommitWarned) {
+      group.autoCommitWarned = true;
+      this.logger.warn(
+        `Consumer group "${groupId}": autoCommit: false is deprecated; use commitMode: 'sync' ` +
+          '(the library commits each message synchronously; it does not mean manual commits)' +
+          (commit.source === 'module'
+            ? ' (set in ConsumerModule.forRoot)'
+            : ''),
+      );
+    }
+    // The group's client config comes from its first registration: a later
+    // member's own commit mode cannot apply (not an error, for 2.0 apps)
+    if (
+      !isNewGroup &&
+      commit.source === 'decorator' &&
+      commit.mode !== group.options.commitMode
+    ) {
+      this.logger.warn(
+        `Consumer "${topic}": commitMode '${commit.mode}' is ignored; group "${groupId}" ` +
+          `uses '${group.options.commitMode}' from its first consumer`,
+      );
     }
 
     if (group.isBatch !== !!options.batch) {

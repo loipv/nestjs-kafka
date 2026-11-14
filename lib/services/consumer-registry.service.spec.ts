@@ -102,6 +102,41 @@ describe('ConsumerRegistryService.mergeWithDefaults', () => {
     }
   });
 
+  it('resolves commitMode over the full grid of both levels', () => {
+    // Each level setting and the mode it means on its own (undefined: unset)
+    const levels: Array<[any, string | undefined]> = [
+      [{}, undefined],
+      [{ commitMode: 'background' }, 'background'],
+      [{ commitMode: 'sync' }, 'sync'],
+      [{ autoCommit: true }, 'background'],
+      [{ autoCommit: false }, 'sync'],
+      [{ commitMode: 'background', autoCommit: true }, 'background'],
+      [{ commitMode: 'sync', autoCommit: false }, 'sync'],
+    ];
+    for (const [moduleOptions, moduleMode] of [
+      [undefined, undefined] as [any, string | undefined],
+      ...levels,
+    ]) {
+      for (const [decorator, decoratorMode] of levels) {
+        const merged = (makeRegistry(moduleOptions) as any).mergeWithDefaults(
+          decorator,
+          't',
+        );
+        expect([moduleOptions, decorator, merged.commitMode]).toEqual([
+          moduleOptions,
+          decorator,
+          decoratorMode ?? moduleMode ?? 'background',
+        ]);
+      }
+    }
+  });
+
+  it('rejects an invalid module commitMode even without consumers', () => {
+    expect(() =>
+      makeRegistry({ commitMode: 'manual' }).registerConsumers([]),
+    ).toThrow("ConsumerModule: commitMode must be 'background' or 'sync'");
+  });
+
   const meta = (topic: string, options: any) =>
     ({
       topic,
@@ -432,6 +467,62 @@ describe('consumer groups', () => {
         expect(deprecations).toEqual([
           `${WARNING} (set in ConsumerModule.forRoot)`,
         ]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    const MISMATCH =
+      'Consumer "b": commitMode \'sync\' is ignored; group "g" uses \'background\' from its first consumer';
+
+    it('warns when a later group member sets a different commit mode', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => {});
+      try {
+        const h = makeHarness();
+        h.registry.registerConsumers([
+          consumerMeta('a', { groupId: 'g' }),
+          consumerMeta('b', { groupId: 'g', commitMode: 'sync' }),
+        ]);
+        await h.registry.startAll();
+        expect(warn.mock.calls.map(([m]) => m)).toContain(MISMATCH);
+        expect(h.consumerConfig().kafkaJS.autoCommit).toBe(true);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('does not warn about a later member that sets no commit mode', () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => {});
+      try {
+        const { registry } = makeHarness();
+        registry.registerConsumers([
+          consumerMeta('a', { groupId: 'g', commitMode: 'sync' }),
+          consumerMeta('b', { groupId: 'g' }),
+        ]);
+        expect(
+          warn.mock.calls.filter(([m]) => String(m).includes('ignored')),
+        ).toEqual([]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('warns about autoCommit: false once per group even on a later member', () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => {});
+      try {
+        const { registry } = makeHarness();
+        registry.registerConsumers([
+          consumerMeta('a', { groupId: 'g' }),
+          consumerMeta('b', { groupId: 'g', autoCommit: false }),
+          consumerMeta('c', { groupId: 'g', autoCommit: false }),
+        ]);
+        expect(warn.mock.calls.filter(([m]) => m === WARNING)).toHaveLength(1);
       } finally {
         warn.mockRestore();
       }

@@ -139,9 +139,9 @@
     "coverageThreshold": {
       "global": {
         "statements": 89,
-        "branches": 79,
+        "branches": 80,
         "functions": 94,
-        "lines": 89
+        "lines": 90
       }
     },
     "testEnvironment": "node"
