@@ -594,23 +594,25 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     // Everything that can throw (the idempotency extractor included) runs
     // inside the try, so every failure pauses the partition first.
     try {
+      // Extracted once per delivery: the extractor is user code
+      const idempotencyKey = topicOptions.idempotencyKey
+        ? this.idempotencyService.keyOf(
+            message,
+            topicOptions.idempotencyKey,
+            namespace,
+          )
+        : undefined;
       if (
-        topicOptions.idempotencyKey &&
-        this.idempotencyService.isProcessed(
-          message,
-          topicOptions.idempotencyKey,
-          namespace,
-        )
+        idempotencyKey !== undefined &&
+        this.idempotencyService.has(idempotencyKey)
       ) {
         this.logger.debug(`Skipping duplicate message from ${topic}`);
         return;
       }
       await invokeOnce();
-      if (topicOptions.idempotencyKey) {
-        this.idempotencyService.markProcessed(
-          message,
-          topicOptions.idempotencyKey,
-          namespace,
+      if (idempotencyKey !== undefined) {
+        this.idempotencyService.mark(
+          idempotencyKey,
           topicOptions.idempotencyTtl,
         );
       }
@@ -779,13 +781,24 @@ export class ConsumerRegistryService implements OnModuleDestroy {
     // Everything that can throw (the idempotency extractor included) runs
     // inside the try, so every failure pauses the partition first.
     let processable = chunk;
+    // Keys of `processable` (idempotency only), extracted once per message
+    const keys: string[] = [];
     try {
       if (options.idempotencyKey) {
-        processable = this.idempotencyService.filterDuplicates(
-          chunk,
-          options.idempotencyKey,
-          namespace,
-        );
+        processable = [];
+        for (const msg of chunk) {
+          const key = this.idempotencyService.keyOf(
+            msg,
+            options.idempotencyKey,
+            namespace,
+          );
+          if (key === undefined) {
+            processable.push(msg);
+          } else if (!this.idempotencyService.has(key)) {
+            processable.push(msg);
+            keys.push(key);
+          }
+        }
       }
       if (processable.length === 0) return;
       await this.invokeBatchHandler(
@@ -796,15 +809,8 @@ export class ConsumerRegistryService implements OnModuleDestroy {
         partition,
         processable,
       );
-      if (options.idempotencyKey) {
-        for (const msg of processable) {
-          this.idempotencyService.markProcessed(
-            msg,
-            options.idempotencyKey,
-            namespace,
-            options.idempotencyTtl,
-          );
-        }
+      for (const key of keys) {
+        this.idempotencyService.mark(key, options.idempotencyTtl);
       }
     } catch (error) {
       await this.handleHandlerFailure({

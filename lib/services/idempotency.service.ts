@@ -5,7 +5,6 @@ import { CONSUMER_MODULE_OPTIONS, ConsumerModuleOptions } from '../interfaces';
 type KafkaMessage = KafkaJS.KafkaMessage;
 
 interface IdempotencyEntry {
-  key: string;
   timestamp: number;
   ttl: number;
 }
@@ -37,22 +36,26 @@ export class IdempotencyService implements OnModuleDestroy {
   }
 
   /**
-   * `namespace` scopes keys (the registry passes `<connection>:<groupId>|<topic>`)
-   * so two consumers extracting the same key never dedupe each other.
+   * The stored key for `message`: `<namespace>|<extracted>`, or undefined when
+   * the extractor returns nothing (never deduplicated). `namespace` scopes
+   * keys (the registry passes `<connection>:<groupId>|<topic>`) so two
+   * consumers extracting the same key never dedupe each other. Extractor
+   * errors propagate.
    */
-  isProcessed(
+  keyOf(
     message: KafkaMessage,
     keyExtractor: (msg: KafkaMessage) => string | undefined,
     namespace: string,
-  ): boolean {
+  ): string | undefined {
     const extracted = keyExtractor(message);
-    if (!extracted) return false;
-    const key = `${namespace}|${extracted}`;
+    return extracted ? `${namespace}|${extracted}` : undefined;
+  }
 
+  /** Whether `key` (from keyOf) is stored and unexpired; drops an expired one. */
+  has(key: string): boolean {
     const entry = this.processedKeys.get(key);
     if (!entry) return false;
 
-    // Check if entry has expired
     if (Date.now() - entry.timestamp > entry.ttl) {
       this.processedKeys.delete(key);
       return false;
@@ -61,31 +64,38 @@ export class IdempotencyService implements OnModuleDestroy {
     return true;
   }
 
+  /** Stores `key` (from keyOf) as processed; evicts the oldest beyond the cap. */
+  mark(key: string, ttl?: number): void {
+    // delete + set moves the key to the end of the Map's insertion order
+    this.processedKeys.delete(key);
+    this.processedKeys.set(key, {
+      timestamp: Date.now(),
+      ttl: ttl ?? this.defaultTtl,
+    });
+
+    while (this.processedKeys.size > this.maxKeys) {
+      const oldest = this.processedKeys.keys().next().value as string;
+      this.processedKeys.delete(oldest);
+    }
+  }
+
+  isProcessed(
+    message: KafkaMessage,
+    keyExtractor: (msg: KafkaMessage) => string | undefined,
+    namespace: string,
+  ): boolean {
+    const key = this.keyOf(message, keyExtractor, namespace);
+    return key !== undefined && this.has(key);
+  }
+
   markProcessed(
     message: KafkaMessage,
     keyExtractor: (msg: KafkaMessage) => string | undefined,
     namespace: string,
     ttl?: number,
   ): void {
-    const extracted = keyExtractor(message);
-    if (!extracted) return;
-    const key = `${namespace}|${extracted}`;
-
-    // delete + set moves the key to the end of the Map's insertion order
-    this.processedKeys.delete(key);
-    this.processedKeys.set(key, {
-      key,
-      timestamp: Date.now(),
-      ttl: ttl ?? this.defaultTtl,
-    });
-
-    while (
-      this.processedKeys.size > this.maxKeys &&
-      this.processedKeys.size > 0
-    ) {
-      const oldest = this.processedKeys.keys().next().value as string;
-      this.processedKeys.delete(oldest);
-    }
+    const key = this.keyOf(message, keyExtractor, namespace);
+    if (key !== undefined) this.mark(key, ttl);
   }
 
   filterDuplicates(

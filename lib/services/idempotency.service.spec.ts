@@ -80,6 +80,37 @@ describe('dedupe semantics', () => {
     expect(svc.isProcessed(m, byId, 'a:g|t2')).toBe(false);
     expect(svc.isProcessed(m, byId, 'a:g|t1')).toBe(true);
   });
+
+  it('keyOf returns the namespaced key and undefined for an empty extraction', () => {
+    const m = { headers: {} } as any;
+    expect(svc.keyOf(m, () => 'a', 'ns')).toBe('ns|a');
+    expect(svc.keyOf(m, () => '', 'ns')).toBeUndefined();
+    expect(svc.keyOf(m, () => undefined, 'ns')).toBeUndefined();
+  });
+
+  it('has and mark share state with isProcessed and markProcessed', () => {
+    const a = { headers: { id: 'a' } } as any;
+    const b = { headers: { id: 'b' } } as any;
+    svc.mark(svc.keyOf(a, byId, NS)!);
+    expect(svc.isProcessed(a, byId, NS)).toBe(true);
+    svc.markProcessed(b, byId, NS);
+    expect(svc.has(`${NS}|b`)).toBe(true);
+    expect(svc.has(`${NS}|c`)).toBe(false);
+  });
+
+  it('has expires a key after its TTL', () => {
+    jest.useFakeTimers();
+    try {
+      const timed = new IdempotencyService();
+      timed.mark('k', 1000);
+      expect(timed.has('k')).toBe(true);
+      jest.advanceTimersByTime(1001);
+      expect(timed.has('k')).toBe(false);
+      timed.stopCleanup();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('IdempotencyService size bound', () => {

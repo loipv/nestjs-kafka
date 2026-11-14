@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { ConsumerRegistryService } from './consumer-registry.service';
 import { BatchProcessorService } from './batch-processor.service';
+import { IdempotencyService } from './idempotency.service';
 
 // The native librdkafka binding is not installed under `npm ci --ignore-scripts` (CI, release).
 jest.mock('@confluentinc/kafka-javascript');
@@ -235,9 +236,9 @@ describe('consumer groups', () => {
       new BatchProcessorService(),
       deps.idempotency ??
         ({
-          filterDuplicates: (m: any[]) => m,
-          isProcessed: () => false,
-          markProcessed: jest.fn(),
+          keyOf: () => undefined,
+          has: () => false,
+          mark: jest.fn(),
           stopCleanup: jest.fn(),
         } as any),
       deps.dlqService ?? ({} as any),
@@ -415,8 +416,9 @@ describe('consumer groups', () => {
         handler,
         {
           idempotency: {
-            isProcessed: () => true,
-            markProcessed: jest.fn(),
+            keyOf: () => 'k',
+            has: () => true,
+            mark: jest.fn(),
             stopCleanup: jest.fn(),
           },
         },
@@ -791,12 +793,11 @@ describe('consumer groups', () => {
 
     it('eachBatch: an all-duplicate chunk is resolved without calling the handler', async () => {
       const handler = jest.fn().mockRejectedValue(new Error('x'));
+      // The first chunk (offsets 1, 2) is all duplicates
       const idempotency = {
-        filterDuplicates: jest
-          .fn()
-          .mockReturnValueOnce([])
-          .mockImplementation((m: any[]) => m),
-        markProcessed: jest.fn(),
+        keyOf: (m: any) => m.offset,
+        has: (key: string) => key === '1' || key === '2',
+        mark: jest.fn(),
         stopCleanup: jest.fn(),
       };
       const { config } = await started(
@@ -828,10 +829,9 @@ describe('consumer groups', () => {
         handleFailure: jest.fn().mockResolvedValue({ action: 'complete' }),
       };
       const idempotency = {
-        filterDuplicates: jest.fn((m: any[]) =>
-          m.filter((x) => x.offset !== '1'),
-        ),
-        markProcessed: jest.fn(),
+        keyOf: (m: any) => m.offset,
+        has: (key: string) => key === '1',
+        mark: jest.fn(),
         stopCleanup: jest.fn(),
       };
       const { config } = await started(
@@ -881,19 +881,18 @@ describe('consumer groups', () => {
     });
 
     it('eachMessage: a throwing idempotencyKey extractor goes through the retry path', async () => {
-      const idempotency = {
-        isProcessed: () => {
-          throw new Error('no id header');
-        },
-        markProcessed: jest.fn(),
-        stopCleanup: jest.fn(),
-      };
+      const idempotency = new IdempotencyService();
       const pause = jest.fn(() => jest.fn());
       const { config } = await started(
-        { idempotencyKey: () => 'k' },
+        {
+          idempotencyKey: () => {
+            throw new Error('no id header');
+          },
+        },
         jest.fn(),
         { idempotency },
       );
+      idempotency.stopCleanup();
       await expect(
         config().eachMessage(messagePayload('5', pause)),
       ).rejects.toThrow('no id header');
@@ -901,25 +900,83 @@ describe('consumer groups', () => {
     });
 
     it('eachBatch: a throwing idempotencyKey extractor goes through the retry path', async () => {
-      const idempotency = {
-        filterDuplicates: () => {
-          throw new Error('no id header');
-        },
-        markProcessed: jest.fn(),
-        stopCleanup: jest.fn(),
-      };
+      const idempotency = new IdempotencyService();
       const pause = jest.fn(() => jest.fn());
       const { config } = await started(
-        { batch: true, idempotencyKey: () => 'k' },
+        {
+          batch: true,
+          idempotencyKey: () => {
+            throw new Error('no id header');
+          },
+        },
         jest.fn(),
         { idempotency },
       );
+      idempotency.stopCleanup();
       await expect(
         config().eachBatch(
           batchPayload(['1'].map(mkMsg), jest.fn(), undefined, pause),
         ),
       ).rejects.toThrow('no id header');
       expect(pause).toHaveBeenCalledTimes(1);
+    });
+
+    describe('with a real IdempotencyService', () => {
+      let idempotency: IdempotencyService;
+      beforeEach(() => {
+        idempotency = new IdempotencyService();
+      });
+      afterEach(() => idempotency.stopCleanup());
+
+      it('eachMessage calls the idempotency extractor once per message', async () => {
+        const extractor = jest.fn(() => 'k1');
+        const handler = jest.fn();
+        const { config } = await started(
+          { idempotencyKey: extractor },
+          handler,
+          { idempotency },
+        );
+        await config().eachMessage(messagePayload('5'));
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(extractor).toHaveBeenCalledTimes(1);
+      });
+
+      it('eachBatch calls the idempotency extractor once per message of a chunk', async () => {
+        const extractor = jest.fn((m: any) => `k${m.offset}`);
+        const handler = jest.fn();
+        const { config } = await started(
+          { batch: true, batchSize: 10, idempotencyKey: extractor },
+          handler,
+          { idempotency },
+        );
+        await config().eachBatch(
+          batchPayload(['1', '2', '3'].map(mkMsg), jest.fn()),
+        );
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(extractor).toHaveBeenCalledTimes(3);
+      });
+
+      it('eachBatch handles and marks two messages with the same key in one chunk', async () => {
+        const handler = jest.fn();
+        const { config } = await started(
+          { batch: true, batchSize: 10, idempotencyKey: () => 'same' },
+          handler,
+          { idempotency },
+        );
+        await config().eachBatch(
+          batchPayload(['1', '2'].map(mkMsg), jest.fn()),
+        );
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(handler.mock.calls[0][0].map((m: any) => m.offset)).toEqual([
+          '1',
+          '2',
+        ]);
+
+        const resolveOffset = jest.fn();
+        await config().eachBatch(batchPayload([mkMsg('3')], resolveOffset));
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(resolveOffset).toHaveBeenCalledWith('3');
+      });
     });
 
     it('eachBatch: stops between chunks once shutdown starts', async () => {
