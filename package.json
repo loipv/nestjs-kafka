@@ -96,7 +96,7 @@
     "@eslint/js": "^9.18.0",
     "@nestjs/cli": "^11.0.0",
     "@nestjs/common": "^11.0.1",
-    "@nestjs/core": "^11.0.1",
+    "@nestjs/core": "^12.4.2",
     "@nestjs/schematics": "^11.0.0",
     "@nestjs/terminus": "^11.0.0",
     "@nestjs/testing": "^11.0.1",
