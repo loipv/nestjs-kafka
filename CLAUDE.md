@@ -48,7 +48,7 @@ Test layout (enforced in part by `npm run check:specs`):
 - Each source file `lib/**/x.ts` has at most one spec, `lib/**/x.spec.ts`, next to it. All tests for `x.ts` live there, grouped with `describe`; no per-feature spec files (`x.retry.spec.ts`).
 - A spec is named after the source file it tests: `@InjectKafkaClient` tests go in `inject-kafka-client.decorator.spec.ts`, not in a module spec.
 - Shared test code lives only in `lib/__mocks__/`.
-- The Kafka e2e suite stays one file, `test/kafka.e2e-spec.ts`; smoke fixtures live in `test/smoke/<fixture>`: `cjs-nest11`, `esm-nest11`, `no-peers` (Nest 11), `cjs-nest12`, `esm-nest12`, `no-peers-nest12` (Nest 12; the first two also check discovery and the shutdown order), `ts-cjs-nest11` (TypeScript 5.0) and `ts-esm-nest12` (TypeScript 6, `nodenext`), both compiled with `skipLibCheck: false` against the published `.d.ts`. Fixtures are excluded from the root typecheck and lint.
+- The Kafka e2e suite stays one file, `test/kafka.e2e-spec.ts`; smoke fixtures live in `test/smoke/<fixture>`: `cjs-nest11`, `esm-nest11`, `no-peers` (Nest 11), `cjs-nest12`, `esm-nest12`, `no-peers-nest12` (Nest 12; the first two also check discovery and the shutdown order), `ts-cjs-nest11` (TypeScript 5.0) and `ts-esm-nest12` (TypeScript 5.8, `nodenext`), both compiled with `skipLibCheck: false` against the published `.d.ts`. Fixtures are excluded from the root typecheck and lint.
 - No spec is required for barrels (`index.ts`), `interfaces/*` without logic, `decorators/constants.ts` and `kafka-core.module.ts`.
 - Test names describe behaviour in the present tense without a `should` prefix (`returns down when lag exceeds the threshold`).
 
@@ -217,7 +217,7 @@ Producer App                    Consumer App
 
 - NestJS 11 and 12 (peers `^11.0.0 || ^12.0.0`; devDependencies on 12). The package stays CommonJS; NestJS 12 (ESM-only) is reached through Node's `require(esm)`. CI runs the unit suite on NestJS 12 (`test`, Node 24) and NestJS 11 (`test-nest11`, Node 20/22/24)
 - @confluentinc/kafka-javascript (librdkafka-based, KafkaJS-compatible API)
-- TypeScript 6 for the build (ES2023 target, CommonJS module); consumers need TypeScript 5.0+
+- TypeScript 6 for the build (ES2023 target, CommonJS module); consumers need TypeScript 5.0+ (NestJS 12 with `skipLibCheck: false`: 5.8+ and `nodenext`, because the CommonJS `.d.ts` import ESM-only packages)
 - Jest for testing
 - ESLint + Prettier for code style
 

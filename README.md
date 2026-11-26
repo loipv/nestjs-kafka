@@ -44,7 +44,7 @@ confluent-kafka-javascript is built on librdkafka (C library). Supported platfor
 
 - **NestJS**: 11 and 12 (`@nestjs/terminus` 11 or 12)
 - **Module format**: ESM and CommonJS applications. The package itself is CommonJS; an ESM application imports it by name (`import { KafkaModule } from '@loipv/nestjs-kafka'`), and on NestJS 12 it shares the application's NestJS packages through Node's `require(esm)`
-- **TypeScript**: 5.0 or newer
+- **TypeScript**: 5.0 or newer. A NestJS 12 application that type-checks its libraries (`skipLibCheck: false`) needs TypeScript 5.8+ with `module`/`moduleResolution: nodenext`: the package's CommonJS declarations import the ESM-only NestJS 12 packages, which TypeScript models only from 5.8 under `nodenext` (`node16` is not supported). With `skipLibCheck: true`, the `nest new` default, TypeScript 5.0+ works
 
 ### Optional: OpenTelemetry Tracing
 

@@ -1,6 +1,7 @@
-// Smoke test: a TypeScript 6 ESM app (`module: nodenext`) on Nest 12 type-checks against the
+// Smoke test: a TypeScript 5.8 ESM app (`module: nodenext`) on Nest 12 type-checks against the
 // published CommonJS declarations (`skipLibCheck: false` makes tsc read them) and runs. It
-// covers real decorator syntax, a named connection, the Terminus result type, discovery and the shutdown order.
+// covers real decorator syntax, a named connection, the Terminus result type, discovery and
+// the shutdown order.
 // No broker is needed: the producer connects lazily and `autoStart: false` leaves consumers
 // unstarted.
 import assert from 'node:assert/strict';
