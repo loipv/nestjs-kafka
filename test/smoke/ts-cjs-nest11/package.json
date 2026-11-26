@@ -1,0 +1,17 @@
+{
+  "name": "smoke-ts-cjs-nest11",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@nestjs/common": "^11",
+    "@nestjs/core": "^11",
+    "@nestjs/terminus": "^11",
+    "@opentelemetry/api": "^1.9",
+    "reflect-metadata": "^0.2",
+    "rxjs": "^7"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "~5.0.4"
+  }
+}

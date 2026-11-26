@@ -1,15 +1,18 @@
 // Installs the real `npm pack` tarball into each fixture app under test/smoke and runs it.
 // Usage: node scripts/smoke.mjs [fixture...]   (default: every fixture)
+// A fixture with a tsconfig.json is a TypeScript app: its own `tsc` compiles it (type-checking
+// against the published declarations) before `node dist/index.js` runs.
 // The fixtures' dependency ranges (`^11`, `^12`, `^3`, ...) float on purpose and no lockfile is
 // kept: each run tests the tarball against the latest releases a consumer would install today.
 import { spawn } from 'node:child_process';
-import { cpSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
 const fixturesDir = join(root, 'test', 'smoke');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 const MINUTE = 60_000;
 
 let current = null; // the running child process, stopped on SIGINT/SIGTERM
@@ -72,7 +75,9 @@ const available = readdirSync(fixturesDir, { withFileTypes: true })
 const requested = process.argv.slice(2);
 const unknown = requested.filter((name) => !available.includes(name));
 if (unknown.length > 0) {
-  console.error(`unknown fixture(s): ${unknown.join(', ')}. Available: ${available.join(', ')}`);
+  console.error(
+    `unknown fixture(s): ${unknown.join(', ')}. Available: ${available.join(', ')}`,
+  );
   process.exit(2);
 }
 const fixtures = requested.length > 0 ? requested : available;
@@ -125,8 +130,17 @@ try {
   for (const name of fixtures) {
     try {
       const dir = join(work, name);
-      const entry = readdirSync(join(fixturesDir, name)).find((f) => /^index\.[cm]?js$/.test(f));
-      if (entry === undefined) throw new Error(`${name}: no index.js, index.mjs or index.cjs`);
+      const typescript = existsSync(join(fixturesDir, name, 'tsconfig.json'));
+      const entry = typescript
+        ? join('dist', 'index.js')
+        : readdirSync(join(fixturesDir, name)).find((f) =>
+            /^index\.[cm]?js$/.test(f),
+          );
+      if (entry === undefined) {
+        throw new Error(
+          `${name}: no index.js, index.mjs, index.cjs or tsconfig.json`,
+        );
+      }
       cpSync(join(fixturesDir, name), dir, {
         recursive: true,
         filter: (src) => !/[\\/](node_modules|package-lock\.json)$/.test(src),
@@ -139,6 +153,23 @@ try {
         `${name}: npm install`,
         10 * MINUTE,
       );
+      if (typescript) {
+        const version = await must(
+          npx,
+          ['--no-install', 'tsc', '--version'],
+          dir,
+          `${name}: tsc`,
+          MINUTE,
+        );
+        console.log(`smoke: ${name}: compiling (${version.trim()})`);
+        await must(
+          npx,
+          ['--no-install', 'tsc', '-p', '.'],
+          dir,
+          `${name}: tsc -p .`,
+          5 * MINUTE,
+        );
+      }
       const timeout = 2 * MINUTE;
       const result = await run(process.execPath, [entry], dir, timeout);
       if (result.status !== 0 || !result.stdout.includes('SMOKE OK')) {
