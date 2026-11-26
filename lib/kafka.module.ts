@@ -81,16 +81,16 @@ export class KafkaModule {
         },
         inject: [KafkaCoreService, TracingService, getKafkaOptionsToken(name)],
       },
-      {
-        provide: getKafkaClientToken(name),
-        useFactory: (
-          kafkaClient: KafkaClient,
-        ): KafkaClient | ConnectionBoundClient =>
-          name === DEFAULT_KAFKA_CONNECTION
-            ? kafkaClient
-            : new ConnectionBoundClient(kafkaClient, name),
-        inject: [KafkaClient],
-      },
+      // The default token is an alias, so Nest runs KafkaClient's shutdown hook
+      // once (it skips aliases; a factory returning the instance would run it again)
+      name === DEFAULT_KAFKA_CONNECTION
+        ? { provide: getKafkaClientToken(name), useExisting: KafkaClient }
+        : {
+            provide: getKafkaClientToken(name),
+            useFactory: (kafkaClient: KafkaClient): ConnectionBoundClient =>
+              new ConnectionBoundClient(kafkaClient, name),
+            inject: [KafkaClient],
+          },
     ];
   }
 
