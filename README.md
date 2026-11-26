@@ -38,7 +38,13 @@ confluent-kafka-javascript is built on librdkafka (C library). Supported platfor
 - **Linux**: x64, arm64
 - **macOS**: arm64 (Apple Silicon)
 - **Windows**: x64
-- **Node.js**: 20, 22, 24 (`engines: >=20`)
+- **Node.js**: 20, 22, 24 (`engines: >=20`); with NestJS 12 the application needs Node 20.19+ or 22.12+ (NestJS's own requirement)
+
+### Compatibility
+
+- **NestJS**: 11 and 12 (`@nestjs/terminus` 11 or 12)
+- **Module format**: ESM and CommonJS applications. The package itself is CommonJS; an ESM application imports it by name (`import { KafkaModule } from '@loipv/nestjs-kafka'`), and on NestJS 12 it shares the application's NestJS packages through Node's `require(esm)`
+- **TypeScript**: 5.0 or newer. A NestJS 12 application that type-checks its libraries (`skipLibCheck: false`) needs TypeScript 5.8+ with `module`/`moduleResolution: nodenext`: the package's CommonJS declarations import the ESM-only NestJS 12 packages, which TypeScript models only from 5.8 under `nodenext` (`node16` is not supported). With `skipLibCheck: true`, the `nest new` default, TypeScript 5.0+ works
 
 ### Optional: OpenTelemetry Tracing
 
@@ -298,7 +304,7 @@ With `autoStart: false`, discovery and option checks still run at bootstrap (a b
 
 `startAll()` is the only `ConsumerRegistryService` method meant for applications; the others are internal.
 
-With the default `autoStart: true`, exit the process when bootstrap fails (`bootstrap().catch(() => process.exit(1))`): Nest skips shutdown hooks after a failed initialisation, so started consumers would keep the process alive.
+With the default `autoStart: true`, exit the process when bootstrap fails (`bootstrap().catch(() => process.exit(1))`): NestJS 11 skips shutdown hooks after a failed initialisation, so started consumers would keep the process alive. NestJS 12's `app.close()` runs the shutdown hooks after a failed initialisation (the library tolerates it: nothing is stopped twice), but exiting the process is still the safe default.
 
 On shutdown, consumers stop in `onModuleDestroy` and producers disconnect in `onApplicationShutdown`, so consumers always stop first. Nest destroys global modules **last**, so your own `onModuleDestroy` runs while consumers still run: release resources handlers use (database pools, HTTP clients) in `beforeApplicationShutdown` or `onApplicationShutdown`.
 

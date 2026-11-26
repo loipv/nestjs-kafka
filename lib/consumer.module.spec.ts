@@ -326,6 +326,93 @@ describe('ConsumerModule', () => {
     );
   });
 
+  // Nest 12 runs hooks module by module (global modules first on bootstrap, last
+  // on shutdown) and runs the shutdown hooks after a failed init; Nest 11 does not.
+  describe('lifecycle on the installed Nest version', () => {
+    @Injectable()
+    class LifecycleConsumer {
+      @Consumer('lifecycle')
+      async handle() {}
+    }
+
+    const lastClient = () =>
+      (KafkaJS.Kafka as unknown as jest.Mock).mock.results.at(-1)!.value;
+
+    it('stops consumers after the application module is destroyed and before producers disconnect', async () => {
+      let consumerStoppedDuringAppDestroy: boolean | undefined;
+      @Injectable()
+      class AppHook {
+        onModuleDestroy() {
+          const consumer = lastClient().consumer.mock.results.at(-1).value;
+          consumerStoppedDuringAppDestroy =
+            consumer.disconnect.mock.calls.length > 0;
+        }
+      }
+      @Module({ providers: [AppHook] })
+      class FeatureModule {}
+
+      const mod = await Test.createTestingModule({
+        // ConsumerModule first: the order no longer stops consumers first by itself
+        imports: [
+          ConsumerModule.forRoot(),
+          KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+          FeatureModule,
+        ],
+        providers: [LifecycleConsumer],
+      }).compile();
+      await mod.init();
+      await new Promise((r) => setImmediate(r)); // bootstrap producer connect
+      const client = lastClient();
+      const producer = client.producer.mock.results.at(-1).value;
+      const consumer = client.consumer.mock.results.at(-1).value;
+      await mod.close();
+
+      expect(consumerStoppedDuringAppDestroy).toBe(false);
+      expect(consumer.disconnect).toHaveBeenCalledTimes(1);
+      expect(consumer.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+        producer.disconnect.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('closes after a failed bootstrap without stopping consumers twice', async () => {
+      const Kafka = KafkaJS.Kafka as unknown as jest.Mock;
+      const defaultKafka = Kafka.getMockImplementation()!;
+      Kafka.mockImplementationOnce((...args: unknown[]) => {
+        const client = defaultKafka(...args);
+        const makeConsumer = client.consumer.getMockImplementation();
+        client.consumer.mockImplementation((...cArgs: unknown[]) => {
+          const consumer = makeConsumer(...cArgs);
+          consumer.subscribe.mockRejectedValueOnce(new Error('boom'));
+          return consumer;
+        });
+        return client;
+      });
+
+      const mod = await Test.createTestingModule({
+        imports: [
+          KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+          ConsumerModule.forRoot(),
+        ],
+        providers: [LifecycleConsumer],
+      }).compile();
+      await expect(mod.init()).rejects.toThrow('boom');
+      const consumer = lastClient().consumer.mock.results.at(-1).value;
+
+      const nestMajor = Number(
+        (
+          jest.requireActual('@nestjs/core/package.json') as { version: string }
+        ).version.split('.')[0],
+      );
+      if (nestMajor >= 12) {
+        await expect(mod.close()).resolves.toBeUndefined();
+      } else {
+        // Nest 11's close() rethrows the init error and runs no shutdown hook
+        await expect(mod.close()).rejects.toThrow('boom');
+      }
+      expect(consumer.disconnect).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('autoStart: false', () => {
     @Injectable()
     class Later {

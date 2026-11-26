@@ -133,7 +133,7 @@ export class KafkaCoreService implements OnApplicationBootstrap {
       kafkaJS: kafkaConfig,
       ...sslKeys,
       ...options.rdkafka,
-    } as KafkaJS.CommonConstructorConfig);
+    });
 
     const producerConfig: ProducerConstructorConfig = options.producer
       ? { kafkaJS: this.toProducerConfig(name, options.producer) }
@@ -453,7 +453,7 @@ export class KafkaCoreService implements OnApplicationBootstrap {
     );
     const { compression } = producer;
     if (compression === undefined) {
-      return rest as KafkaJS.ProducerConfig;
+      return rest;
     }
     const codec =
       typeof compression === 'number'
@@ -467,7 +467,7 @@ export class KafkaCoreService implements OnApplicationBootstrap {
     return {
       ...rest,
       compression: codec as KafkaJS.CompressionTypes,
-    } as KafkaJS.ProducerConfig;
+    };
   }
 
   private mapLogLevel(level?: string): KafkaJS.logLevel {

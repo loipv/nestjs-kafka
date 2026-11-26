@@ -203,7 +203,8 @@ export class KafkaClient implements OnApplicationShutdown {
   private serializeKey(key: unknown): string | Buffer | null {
     if (key === null || key === undefined) return null;
     if (typeof key === 'string' || Buffer.isBuffer(key)) return key;
-    return String(key as number | bigint | boolean);
+    const primitive = key as number | bigint | boolean;
+    return String(primitive);
   }
 
   private serializeMessage(message: ProducerMessage): Message {

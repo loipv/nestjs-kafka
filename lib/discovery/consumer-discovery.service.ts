@@ -124,8 +124,7 @@ export class ConsumerDiscoveryService {
     try {
       return (
         Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value as
-          | { name?: string }
-          | undefined
+          { name?: string } | undefined
       )?.name;
     } catch {
       return undefined;

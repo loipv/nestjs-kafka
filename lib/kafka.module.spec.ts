@@ -1,7 +1,7 @@
 import { Injectable, Module } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { KafkaModule } from './kafka.module';
-import { KafkaOptionsFactory } from './interfaces';
+import { getKafkaClientToken, KafkaOptionsFactory } from './interfaces';
 import { KafkaCoreService } from './services/kafka-core.service';
 import {
   ConnectionBoundClient,
@@ -62,6 +62,29 @@ describe('KafkaModule', () => {
     it('registers the connection', () => {
       const coreService = module.get<KafkaCoreService>(KafkaCoreService);
       expect(coreService.hasConnection()).toBe(true);
+    });
+
+    it('exposes the default client token as the KafkaClient itself', () => {
+      expect(module.get(getKafkaClientToken())).toBe(module.get(KafkaClient));
+    });
+
+    it('disconnects producers once on shutdown', async () => {
+      const mod = await Test.createTestingModule({
+        imports: [
+          KafkaModule.forRoot({ clientId: 'c', brokers: ['localhost:9092'] }),
+        ],
+      }).compile();
+      const shutdown = jest.spyOn(
+        KafkaClient.prototype,
+        'onApplicationShutdown',
+      );
+      try {
+        await mod.init();
+        await mod.close();
+        expect(shutdown).toHaveBeenCalledTimes(1);
+      } finally {
+        shutdown.mockRestore();
+      }
     });
   });
 
