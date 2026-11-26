@@ -50,11 +50,11 @@
     "build": "nest build",
     "format": "prettier --write \"lib/**/*.ts\" \"test/**/*.ts\"",
     "lint": "eslint \"{src,lib,apps,libs,test}/**/*.ts\" --fix",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
-    "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config test/jest-e2e.json",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
-    "test:cov": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
-    "test:debug": "node --experimental-vm-modules --inspect-brk node_modules/jest/bin/jest.js --runInBand",
+    "test": "node --experimental-vm-modules --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js",
+    "test:e2e": "node --experimental-vm-modules --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js --config test/jest-e2e.json",
+    "test:watch": "node --experimental-vm-modules --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js --watch",
+    "test:cov": "node --experimental-vm-modules --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js --coverage",
+    "test:debug": "node --experimental-vm-modules --disable-warning=ExperimentalWarning --inspect-brk node_modules/jest/bin/jest.js --runInBand",
     "prepublishOnly": "npm run build && npm run check:pack && npm run check:pkg && npm run typecheck && npm test",
     "check:pack": "node scripts/check-pack.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -67,8 +67,8 @@
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
     "release": "changeset publish",
-    "bench": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config test/bench/jest-bench.json --runInBand",
-    "bench:kafka": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config test/bench/jest-kafka-bench.json --runInBand"
+    "bench": "node --experimental-vm-modules --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js --config test/bench/jest-bench.json --runInBand",
+    "bench:kafka": "node --experimental-vm-modules --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js --config test/bench/jest-kafka-bench.json --runInBand"
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.10.1"

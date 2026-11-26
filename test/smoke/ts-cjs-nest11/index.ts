@@ -7,7 +7,10 @@ import assert from 'node:assert/strict';
 import 'reflect-metadata';
 import { Injectable, Module, OnModuleDestroy } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import type { HealthIndicatorResult } from '@nestjs/terminus';
+import type {
+  HealthCheckService,
+  HealthIndicatorResult,
+} from '@nestjs/terminus';
 import {
   ConnectionBoundClient,
   Consumer,
@@ -105,6 +108,11 @@ async function main(): Promise<void> {
     const health: HealthIndicatorResult = app
       .get(KafkaHealthIndicator)
       .isHealthy('kafka');
+    // What an app passes to HealthCheckService.check: must type-check with this Terminus.
+    const indicators: Parameters<HealthCheckService['check']>[0] = [
+      () => app.get(KafkaHealthIndicator).isHealthy('kafka'),
+    ];
+    assert.equal(indicators.length, 1);
     assert.ok(
       ['up', 'down'].includes(health.kafka.status),
       `status ${health.kafka.status}`,
@@ -120,16 +128,13 @@ async function main(): Promise<void> {
     console.error('app.close() failed as well:', closeErr);
   }
   if (failure !== undefined) throw failure;
-  // First call of each: Nest calls a provider's hook once per token that exposes the instance.
-  assert.deepEqual(
-    [...new Set(calls)],
-    [
-      'register:smoke',
-      'app.onModuleDestroy',
-      'registry.onModuleDestroy',
-      'client.onApplicationShutdown',
-    ],
-  );
+  // Exact calls: each hook runs once (the default client token is an alias of KafkaClient).
+  assert.deepEqual(calls, [
+    'register:smoke',
+    'app.onModuleDestroy',
+    'registry.onModuleDestroy',
+    'client.onApplicationShutdown',
+  ]);
   console.log('SMOKE OK');
 }
 

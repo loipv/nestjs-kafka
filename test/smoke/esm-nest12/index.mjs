@@ -108,9 +108,8 @@ try {
   console.error('app.close() failed as well:', closeErr);
 }
 if (failure !== undefined) throw failure;
-// First call of each: Nest calls a provider's hook once per token that exposes the instance,
-// and the default connection's client token is the KafkaClient itself (Nest 11 too).
-assert.deepEqual([...new Set(calls)], [
+// Exact calls: each hook runs once (the default client token is an alias of KafkaClient).
+assert.deepEqual(calls, [
   'register:smoke',
   'app.onModuleDestroy',
   'registry.onModuleDestroy',
