@@ -36,7 +36,24 @@ jobs:
       - run: npm run check:pack
       - run: npm run check:workflows
 
+  # Unit tests against the default devDependencies (NestJS 12). Jest loads the ESM-only NestJS 12
+  # packages through require(esm) only on Node 24.9+, so this job runs on Node 24 alone.
   test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node --version
+      - run: node -p "require('@nestjs/core/package.json').version"
+      - run: npm run test:cov
+
+  # Unit tests against NestJS 11 (still a supported peer) on every supported Node line.
+  test-nest11:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -46,19 +63,23 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       # Install the root devDependencies with Node 24 (some, such as @changesets/cli and undici,
-      # declare a newer Node than 20), then run the tests on the matrix Node.
+      # declare a newer Node than 20), swap in the NestJS 11 line, then run the tests on the
+      # matrix Node.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      - run: npm install --no-save --ignore-scripts @nestjs/common@^11 @nestjs/core@^11 @nestjs/testing@^11 @nestjs/terminus@^11
       - name: Switch to Node ${{ matrix.node }}
         if: matrix.node != 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: ${{ matrix.node }}
       - run: node --version
-      - run: npm run test:cov
+      # Fails the job unless the NestJS 11 line is really installed.
+      - run: node -e "const v = require('@nestjs/core/package.json').version; console.log(v); if (!v.startsWith('11.')) process.exit(1)"
+      - run: npm test
 
   e2e:
     runs-on: ubuntu-latest
@@ -67,7 +88,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
       # The e2e suite talks to a real broker, so it needs the native binding: run only this
@@ -112,7 +133,7 @@ jobs:
   # run reports `ci-ok`. `npm run check:workflows` guards the `if` and the `needs` list.
   ci-ok:
     if: always()
-    needs: [checks, test, e2e, smoke]
+    needs: [checks, test, test-nest11, e2e, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
