@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.0
+
+### Minor Changes
+
+- [`8c48f84`](https://github.com/loipv/nestjs-kafka/commit/8c48f84b6af3648111fd5ceedf4b8c4a22e08d3c) Thanks [@loipv](https://github.com/loipv)! - Support NestJS 12 (ESM and CommonJS applications). Peer ranges for `@nestjs/common`, `@nestjs/core` and `@nestjs/terminus` are now `^11.0.0 || ^12.0.0`. The package stays CommonJS; NestJS 12 apps need Node 20.19+ or 22.12+ (NestJS's own requirement). TypeScript 5.0 or newer is supported; a NestJS 12 app that type-checks libraries (`skipLibCheck: false`) needs TypeScript 5.8+ with `module: nodenext`.
+
+### Patch Changes
+
+- [`eeb833f`](https://github.com/loipv/nestjs-kafka/commit/eeb833f7e8a6bb658601c274503feee5a507d88e) Thanks [@loipv](https://github.com/loipv)! - `KafkaClient`'s shutdown hook runs once: the default connection's client token is now an alias of `KafkaClient` (it was a factory returning the same instance, so Nest ran the hook twice; the second producer disconnect did nothing).
+
 ## 2.1.0
 
 ### Minor Changes
