@@ -1,4 +1,4 @@
-// Smoke test: an ESM app imports the CommonJS library by name (Node's CJS named-export
+// Smoke test: a Nest 11 ESM app imports the CommonJS library by name (Node's CJS named-export
 // detection must see every runtime export). No broker is needed.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

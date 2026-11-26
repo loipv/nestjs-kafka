@@ -1,5 +1,5 @@
 {
-  "name": "smoke-esm-import",
+  "name": "smoke-esm-nest11",
   "private": true,
   "type": "module",
   "dependencies": {
