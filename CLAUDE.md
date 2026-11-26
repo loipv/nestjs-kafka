@@ -17,10 +17,10 @@ npm test               # Run unit tests (librdkafka is mocked; no native binary 
 npm run test:watch     # Watch mode
 npm run test:cov       # With coverage; fails below jest.coverageThreshold (measured % rounded down, minus 1 point of headroom; raise it when coverage rises)
 npm run test:e2e       # Kafka e2e via testcontainers (Docker; needs `npm rebuild @confluentinc/kafka-javascript` after an --ignore-scripts install)
-npm run test:smoke     # Install the packed tarball into test/smoke/* fixture apps and run them
+npm run test:smoke     # Install the packed tarball into test/smoke/* fixture apps and run them (a fixture with a tsconfig.json is compiled by its own tsc first)
 
-# Run a single test file
-npx jest lib/services/<file>.spec.ts
+# Run a single test file (Jest runs with --experimental-vm-modules: it loads the ESM-only NestJS 12 through require(esm))
+npm test -- lib/services/<file>.spec.ts
 
 # Linting, formatting, types
 npm run check:specs    # Every lib/**/x.spec.ts has a sibling x.ts (one spec per source file)
@@ -48,7 +48,7 @@ Test layout (enforced in part by `npm run check:specs`):
 - Each source file `lib/**/x.ts` has at most one spec, `lib/**/x.spec.ts`, next to it. All tests for `x.ts` live there, grouped with `describe`; no per-feature spec files (`x.retry.spec.ts`).
 - A spec is named after the source file it tests: `@InjectKafkaClient` tests go in `inject-kafka-client.decorator.spec.ts`, not in a module spec.
 - Shared test code lives only in `lib/__mocks__/`.
-- The Kafka e2e suite stays one file, `test/kafka.e2e-spec.ts`; smoke fixtures live in `test/smoke/<fixture>`.
+- The Kafka e2e suite stays one file, `test/kafka.e2e-spec.ts`; smoke fixtures live in `test/smoke/<fixture>`: `cjs-nest11`, `esm-nest11`, `no-peers` (Nest 11), `cjs-nest12`, `esm-nest12`, `no-peers-nest12` (Nest 12; the first two also check discovery and the shutdown order), `ts-cjs-nest11` (TypeScript 5.0) and `ts-esm-nest12` (TypeScript 6, `nodenext`), both compiled with `skipLibCheck: false` against the published `.d.ts`. Fixtures are excluded from the root typecheck and lint.
 - No spec is required for barrels (`index.ts`), `interfaces/*` without logic, `decorators/constants.ts` and `kafka-core.module.ts`.
 - Test names describe behaviour in the present tense without a `should` prefix (`returns down when lag exceeds the threshold`).
 
@@ -178,7 +178,7 @@ When **using DLQ**, failed messages are sent to the DLQ topic after `dlq.maxRetr
 
 ### Graceful Shutdown
 
-`ConsumerRegistryService.gracefulShutdown()` is idempotent (it memoises its promise) and runs only from the registry's own `onModuleDestroy`. Nest runs every `onModuleDestroy` before any `onApplicationShutdown`, so consumers always stop before `KafkaClient.onApplicationShutdown` disconnects producers, whatever the import order. Both library modules are global: Nest bootstraps them first and destroys them last (an application's own `onModuleDestroy` runs while consumers still run). It clears every resume timer and counter, then disconnects the consumers. During shutdown `eachMessage` **throws** instead of returning: a normal return stores the offset, which the client commits on close, losing the message. `eachBatch` may return, because nothing unresolved is stored. `KafkaCoreService.disconnectAll()` waits up to 5s for an in-flight producer connect (the one started at bootstrap), then disconnects in every case. Nest skips shutdown hooks when initialisation fails, so `ConsumerModule` calls `ConsumerRegistryService.abortStartup()` (disconnect started groups and every producer) before rethrowing a registration error, and `startAll()` itself waits for every group to settle, runs `abortStartup()` (a cleanup failure is only logged) and rethrows the start error. `startAll()` is memoised (concurrent and repeated calls share one start), rejects before `registerConsumers()` ran (ConsumerModule always calls it at bootstrap, even with no consumers) and once shutdown began; a group start racing a shutdown stops at its next step, and `shutdown()` disconnects every group that has a consumer. `ConsumerModule.forRoot({ autoStart: false })` registers at bootstrap but leaves `startAll()` to the application (`ConsumerRegistryService` is exported for that).
+`ConsumerRegistryService.gracefulShutdown()` is idempotent (it memoises its promise) and runs only from the registry's own `onModuleDestroy`. Nest runs every `onModuleDestroy` before any `onApplicationShutdown`, so consumers always stop before `KafkaClient.onApplicationShutdown` disconnects producers, whatever the import order. Both library modules are global: Nest bootstraps them first and destroys them last (an application's own `onModuleDestroy` runs while consumers still run). It clears every resume timer and counter, then disconnects the consumers. During shutdown `eachMessage` **throws** instead of returning: a normal return stores the offset, which the client commits on close, losing the message. `eachBatch` may return, because nothing unresolved is stored. `KafkaCoreService.disconnectAll()` waits up to 5s for an in-flight producer connect (the one started at bootstrap), then disconnects in every case. Nest 11 skips shutdown hooks when initialisation fails (Nest 12's `close()` runs them, which `abortStartup()` plus the memoised `gracefulShutdown()` tolerate: nothing is stopped twice), so `ConsumerModule` calls `ConsumerRegistryService.abortStartup()` (disconnect started groups and every producer) before rethrowing a registration error, and `startAll()` itself waits for every group to settle, runs `abortStartup()` (a cleanup failure is only logged) and rethrows the start error. `startAll()` is memoised (concurrent and repeated calls share one start), rejects before `registerConsumers()` ran (ConsumerModule always calls it at bootstrap, even with no consumers) and once shutdown began; a group start racing a shutdown stops at its next step, and `shutdown()` disconnects every group that has a consumer. `ConsumerModule.forRoot({ autoStart: false })` registers at bootstrap but leaves `startAll()` to the application (`ConsumerRegistryService` is exported for that).
 
 Any new retry or delay logic must go through `PartitionRetryTracker` (unref'd timers, cleared on shutdown), never a sleep inside a handler.
 
@@ -215,9 +215,9 @@ Producer App                    Consumer App
 
 ## Tech Stack
 
-- NestJS 11
+- NestJS 11 and 12 (peers `^11.0.0 || ^12.0.0`; devDependencies on 12). The package stays CommonJS; NestJS 12 (ESM-only) is reached through Node's `require(esm)`. CI runs the unit suite on NestJS 12 (`test`, Node 24) and NestJS 11 (`test-nest11`, Node 20/22/24)
 - @confluentinc/kafka-javascript (librdkafka-based, KafkaJS-compatible API)
-- TypeScript (ES2023 target, CommonJS module)
+- TypeScript 6 for the build (ES2023 target, CommonJS module); consumers need TypeScript 5.0+
 - Jest for testing
 - ESLint + Prettier for code style
 
@@ -227,7 +227,7 @@ Producer App                    Consumer App
 2. **heartbeat()** is automatic - no manual calls needed
 3. **consumer.stop()** is not supported - use `disconnect()` directly
 4. **autoCommitThreshold** is not supported - use `autoCommitInterval` instead
-5. **Platform support**: Linux (x64/arm64), macOS (arm64), Windows (x64), Node.js 20, 22, 24. Development needs Node ≥ 22.11 (devDependencies; `.nvmrc` pins 24)
+5. **Platform support**: Linux (x64/arm64), macOS (arm64), Windows (x64), Node.js 20, 22, 24. Development needs Node ≥ 24.9 (Jest loads the ESM-only NestJS 12 only from 24.9; `.nvmrc` pins 24). NestJS 12 applications need Node 20.19+ or 22.12+
 
 ## Usage Example
 
