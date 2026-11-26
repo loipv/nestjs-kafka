@@ -132,7 +132,7 @@ export class ConsumerRegistryService implements OnModuleDestroy {
       for (const [key, value] of Object.entries(options.retry ?? {})) {
         if (value !== undefined) retry[key] = value;
       }
-      merged.retry = retry as ConsumerOptions['retry'];
+      merged.retry = retry;
     }
 
     return merged;

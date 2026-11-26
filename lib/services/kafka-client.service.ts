@@ -203,6 +203,8 @@ export class KafkaClient implements OnApplicationShutdown {
   private serializeKey(key: unknown): string | Buffer | null {
     if (key === null || key === undefined) return null;
     if (typeof key === 'string' || Buffer.isBuffer(key)) return key;
+    // The assertion is for no-base-to-string; no-unnecessary-type-assertion flags it since TS 6.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
     return String(key as number | bigint | boolean);
   }
 
